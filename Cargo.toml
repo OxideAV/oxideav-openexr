@@ -20,6 +20,12 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `parse_exr` / `encode_exr_scanline_rgba_float` API plus crate-local
 # `ExrImage` / `ExrError` types and never references `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
+# Distributed-slice auto-registration into `oxideav_core::REGISTRARS`
+# via the `oxideav_core::register!` macro. Tiny crate, no transitive
+# deps; works on every target including wasm. Gated behind the
+# default-on `registry` feature alongside `oxideav-core` so the
+# standalone build path stays decoupled.
+linkme = { version = "0.3", optional = true }
 
 # zlib reader/writer for ZIP_COMPRESSION (compression == 3, 16
 # scanlines per block). Pure-Rust `miniz_oxide` backend matches the
@@ -34,4 +40,4 @@ default = ["registry"]
 # registry. Default-on; turn off for image-library use-cases that just
 # want the standalone `parse_exr` / `encode_exr_scanline_rgba_float`
 # API.
-registry = ["dep:oxideav-core"]
+registry = ["dep:oxideav-core", "dep:linkme"]
