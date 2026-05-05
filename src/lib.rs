@@ -33,10 +33,19 @@
 //! [`encode_exr_scanline_rgba_float`] API plus crate-local [`ExrImage`]
 //! / [`ExrError`] / [`ExrPlane`] types.
 //!
-//! Round-2 followups: PIZ / RLE / B44 / B44A / DWAA / DWAB / Pxr24
-//! compression; tiled format; multi-part files; deep-data scanlines;
-//! UINT pixel type; sub-sampled channels; HDR pixel-format integration
-//! with `oxideav-core`.
+//! Round-2 surface (this crate, this round):
+//! * Compression: NONE, ZIP, ZIPS (per-scanline ZIP), RLE — full
+//!   round-trip (encode + decode).
+//! * UINT pixel type alongside HALF/FLOAT — read + write.
+//! * Sub-sampled channels (`xSampling != 1` or `ySampling != 1`) —
+//!   read; the encoder still requires 1×1 sampling.
+//! * Tiled scanline files — read-only support for `single_tile` files
+//!   in `ONE_LEVEL` mode; multi-resolution mip/rip-map levels are
+//!   deferred to round 3.
+//!
+//! Round-3 followups: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
+//! compression; multi-part files; deep-data scanlines; HDR
+//! pixel-format integration with `oxideav-core`.
 
 pub mod decoder;
 pub mod encoder;
@@ -46,6 +55,8 @@ pub mod header;
 pub mod image;
 #[cfg(feature = "registry")]
 pub mod registry;
+pub mod rle;
+pub mod tiled;
 pub mod types;
 
 /// Codec id for OpenEXR image frames.

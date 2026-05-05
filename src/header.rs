@@ -141,19 +141,17 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
     let version = VersionField::from_u32(c.u32()?);
     if version.multipart {
         return Err(ExrError::unsupported(
-            "multipart EXR files (round-2 followup)".to_string(),
+            "multipart EXR files (round-3 followup)".to_string(),
         ));
     }
     if version.non_image {
         return Err(ExrError::unsupported(
-            "non-image / deep-data EXR files (round-2 followup)".to_string(),
+            "non-image / deep-data EXR files (round-3 followup)".to_string(),
         ));
     }
-    if version.single_tile {
-        return Err(ExrError::unsupported(
-            "tiled EXR files (round-2 followup)".to_string(),
-        ));
-    }
+    // single_tile is supported by [`crate::decoder::parse_exr`] in round 2
+    // (ONE_LEVEL only); the per-file tile-decode path verifies the
+    // tiledesc attribute and offset table further along.
 
     let max_name = if version.long_names { 255 } else { 31 };
 

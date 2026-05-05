@@ -126,9 +126,12 @@ pub fn encode_exr_scanline_rgba_float_with(
             samples.len()
         )));
     }
-    if !matches!(compression, Compression::None | Compression::Zip) {
+    if !matches!(
+        compression,
+        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+    ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (round-1 supports NO_COMPRESSION + ZIP)"
+            "compression {compression:?} (round-2 encoder supports NONE + ZIP + ZIPS + RLE; PIZ/B44 read-only or deferred)"
         )));
     }
 
@@ -164,7 +167,8 @@ pub fn encode_exr_scanline_rgba_float_with(
 
 /// General-purpose scanline encoder. `planes` must contain one
 /// `width * height` `f32` slice per channel in the same alphabetical
-/// order as `channels`.
+/// order as `channels`. UINT channels store the f32 value rounded to
+/// nearest u32 (clamped to `[0, u32::MAX as f32]`).
 pub fn encode_exr_scanline(
     width: u32,
     height: u32,
@@ -183,14 +187,8 @@ pub fn encode_exr_scanline(
     for (ch, p) in channels.iter().zip(planes.iter()) {
         if ch.x_sampling != 1 || ch.y_sampling != 1 {
             return Err(ExrError::unsupported(format!(
-                "channel '{}' x_sampling={} y_sampling={} (round-2 followup)",
+                "channel '{}' x_sampling={} y_sampling={} (sub-sampled encode is round 3; decode supports it)",
                 ch.name, ch.x_sampling, ch.y_sampling
-            )));
-        }
-        if ch.pixel_type == PixelType::Uint {
-            return Err(ExrError::unsupported(format!(
-                "channel '{}' pixelType=UINT (round-2 followup)",
-                ch.name
             )));
         }
         let need = (width as usize) * (height as usize);
@@ -212,6 +210,15 @@ pub fn encode_exr_scanline(
                 win[0].name, win[1].name
             )));
         }
+    }
+
+    if !matches!(
+        compression,
+        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+    ) {
+        return Err(ExrError::unsupported(format!(
+            "compression {compression:?} (round-2 encoder supports NONE + ZIP + ZIPS + RLE)"
+        )));
     }
 
     let bpp: usize = channels
@@ -243,21 +250,44 @@ pub fn encode_exr_scanline(
                             raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes())
                         }
                         PixelType::Float => raw.extend_from_slice(&v.to_le_bytes()),
-                        PixelType::Uint => unreachable!("filtered above"),
+                        PixelType::Uint => {
+                            // Round to nearest, clamp to u32 range, then
+                            // emit as little-endian u32. NaN and negatives
+                            // both map to 0 (collapse the two clauses to
+                            // satisfy clippy::if_same_then_else).
+                            let u = if v.is_nan() || v < 0.0 {
+                                0u32
+                            } else if v >= (u32::MAX as f32) {
+                                u32::MAX
+                            } else {
+                                (v + 0.5) as u32
+                            };
+                            raw.extend_from_slice(&u.to_le_bytes());
+                        }
                     }
                 }
             }
         }
         let payload = match compression {
             Compression::None => raw,
-            Compression::Zip => {
+            Compression::Zip | Compression::Zips => {
                 let mut interleaved = vec![0u8; raw.len()];
                 crate::decoder::apply_zip_interleave(&raw, &mut interleaved);
                 crate::decoder::apply_zip_predictor(&mut interleaved);
                 let compressed = zlib_deflate(&interleaved)?;
                 if compressed.len() >= raw.len() {
-                    // Spec rule: store whichever is smaller.
-                    raw
+                    raw // Spec rule: store whichever is smaller.
+                } else {
+                    compressed
+                }
+            }
+            Compression::Rle => {
+                let mut interleaved = vec![0u8; raw.len()];
+                crate::decoder::apply_zip_interleave(&raw, &mut interleaved);
+                crate::decoder::apply_zip_predictor(&mut interleaved);
+                let compressed = crate::rle::rle_compress(&interleaved);
+                if compressed.len() >= raw.len() {
+                    raw // Spec: store whichever is smaller.
                 } else {
                     compressed
                 }

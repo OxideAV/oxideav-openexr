@@ -1,37 +1,46 @@
 # oxideav-openexr
 
-Pure-Rust OpenEXR (HDR scanline image) reader/writer for [`oxideav`].
+Pure-Rust OpenEXR (HDR scanline + tiled image) reader/writer for [`oxideav`].
 
 Clean-room from the OpenEXR file format spec at
 <https://openexr.com/en/latest/OpenEXRFileLayout.html>. No ILM/Academy
 source, no `exr` / `openexr-rs` Rust crates, and no Imath consulted.
-Empirical validation against the `exrheader` / `exrinfo` / `exrenvmap`
-binaries (used as opaque oracles only).
+Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
+/ `exrmaketiled` binaries (used as opaque oracles only).
 
-## Round-1 surface
+## Capability matrix
 
-| Capability             | Status                                                 |
-| ---------------------- | ------------------------------------------------------ |
-| Magic + version field  | parse + write (format-version 2, no flag bits)         |
-| Attribute table        | parse + write, eight required attributes typed         |
-| Channel list (`chlist`)| parse + write, `HALF` and `FLOAT` pixel types          |
-| Compression: NONE      | parse + write                                          |
-| Compression: ZIP       | parse + write (16 lines/block, zlib via `flate2`)      |
-| Single-part scanline   | yes                                                    |
-| HALF (binary16)        | round-trips every representable pattern (65536 cases)  |
+| Capability                          | Status                                           |
+| ----------------------------------- | ------------------------------------------------ |
+| Magic + version field               | parse + write (format-version 2)                 |
+| Attribute table                     | parse + write, eight required attributes typed   |
+| Channel list (`chlist`)             | parse + write — `HALF`, `FLOAT`, `UINT`          |
+| Compression: `NONE`                 | parse + write                                    |
+| Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib via `flate2`)                |
+| Compression: `ZIPS` (1 line/blk)    | parse + write (zlib via `flate2`)                |
+| Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
+| Single-part scanline                | yes                                              |
+| Single-part tiled (`ONE_LEVEL`)     | parse-only (decode validated against `exrmaketiled`) |
+| Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse-only (round-2 followup for encode) |
+| `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
+| `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
+| Spec predictor + interleave         | bit-exact against `exrmetrics`-produced files    |
 
-## What round 1 does NOT cover
+Cross-validation: `exrmetrics --convert -z none` decodes each compressed
+output bit-exactly back to the input pixels (see
+`tests/exrmetrics_validation.rs`).
 
-* Other compression types: `RLE`, `ZIPS`, `PIZ`, `PXR24`, `B44`, `B44A`,
-  `DWAA`, `DWAB`. Recognised in the type enum but rejected on parse.
-* Tiled format (single-tile bit set in the version field).
+## What this round (round 2) does NOT cover
+
+* Compression types: `PIZ`, `PXR24`, `B44`, `B44A`, `DWAA`, `DWAB`.
+  Recognised in the type enum but rejected on parse.
+* Tiled multi-level (`MIPMAP_LEVELS`, `RIPMAP_LEVELS`) files.
+* Sub-sampled channel encoding (decode supports it).
 * Multi-part files.
 * Deep-data scanlines.
-* `UINT` channel pixel type.
-* Sub-sampled channels (`xSampling != 1` or `ySampling != 1`).
-* HDR pixel-format integration with `oxideav-core` (the `Decoder`/`Encoder`
-  shims clamp to `Rgba` 8-bit pending an `Rgba128Float`-style pixel
-  format addition to core).
+* HDR pixel-format integration with `oxideav-core` (the
+  `Decoder`/`Encoder` shims clamp to `Rgba` 8-bit pending an
+  `Rgba128Float`-style pixel format addition to core).
 
 ## Standalone vs registry-integrated
 
