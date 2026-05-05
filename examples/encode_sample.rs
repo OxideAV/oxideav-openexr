@@ -6,7 +6,9 @@
 use oxideav_openexr::{encode_exr_scanline_rgba_float_with, Compression};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: encode_sample <out.exr>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: encode_sample <out.exr>");
     let w = 4;
     let h = 4;
     let samples: Vec<f32> = (0..(w * h * 4)).map(|i| (i as f32) * 0.05).collect();
