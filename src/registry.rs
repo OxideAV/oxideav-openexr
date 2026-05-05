@@ -51,11 +51,17 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     );
 }
 
-/// OpenEXR is its own container (single image per file). No separate
-/// container registration is needed — round-1 just exposes the codec.
-pub fn register_containers(_reg: &mut ContainerRegistry) {
-    // intentional no-op — round-2 followup if a multi-image .exr
-    // container ever materialises (multipart files).
+/// OpenEXR is its own container (single image per file). Demuxer/muxer
+/// registration is a round-2 followup — for now we only register the
+/// `.exr` extension so cli-convert + the central [`ContainerRegistry`]
+/// resolver can route inputs/outputs to the OpenEXR codec by filename.
+///
+/// The container name matches [`CODEC_ID_STR`] (`"openexr"`) so the
+/// extension lookup lines up with the codec id; this mirrors the
+/// `oxideav-pict` pattern (single-image format where the container is
+/// effectively the codec itself).
+pub fn register_containers(reg: &mut ContainerRegistry) {
+    reg.register_extension("exr", CODEC_ID_STR);
 }
 
 /// Combined registration: codecs + (no-op) containers.
@@ -247,5 +253,26 @@ impl Encoder for ExrEncoder {
     fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exr_extension_resolves_to_openexr_container() {
+        let mut reg = ContainerRegistry::new();
+        register_containers(&mut reg);
+        assert_eq!(reg.container_for_extension("exr"), Some(CODEC_ID_STR));
+    }
+
+    #[test]
+    fn exr_extension_lookup_is_case_insensitive() {
+        let mut reg = ContainerRegistry::new();
+        register_containers(&mut reg);
+        assert_eq!(reg.container_for_extension("EXR"), Some(CODEC_ID_STR));
+        assert_eq!(reg.container_for_extension("Exr"), Some(CODEC_ID_STR));
+        assert_eq!(reg.container_for_extension("eXr"), Some(CODEC_ID_STR));
     }
 }
