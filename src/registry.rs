@@ -15,7 +15,7 @@
 
 use oxideav_core::{
     CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, ContainerRegistry,
-    Decoder, Encoder, Frame, Packet, PixelFormat, TimeBase, VideoFrame, VideoPlane,
+    Decoder, Encoder, Frame, Packet, PixelFormat, RuntimeContext, TimeBase, VideoFrame, VideoPlane,
 };
 
 use crate::decoder::parse_exr;
@@ -64,10 +64,11 @@ pub fn register_containers(reg: &mut ContainerRegistry) {
     reg.register_extension("exr", CODEC_ID_STR);
 }
 
-/// Combined registration: codecs + (no-op) containers.
-pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
-    register_codecs(codecs);
-    register_containers(containers);
+/// Unified entry point: install every codec and container provided by
+/// `oxideav-openexr` into a [`RuntimeContext`].
+pub fn register(ctx: &mut RuntimeContext) {
+    register_codecs(&mut ctx.codecs);
+    register_containers(&mut ctx.containers);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,5 +275,20 @@ mod tests {
         assert_eq!(reg.container_for_extension("EXR"), Some(CODEC_ID_STR));
         assert_eq!(reg.container_for_extension("Exr"), Some(CODEC_ID_STR));
         assert_eq!(reg.container_for_extension("eXr"), Some(CODEC_ID_STR));
+    }
+
+    #[test]
+    fn register_via_runtime_context_installs_factories() {
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+        assert!(
+            ctx.codecs.decoder_ids().next().is_some(),
+            "register(ctx) should install codec decoder factories"
+        );
+        assert_eq!(
+            ctx.containers.container_for_extension("exr"),
+            Some(CODEC_ID_STR),
+            "register(ctx) should install .exr extension hint"
+        );
     }
 }
