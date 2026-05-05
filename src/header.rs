@@ -141,17 +141,17 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
     let version = VersionField::from_u32(c.u32()?);
     if version.multipart {
         return Err(ExrError::unsupported(
-            "multipart EXR files (round-3 followup)".to_string(),
+            "multipart EXR: use parse_exr_multipart()".to_string(),
         ));
     }
     if version.non_image {
         return Err(ExrError::unsupported(
-            "non-image / deep-data EXR files (round-3 followup)".to_string(),
+            "non-image / deep-data EXR files (deferred)".to_string(),
         ));
     }
-    // single_tile is supported by [`crate::decoder::parse_exr`] in round 2
-    // (ONE_LEVEL only); the per-file tile-decode path verifies the
-    // tiledesc attribute and offset table further along.
+    // single_tile is supported (ONE_LEVEL + MIPMAP + RIPMAP in round 3);
+    // the per-file tile-decode path verifies the tiledesc attribute and
+    // offset table further along.
 
     let max_name = if version.long_names { 255 } else { 31 };
 
@@ -184,6 +184,100 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
         attributes,
         end_offset: c.pos,
     })
+}
+
+/// Parse a multi-part EXR file and return one [`ParsedHeader`] per part.
+///
+/// Binary layout:
+/// ```text
+/// magic(4) | version(4)
+/// | header_0 ... NUL   (NUL = empty-name attribute terminator)
+/// | header_1 ... NUL
+/// | ...
+/// | NUL                (extra NUL = end of all headers)
+/// | offset_table_0 | offset_table_1 | ...
+/// ```
+/// The `end_offset` of the LAST returned header points to where the
+/// first offset table begins (the position right after the double-NUL).
+///
+/// Returns `Err` if the magic is bad, the `multipart` bit is NOT set,
+/// or the stream is truncated.
+pub fn parse_multipart_headers(bytes: &[u8]) -> Result<Vec<ParsedHeader>> {
+    let mut c = Cursor::new(bytes);
+    let magic = c.u32()?;
+    if magic != EXR_MAGIC {
+        return Err(ExrError::invalid(format!(
+            "bad magic 0x{magic:08x}, expected 0x{EXR_MAGIC:08x}"
+        )));
+    }
+    let version = VersionField::from_u32(c.u32()?);
+    if !version.multipart {
+        return Err(ExrError::invalid(
+            "parse_multipart_headers called on a non-multipart EXR file".to_string(),
+        ));
+    }
+    if version.non_image {
+        return Err(ExrError::unsupported(
+            "non-image / deep-data EXR files (deferred)".to_string(),
+        ));
+    }
+
+    let max_name = if version.long_names { 255 } else { 31 };
+    let mut parts: Vec<ParsedHeader> = Vec::new();
+
+    loop {
+        // A NUL byte at the start of a header terminates the multi-part
+        // header list (the "extra NUL" after all per-part headers).
+        if c.pos >= bytes.len() {
+            return Err(ExrError::invalid(
+                "EOF before multi-part header double-NUL terminator".to_string(),
+            ));
+        }
+        if bytes[c.pos] == 0 {
+            c.pos += 1; // consume the final NUL
+            break;
+        }
+
+        // Parse one per-part header.
+        let part_start_version = version;
+        let mut attributes = Vec::new();
+        loop {
+            if c.pos >= bytes.len() {
+                return Err(ExrError::invalid(
+                    "EOF inside multi-part header".to_string(),
+                ));
+            }
+            if bytes[c.pos] == 0 {
+                c.pos += 1; // per-part header terminator
+                break;
+            }
+            let name = c.null_string(max_name)?;
+            let type_name = c.null_string(max_name)?;
+            let size = c.i32()?;
+            if size < 0 {
+                return Err(ExrError::invalid(format!(
+                    "attribute {name} has negative size {size}"
+                )));
+            }
+            let payload = c.bytes(size as usize)?.to_vec();
+            let value = parse_attribute_value(&type_name, &payload)?;
+            attributes.push(Attribute { name, value });
+        }
+        parts.push(ParsedHeader {
+            version: part_start_version,
+            attributes,
+            end_offset: c.pos,
+        });
+    }
+
+    // Fix up end_offset: all parts share the same post-all-headers offset
+    // (the position right after the final NUL). Only the last part's
+    // end_offset correctly reflects this; update all parts for consistency.
+    for part in &mut parts {
+        part.end_offset = c.pos;
+    }
+
+    Ok(parts)
 }
 
 /// Decode an attribute payload according to its declared type name. For

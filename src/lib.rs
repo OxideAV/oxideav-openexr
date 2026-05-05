@@ -62,12 +62,14 @@ pub mod types;
 /// Codec id for OpenEXR image frames.
 pub const CODEC_ID_STR: &str = "openexr";
 
-pub use decoder::parse_exr;
+pub use decoder::{mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart};
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,
 };
 pub use error::{ExrError, Result};
-pub use header::{encode_header, parse_header, ParsedHeader, VersionField};
+pub use header::{
+    encode_header, parse_header, parse_multipart_headers, ParsedHeader, VersionField,
+};
 pub use image::{ExrImage, ExrPlane};
 pub use types::{
     Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,

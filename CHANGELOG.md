@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-validation tests against the `exrmetrics --convert -z none` and
   `exrmaketiled` reference binaries (auto-skip when the OpenEXR CLI
   tools are missing).
+- Round-3: multi-level tiled read — `parse_exr` now handles
+  `MIPMAP_LEVELS` and `RIPMAP_LEVELS` tiled files; the full-resolution
+  level (lvlx=0, lvly=0) is decoded, reduction levels are skipped.
+  Offset table is correctly sized via `compute_total_tiles`.
+- Round-3: multi-part EXR read — `parse_exr_multipart` decodes files
+  with version-field bit 12 set; it parses per-part headers, skips the
+  (possibly zero-filled) concatenated offset tables, and routes chunks
+  by embedded part number via sequential scan.
+- Public helpers `mipmap_level_count` and `mipmap_level_dim` for
+  ROUND_DOWN / ROUND_UP level-dimension arithmetic.
+- `parse_multipart_headers` (public) for callers that only need header
+  metadata from multi-part files.
+- Integration tests in `tests/multilevel_validation.rs`: mipmap (ZIP /
+  ZIPS / RLE / NONE / PIZ / B44 / B44A) and ripmap (ZIP / RLE) via
+  `exrmaketiled`; multi-part via `exrmultipart`; unit tests for the
+  level-count / level-dim helpers (all auto-skip if tools absent).
 
 ### Fixed
 
@@ -37,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inverse `raw[i] = (in[i] + raw[i-1] - 128) & 0xFF`). Self-roundtrip
   worked but the bytes were not actually spec-compliant; external
   decoders saw garbage. Fixed and validated against `exrmetrics`.
+- RLE control-byte sign convention was inverted relative to the OpenEXR
+  reference implementation. The spec documentation is ambiguous, but
+  empirical validation against `exrmetrics` and `exrmaketiled` output
+  confirms: `c >= 0` = repeat `(c+1)` times; `c < 0` = literal `(-c)`
+  bytes. The previous implementation had these backwards, producing
+  correct self-roundtrips but failing to decode external RLE files.
 
 ### Changed
 

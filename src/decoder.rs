@@ -1,4 +1,4 @@
-//! Top-level EXR decoder (scanline + tiled).
+//! Top-level EXR decoder (scanline + tiled, single-part + multi-part).
 //!
 //! Walks the header (via [`crate::header::parse_header`]), reads the
 //! offset table, then iterates the data chunks. For scanline files
@@ -6,7 +6,15 @@
 //! files each chunk is `tx(i32) | ty(i32) | lvlx(i32) | lvly(i32) |
 //! size(i32) | payload(size bytes)`.
 //!
-//! Compression coverage (round 2): NONE, ZIP, ZIPS, RLE.
+//! Multi-part files (version-field bit 12 set) contain multiple
+//! sequential headers (each NUL-terminated), a double-NUL end marker,
+//! then concatenated per-part offset tables, then chunks prefixed with
+//! a 4-byte part number. Use [`parse_exr_multipart`] to parse them.
+//!
+//! Compression coverage (round 3): NONE, ZIP, ZIPS, RLE.
+//! PIZ / B44 / B44A / DWAA / DWAB: header-parsed, decoded as
+//! pass-through (uncompressed) where that is correct per spec, otherwise
+//! rejected with a clear unsupported message.
 //!
 //! ZIP-family compression pre-applies two reversible transforms
 //! documented at openexr.com:
@@ -18,9 +26,15 @@
 //! Both transforms are byte-level and trivially invertible — see
 //! [`apply_zip_unpredictor`] / [`apply_zip_uninterleave`] (the encoder
 //! side does the inverse pair).
+//!
+//! Tiled multi-level files (MIPMAP_LEVELS / RIPMAP_LEVELS) are now
+//! supported in read mode: the full-resolution level (lvlx=0, lvly=0)
+//! is decoded into `ExrImage`; higher-resolution levels are skipped.
+//! Level-dimension formulas (ROUND_DOWN / ROUND_UP) follow the
+//! openexr.com spec §2.2.
 
 use crate::error::{ExrError, Result};
-use crate::header::parse_header;
+use crate::header::{parse_header, parse_multipart_headers};
 use crate::image::{ExrImage, ExrPlane};
 use crate::rle::rle_decompress;
 use crate::tiled::tiledesc_from_attribute;
@@ -297,19 +311,19 @@ fn scatter_block_into_planes(
 }
 
 /// Parse a single-part EXR file (scanline OR tiled) from a byte slice.
+///
+/// For multi-part files use [`parse_exr_multipart`] instead; this
+/// function returns an error if the multi-part bit is set.
 pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
     let header = parse_header(bytes)?;
-    let req = extract_required(&header.attributes)?;
-
-    if !matches!(
-        req.compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
-    ) {
-        return Err(ExrError::unsupported(format!(
-            "compression {:?} (round-2 supports NONE + ZIP + ZIPS + RLE; PIZ/B44/B44A/DWAA/DWAB/Pxr24 deferred)",
-            req.compression
-        )));
+    // parse_header already rejects multipart; also reject here explicitly
+    // so callers get a clear message pointing at parse_exr_multipart.
+    if header.version.multipart {
+        return Err(ExrError::unsupported(
+            "multi-part EXR: use parse_exr_multipart()".to_string(),
+        ));
     }
+    let req = extract_required(&header.attributes)?;
 
     let width = req.data_window.width();
     let height = req.data_window.height();
@@ -469,7 +483,115 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
     })
 }
 
-/// Decode a tiled single-part EXR file. ONE_LEVEL only.
+/// Compute the number of mipmap levels for one dimension with the given
+/// rounding mode. `round_up=false` ≡ ROUND_DOWN (spec default), `true`
+/// ≡ ROUND_UP.
+///
+/// Formula: keep halving (floor or ceil) until the dimension reaches 1.
+pub fn mipmap_level_count(mut dim: u32, round_up: bool) -> u32 {
+    let mut n = 1u32;
+    while dim > 1 {
+        dim = if round_up { dim.div_ceil(2) } else { dim / 2 };
+        n += 1;
+    }
+    n
+}
+
+/// Return the width/height of mipmap level `level` (0 = full res).
+pub fn mipmap_level_dim(full_dim: u32, level: u32, round_up: bool) -> u32 {
+    let mut d = full_dim;
+    for _ in 0..level {
+        if d <= 1 {
+            return 1;
+        }
+        d = if round_up { d.div_ceil(2) } else { d / 2 };
+    }
+    d.max(1)
+}
+
+/// Decode a one-level tile payload into the per-channel f32 planes.
+/// `x0,y0` are the top-left pixel coordinates of the tile within the
+/// full-resolution image (level 0,0). `tw,th` are the valid pixel
+/// dimensions of this tile (may be smaller than tdesc tile size at edges).
+#[allow(clippy::too_many_arguments)]
+fn scatter_tile_into_planes(
+    payload: &[u8],
+    sorted_channels: &[Channel],
+    planes: &mut [ExrPlane],
+    width: u32,
+    x0: u32,
+    y0: u32,
+    tw: usize,
+    th: usize,
+    compression: Compression,
+    tile_idx: usize,
+) -> Result<()> {
+    let bpp: usize = sorted_channels
+        .iter()
+        .map(|c| c.pixel_type.bytes_per_sample())
+        .sum();
+    let uncompressed_size = tw * th * bpp;
+
+    let uncompressed: Vec<u8> = match compression {
+        Compression::None => {
+            if payload.len() != uncompressed_size {
+                return Err(ExrError::invalid(format!(
+                    "tile {tile_idx} uncompressed size mismatch: have {} want {}",
+                    payload.len(),
+                    uncompressed_size
+                )));
+            }
+            payload.to_vec()
+        }
+        Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
+        Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
+        _ => {
+            return Err(ExrError::unsupported(format!(
+                "compression {compression:?} not yet implemented for tiled files (tile {tile_idx})"
+            )))
+        }
+    };
+
+    let mut p = 0usize;
+    for line in 0..th {
+        let dst_y = y0 as usize + line;
+        for (ch_idx, ch) in sorted_channels.iter().enumerate() {
+            let plane = &mut planes[ch_idx].samples;
+            for x in 0..tw {
+                let dst_x = x0 as usize + x;
+                let v = match ch.pixel_type {
+                    PixelType::Half => {
+                        let bits = u16::from_le_bytes(uncompressed[p..p + 2].try_into().unwrap());
+                        crate::half::half_to_f32(bits)
+                    }
+                    PixelType::Float => {
+                        f32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap())
+                    }
+                    PixelType::Uint => {
+                        let bits = u32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap());
+                        bits as f32
+                    }
+                };
+                plane[dst_y * width as usize + dst_x] = v;
+                p += ch.pixel_type.bytes_per_sample();
+            }
+        }
+    }
+    if p != uncompressed.len() {
+        return Err(ExrError::invalid(format!(
+            "tile {tile_idx} consumed {p} of {} payload bytes",
+            uncompressed.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Decode a tiled single-part EXR file.
+///
+/// Supports ONE_LEVEL, MIPMAP_LEVELS, and RIPMAP_LEVELS. For multi-level
+/// files, only the full-resolution level (lvlx=0, lvly=0) is decoded into
+/// the returned `ExrImage`; higher-resolution reduction levels are skipped
+/// after being read (so the offset table is consumed correctly).
 fn parse_tiled(
     bytes: &[u8],
     header: &crate::header::ParsedHeader,
@@ -486,9 +608,9 @@ fn parse_tiled(
             )
         })?;
     let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
-    if tdesc.level_mode != 0 {
-        return Err(ExrError::unsupported(format!(
-            "tiled level mode {} (only ONE_LEVEL supported in round 2; mip/rip-map deferred)",
+    if tdesc.level_mode > 2 {
+        return Err(ExrError::invalid(format!(
+            "tiledesc level_mode {} unknown (expected 0=ONE_LEVEL, 1=MIPMAP, 2=RIPMAP)",
             tdesc.level_mode
         )));
     }
@@ -501,21 +623,37 @@ fn parse_tiled(
 
     let width = req.data_window.width();
     let height = req.data_window.height();
-    let tiles_x = width.div_ceil(tdesc.x_size) as usize;
-    let tiles_y = height.div_ceil(tdesc.y_size) as usize;
-    let num_tiles = tiles_x * tiles_y;
+    let round_up = tdesc.round_mode != 0;
+
+    // Compute the total number of tiles across all levels.
+    // ONE_LEVEL (0): single level with ceil(w/tw) * ceil(h/th) tiles.
+    // MIPMAP (1): levels 0..N-1 where N = mipmap_level_count(max(w,h)).
+    //             Within each level l: tiles_x = ceil(lw/tw), tiles_y = ceil(lh/th).
+    //             lw[l] = mipmap_level_dim(w, l, round_up), same for h.
+    // RIPMAP (2): all combinations of x-level (0..Nx-1) and y-level (0..Ny-1).
+    //             Tile (lvlx, lvly) has lw=level_dim(w,lvlx), lh=level_dim(h,lvly).
+    //             Table order: lvlx inner loop, lvly outer loop.
+    let total_tiles = compute_total_tiles(
+        tdesc.level_mode,
+        width,
+        height,
+        tdesc.x_size,
+        tdesc.y_size,
+        round_up,
+    );
 
     let mut pos = header.end_offset;
-    if pos + num_tiles * 8 > bytes.len() {
+    if pos + total_tiles * 8 > bytes.len() {
         return Err(ExrError::invalid(format!(
             "tile offset table runs past EOF (need {} bytes at {pos}, file size {})",
-            num_tiles * 8,
+            total_tiles * 8,
             bytes.len()
         )));
     }
-    let mut offsets = Vec::with_capacity(num_tiles);
-    for _ in 0..num_tiles {
-        offsets.push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize);
+    // Read all offsets into a flat Vec. We'll look up by sequential index.
+    let mut all_offsets: Vec<usize> = Vec::with_capacity(total_tiles);
+    for _ in 0..total_tiles {
+        all_offsets.push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize);
         pos += 8;
     }
 
@@ -526,14 +664,10 @@ fn parse_tiled(
             samples: vec![0.0; (width * height) as usize],
         })
         .collect();
-    let bpp: usize = sorted_channels
-        .iter()
-        .map(|c| c.pixel_type.bytes_per_sample())
-        .sum();
 
-    for (tile_idx, &tile_off) in offsets.iter().enumerate() {
-        let tx = tile_idx % tiles_x;
-        let ty = tile_idx / tiles_x;
+    // Iterate all tiles. For multi-level files we only scatter tiles with
+    // lvlx=0 and lvly=0 (the full-resolution level) into the planes.
+    for (tile_idx, &tile_off) in all_offsets.iter().enumerate() {
         if tile_off + 20 > bytes.len() {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} offset {tile_off} past EOF"
@@ -545,16 +679,6 @@ fn parse_tiled(
         let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
         let payload_size =
             i32::from_le_bytes(bytes[tile_off + 16..tile_off + 20].try_into().unwrap());
-        if lvl_x != 0 || lvl_y != 0 {
-            return Err(ExrError::unsupported(format!(
-                "tile {tile_idx} at level ({lvl_x},{lvl_y}) — multi-level deferred"
-            )));
-        }
-        if h_tx as usize != tx || h_ty as usize != ty {
-            return Err(ExrError::invalid(format!(
-                "tile header coords ({h_tx},{h_ty}) do not match table position ({tx},{ty})",
-            )));
-        }
         if payload_size < 0 {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} negative payload size {payload_size}"
@@ -567,65 +691,35 @@ fn parse_tiled(
                 "tile {tile_idx} payload runs past EOF"
             )));
         }
+
+        // Only decode the full-resolution level.
+        if lvl_x != 0 || lvl_y != 0 {
+            continue;
+        }
+
+        let tx = h_tx as u32;
+        let ty = h_ty as u32;
         let payload = &bytes[pl_start..pl_end];
 
-        let x0 = (tx as u32) * tdesc.x_size;
-        let y0 = (ty as u32) * tdesc.y_size;
+        let x0 = tx * tdesc.x_size;
+        let y0 = ty * tdesc.y_size;
         let x1 = (x0 + tdesc.x_size).min(width);
         let y1 = (y0 + tdesc.y_size).min(height);
         let tw = (x1 - x0) as usize;
         let th = (y1 - y0) as usize;
-        let uncompressed_size = tw * th * bpp;
 
-        let uncompressed: Vec<u8> = match req.compression {
-            Compression::None => {
-                if payload.len() != uncompressed_size {
-                    return Err(ExrError::invalid(format!(
-                        "tile {tile_idx} uncompressed size mismatch: have {} want {}",
-                        payload.len(),
-                        uncompressed_size
-                    )));
-                }
-                payload.to_vec()
-            }
-            Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
-            Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
-            _ => unreachable!("filtered above"),
-        };
-
-        let mut p = 0usize;
-        for line in 0..th {
-            let dst_y = y0 as usize + line;
-            for (ch_idx, ch) in sorted_channels.iter().enumerate() {
-                let plane = &mut planes[ch_idx].samples;
-                for x in 0..tw {
-                    let dst_x = x0 as usize + x;
-                    let v = match ch.pixel_type {
-                        PixelType::Half => {
-                            let bits =
-                                u16::from_le_bytes(uncompressed[p..p + 2].try_into().unwrap());
-                            crate::half::half_to_f32(bits)
-                        }
-                        PixelType::Float => {
-                            f32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap())
-                        }
-                        PixelType::Uint => {
-                            let bits =
-                                u32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap());
-                            bits as f32
-                        }
-                    };
-                    plane[dst_y * width as usize + dst_x] = v;
-                    p += ch.pixel_type.bytes_per_sample();
-                }
-            }
-        }
-        if p != uncompressed.len() {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} consumed {p} of {} payload bytes",
-                uncompressed.len()
-            )));
-        }
+        scatter_tile_into_planes(
+            payload,
+            sorted_channels,
+            &mut planes,
+            width,
+            x0,
+            y0,
+            tw,
+            th,
+            req.compression,
+            tile_idx,
+        )?;
     }
 
     Ok(ExrImage {
@@ -640,6 +734,286 @@ fn parse_tiled(
         planes,
         attributes: header.attributes.clone(),
     })
+}
+
+/// Total number of tile chunks in the offset table for a tiled file.
+///
+/// * ONE_LEVEL (mode=0): `ceil(w/tw) * ceil(h/th)`.
+/// * MIPMAP (mode=1): sum over levels 0..N-1 of
+///   `ceil(lw/tw) * ceil(lh/th)`.
+/// * RIPMAP (mode=2): sum over (lvlx, lvly) pairs (all combinations of
+///   x-levels and y-levels) of `ceil(lw/tw) * ceil(lh/th)`.
+fn compute_total_tiles(
+    level_mode: u8,
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    round_up: bool,
+) -> usize {
+    match level_mode {
+        0 => {
+            // ONE_LEVEL
+            let tx = width.div_ceil(tile_w) as usize;
+            let ty = height.div_ceil(tile_h) as usize;
+            tx * ty
+        }
+        1 => {
+            // MIPMAP: levels governed by the larger dimension.
+            let n = mipmap_level_count(width.max(height), round_up);
+            let mut total = 0usize;
+            for l in 0..n {
+                let lw = mipmap_level_dim(width, l, round_up);
+                let lh = mipmap_level_dim(height, l, round_up);
+                total += lw.div_ceil(tile_w) as usize * lh.div_ceil(tile_h) as usize;
+            }
+            total
+        }
+        2 => {
+            // RIPMAP: independent x-levels and y-levels.
+            let nx = mipmap_level_count(width, round_up);
+            let ny = mipmap_level_count(height, round_up);
+            let mut total = 0usize;
+            for ly in 0..ny {
+                let lh = mipmap_level_dim(height, ly, round_up);
+                for lx in 0..nx {
+                    let lw = mipmap_level_dim(width, lx, round_up);
+                    total += lw.div_ceil(tile_w) as usize * lh.div_ceil(tile_h) as usize;
+                }
+            }
+            total
+        }
+        _ => 0,
+    }
+}
+
+/// Parse a multi-part EXR file and return one `ExrImage` per part.
+///
+/// Multi-part files are identified by version-field bit 12 being set.
+/// The binary layout is:
+///
+/// ```text
+/// magic(4) | version(4)
+/// | header_0 ... NUL | header_1 ... NUL | NUL   (extra NUL = end)
+/// | offset_table_0(chunkCount×8) | offset_table_1(chunkCount×8) | ...
+/// | chunks (each: i32 part_number | i32 Y | i32 size | payload[size])
+/// ```
+///
+/// The `chunkCount` attribute is mandatory in multi-part files.
+///
+/// **Offset table robustness**: some EXR encoders (including the reference
+/// `exrmultipart -combine`) emit zero-filled offset table entries for
+/// parts beyond the first. We therefore decode chunks by sequential scan
+/// rather than index-lookup, which handles both fully-populated and
+/// zero-padded tables correctly.
+///
+/// Only `scanlineimage` part type is supported in this round.
+pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
+    let parts = parse_multipart_headers(bytes)?;
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "multi-part file has no parts".to_string(),
+        ));
+    }
+
+    // Collect chunkCount per part (mandatory in multi-part files).
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let cc = find_chunk_count(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part part {i} missing required chunkCount attribute"
+            ))
+        })?;
+        chunk_counts.push(cc);
+    }
+
+    // Skip past the offset tables (may be zero-filled; we scan linearly).
+    // All parts' tables are stored consecutively; each table has
+    // `chunkCount` u64 entries.
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let tables_start = parts.last().unwrap().end_offset;
+    let chunk_scan_start = tables_start + total_chunks * 8;
+    if chunk_scan_start > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "multi-part offset tables run past EOF (need {}, have {})",
+            chunk_scan_start,
+            bytes.len()
+        )));
+    }
+
+    // Prepare per-part state.
+    let mut part_reqs: Vec<RequiredAttrs> = Vec::with_capacity(parts.len());
+    let mut part_sorted_channels: Vec<Vec<Channel>> = Vec::with_capacity(parts.len());
+    let mut planes_list: Vec<Vec<ExrPlane>> = Vec::with_capacity(parts.len());
+
+    for (part_idx, part) in parts.iter().enumerate() {
+        let req = extract_required(&part.attributes)?;
+        if !matches!(
+            req.compression,
+            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        ) {
+            return Err(ExrError::unsupported(format!(
+                "multi-part part {part_idx}: compression {:?} not yet implemented",
+                req.compression
+            )));
+        }
+        let width = req.data_window.width();
+        let height = req.data_window.height();
+        if width == 0 || height == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part part {part_idx}: dataWindow {width}×{height} must be > 0"
+            )));
+        }
+
+        let mut sorted_channels = req.channels.clone();
+        sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let planes: Vec<ExrPlane> = sorted_channels
+            .iter()
+            .map(|c| {
+                let pw = subsampled_dim(width, c.x_sampling as u32) as usize;
+                let ph = subsampled_dim(height, c.y_sampling as u32) as usize;
+                ExrPlane {
+                    name: c.name.clone(),
+                    samples: vec![0.0; pw * ph],
+                }
+            })
+            .collect();
+
+        part_reqs.push(req);
+        part_sorted_channels.push(sorted_channels);
+        planes_list.push(planes);
+    }
+
+    // Sequential chunk scan: each chunk starts with i32 part_number,
+    // followed by i32 Y, i32 size, payload.
+    let mut scan_pos = chunk_scan_start;
+    for _chunk_global_idx in 0..total_chunks {
+        if scan_pos + 12 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part: unexpected EOF at chunk scan position {scan_pos}"
+            )));
+        }
+        let part_num = i32::from_le_bytes(bytes[scan_pos..scan_pos + 4].try_into().unwrap());
+        let y_coord = i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+        let payload_size =
+            i32::from_le_bytes(bytes[scan_pos + 8..scan_pos + 12].try_into().unwrap());
+
+        if part_num < 0 || part_num as usize >= parts.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part chunk at {scan_pos}: part_number={part_num} out of range 0..{}",
+                parts.len()
+            )));
+        }
+        if payload_size < 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part chunk at {scan_pos}: negative payload size {payload_size}"
+            )));
+        }
+        let pl_start = scan_pos + 12;
+        let pl_end = pl_start + payload_size as usize;
+        if pl_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part chunk at {scan_pos}: payload runs past EOF"
+            )));
+        }
+        let payload = &bytes[pl_start..pl_end];
+
+        let part_idx = part_num as usize;
+        let req = &part_reqs[part_idx];
+        let sorted_channels = &part_sorted_channels[part_idx];
+        let width = req.data_window.width();
+        let height = req.data_window.height();
+
+        let row_in_image = (y_coord - req.data_window.y_min) as i64;
+        if row_in_image < 0 || row_in_image as u32 >= height {
+            return Err(ExrError::invalid(format!(
+                "multi-part part {part_idx} chunk Y={y_coord} outside dataWindow"
+            )));
+        }
+        let block_y0 = row_in_image as u32;
+        let block_h = req.compression.scanlines_per_block();
+        let lines_in_block = ((height - block_y0).min(block_h)) as usize;
+
+        let uncompressed_size: usize = sorted_channels
+            .iter()
+            .map(|ch| {
+                let ys = ch.y_sampling as u32;
+                let lines = (0..lines_in_block as u32)
+                    .filter(|&l| (block_y0 + l) % ys == 0)
+                    .count();
+                let xs = ch.x_sampling as u32;
+                let pw = subsampled_dim(width, xs) as usize;
+                lines * ch.pixel_type.bytes_per_sample() * pw
+            })
+            .sum();
+
+        let uncompressed: Vec<u8> = match req.compression {
+            Compression::None => {
+                if payload.len() != uncompressed_size {
+                    return Err(ExrError::invalid(format!(
+                        "multi-part part {part_idx}: size mismatch: have {} want {}",
+                        payload.len(),
+                        uncompressed_size
+                    )));
+                }
+                payload.to_vec()
+            }
+            Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
+            Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
+            _ => unreachable!("filtered above"),
+        };
+
+        scatter_block_into_planes(
+            &uncompressed,
+            sorted_channels,
+            &mut planes_list[part_idx],
+            width,
+            height,
+            block_y0,
+            lines_in_block,
+        )?;
+
+        scan_pos = pl_end;
+    }
+
+    // Assemble output images, consuming the planes_list in order.
+    let mut images: Vec<ExrImage> = Vec::with_capacity(parts.len());
+    let mut planes_iter = planes_list.into_iter();
+    for (part_idx, part) in parts.iter().enumerate() {
+        let req = &part_reqs[part_idx];
+        images.push(ExrImage {
+            data_window: req.data_window,
+            display_window: req.display_window,
+            line_order: req.line_order,
+            compression: req.compression,
+            pixel_aspect_ratio: req.pixel_aspect_ratio,
+            screen_window_center: req.screen_window_center,
+            screen_window_width: req.screen_window_width,
+            channels: part_sorted_channels[part_idx].clone(),
+            planes: planes_iter.next().unwrap(),
+            attributes: part.attributes.clone(),
+        });
+    }
+
+    Ok(images)
+}
+
+/// Find the `chunkCount` attribute in a part's attribute list.
+fn find_chunk_count(attrs: &[Attribute]) -> Option<usize> {
+    for a in attrs {
+        if a.name == "chunkCount" {
+            if let AttributeValue::Other { type_name, data } = &a.value {
+                if type_name == "int" && data.len() == 4 {
+                    let v = i32::from_le_bytes(data[..4].try_into().unwrap());
+                    if v >= 0 {
+                        return Some(v as usize);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// zlib-decompress `data` into a buffer at most `expected_size` bytes

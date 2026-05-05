@@ -21,6 +21,9 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
 | Single-part scanline                | yes                                              |
 | Single-part tiled (`ONE_LEVEL`)     | parse-only (decode validated against `exrmaketiled`) |
+| Tiled `MIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
+| Tiled `RIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
+| Multi-part EXR (scanline parts)     | parse-only — `parse_exr_multipart` returns `Vec<ExrImage>` |
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse-only (round-2 followup for encode) |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
@@ -28,15 +31,15 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 
 Cross-validation: `exrmetrics --convert -z none` decodes each compressed
 output bit-exactly back to the input pixels (see
-`tests/exrmetrics_validation.rs`).
+`tests/exrmetrics_validation.rs`). Mipmap / ripmap levels validated
+against `exrmaketiled`; multi-part validated against `exrmultipart`
+(see `tests/multilevel_validation.rs`).
 
-## What this round (round 2) does NOT cover
+## What this crate does NOT yet cover
 
 * Compression types: `PIZ`, `PXR24`, `B44`, `B44A`, `DWAA`, `DWAB`.
   Recognised in the type enum but rejected on parse.
-* Tiled multi-level (`MIPMAP_LEVELS`, `RIPMAP_LEVELS`) files.
 * Sub-sampled channel encoding (decode supports it).
-* Multi-part files.
 * Deep-data scanlines.
 * HDR pixel-format integration with `oxideav-core` (the
   `Decoder`/`Encoder` shims clamp to `Rgba` 8-bit pending an
