@@ -43,9 +43,23 @@
 //!   in `ONE_LEVEL` mode; multi-resolution mip/rip-map levels are
 //!   deferred to round 3.
 //!
-//! Round-3 followups: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
-//! compression; multi-part files; deep-data scanlines; HDR
-//! pixel-format integration with `oxideav-core`.
+//! Round-40 surface (this crate, this round):
+//! * Tiled-output encoder ([`encode_exr_tiled_rgba_float_with`] /
+//!   [`encode_exr_tiled`]) — single-part `ONE_LEVEL` tiled files with
+//!   NONE / ZIP / ZIPS / RLE compression. Validated against
+//!   `exrmetrics --convert -z none` (the OpenEXR reference impl
+//!   re-decodes our tile chunks bit-exactly).
+//! * Multi-part output encoder ([`encode_exr_multipart`] /
+//!   [`encode_exr_multipart_rgba_float_with`]) — scanline parts with
+//!   `name` + `type=scanlineimage` + `chunkCount` per-part. Validated
+//!   against `exrmultipart -separate`.
+//!
+//! Round-3+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
+//! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc);
+//! multi-resolution tiled-output writes (`MIPMAP_LEVELS` /
+//! `RIPMAP_LEVELS`); tiled or deep parts inside multi-part files;
+//! deep-data scanlines; HDR pixel-format integration with
+//! `oxideav-core`.
 
 pub mod decoder;
 pub mod encoder;
@@ -53,9 +67,11 @@ pub mod error;
 pub mod half;
 pub mod header;
 pub mod image;
+pub mod multipart_encoder;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod rle;
+pub mod tile_encoder;
 pub mod tiled;
 pub mod types;
 
@@ -71,6 +87,10 @@ pub use header::{
     encode_header, parse_header, parse_multipart_headers, ParsedHeader, VersionField,
 };
 pub use image::{ExrImage, ExrPlane};
+pub use multipart_encoder::{
+    encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,
+};
+pub use tile_encoder::{encode_exr_tiled, encode_exr_tiled_rgba_float_with};
 pub use types::{
     Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
 };

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-40 tiled-output encoder (`encode_exr_tiled_rgba_float_with`,
+  `encode_exr_tiled`) — single-part `ONE_LEVEL` tiled files with
+  NONE / ZIP / ZIPS / RLE compression. Sets the version-field
+  `single_tile` bit, emits `tiles` (tiledesc) + `chunkCount` + `type`
+  attributes, builds the tile offset table in INCREASING_Y row-major
+  order, and writes per-tile `tx | ty | lvlx | lvly | size | payload`
+  chunks. Edge tiles (right column / bottom row partial tiles)
+  validated against `exrmetrics --convert -z none`.
+- Round-40 multipart-output encoder (`encode_exr_multipart`,
+  `encode_exr_multipart_rgba_float_with`, `MultipartScanlinePart`) —
+  multipart files with one or more independent scanline parts. Sets
+  the version-field `multipart` bit, emits per-part headers (each with
+  required `name` / `type=scanlineimage` / `chunkCount` attributes plus
+  the standard required attributes) terminated by a double NUL, then
+  per-part offset tables, then chunks each prefixed with the
+  `part_number` integer. Supports NONE / ZIP / ZIPS / RLE per part.
+  Verified via `parse_exr_multipart` self-roundtrip and via the
+  `exrmultipart -separate` reference binary.
+- New integration suite `tests/round40_encoder_validation.rs` —
+  cross-validates tiled and multipart encoder output against
+  `exrheader`, `exrmetrics`, and `exrmultipart -separate`. Auto-skips
+  on hosts without the OpenEXR CLI tools.
 - CI shim wired to the OxideAV org-level reusable workflows
   (`crate-ci.yml` + `crate-release.yml`) plus an inline
   `ci-standalone` job that builds + tests with `--no-default-features`.

@@ -19,11 +19,11 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib via `flate2`)                |
 | Compression: `ZIPS` (1 line/blk)    | parse + write (zlib via `flate2`)                |
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
-| Single-part scanline                | yes                                              |
-| Single-part tiled (`ONE_LEVEL`)     | parse-only (decode validated against `exrmaketiled`) |
+| Single-part scanline                | parse + write                                    |
+| Single-part tiled (`ONE_LEVEL`)     | parse + write (validated against `exrmetrics`)   |
 | Tiled `MIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
 | Tiled `RIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
-| Multi-part EXR (scanline parts)     | parse-only — `parse_exr_multipart` returns `Vec<ExrImage>` |
+| Multi-part EXR (scanline parts)     | parse + write (validated against `exrmultipart -separate`) |
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse-only (round-2 followup for encode) |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
@@ -38,7 +38,14 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 ## What this crate does NOT yet cover
 
 * Compression types: `PIZ`, `PXR24`, `B44`, `B44A`, `DWAA`, `DWAB`.
-  Recognised in the type enum but rejected on parse.
+  Recognised in the type enum but rejected on parse. PIZ requires a
+  wavelet + Huffman coder for which we don't yet have a clean-room
+  trace doc; the openexr.com public spec page gives only a one-line
+  summary.
+* Tiled-output encode is `ONE_LEVEL` only; `MIPMAP_LEVELS` /
+  `RIPMAP_LEVELS` writers are deferred (decoder reads them).
+* Multipart-output encode covers scanline parts only; tiled or deep
+  parts not yet emitted.
 * Sub-sampled channel encoding (decode supports it).
 * Deep-data scanlines.
 * HDR pixel-format integration with `oxideav-core` (the

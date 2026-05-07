@@ -325,6 +325,12 @@ pub fn encode_exr_scanline(
 }
 
 fn zlib_deflate(data: &[u8]) -> Result<Vec<u8>> {
+    zlib_deflate_pub(data)
+}
+
+/// Public-in-crate alias of [`zlib_deflate`] for use by sibling encoder
+/// modules (tile_encoder, multipart_encoder).
+pub(crate) fn zlib_deflate_pub(data: &[u8]) -> Result<Vec<u8>> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression as FlateLevel;
     use std::io::Write;
