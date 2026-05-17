@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "oxideav-openexr"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "flate2",
  "oxideav-core",
