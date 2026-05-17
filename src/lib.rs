@@ -54,14 +54,31 @@
 //!   `name` + `type=scanlineimage` + `chunkCount` per-part. Validated
 //!   against `exrmultipart -separate`.
 //!
-//! Round-3+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
-//! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc);
-//! multi-resolution tiled-output writes (`MIPMAP_LEVELS` /
+//! Round-73 surface (this crate, this round):
+//! * Sub-sampled channel ENCODE — [`encode_exr_scanline`] (and the
+//!   multipart variant) now honour `xSampling != 1` / `ySampling != 1`
+//!   per the openexr.com spec, matching the decoder's existing sub-
+//!   sampled scatter layout. The earlier "round-3 followup" guard is
+//!   gone; round-trip + `exrmetrics --convert` cross-checked.
+//! * Deep scanline READ + WRITE scaffold (single-part) —
+//!   [`parse_exr_deep_scanline`] / [`encode_exr_deep_scanline`] +
+//!   [`DeepExrImage`] / [`DeepScanlineInput`]. NONE / RLE / ZIPS only
+//!   (the spec page lists ZIP too but `exrinfo` rejects deep ZIP with
+//!   EXR_ERR_INVALID_ATTR, so we follow the reference). Pixel offset
+//!   table + non-interleaved sample data layout per the openexr.com
+//!   File Layout page; cross-validated against `exrheader`, `exrinfo`,
+//!   and `exrmetrics --convert -z none`. Multi-part deep + deep-tiled
+//!   are followups.
+//!
+//! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
+//! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
+//! B44 / Pxr24 documented at high-level only, byte layout not in the
+//! public spec); multi-resolution tiled-output writes (`MIPMAP_LEVELS` /
 //! `RIPMAP_LEVELS`); tiled or deep parts inside multi-part files;
-//! deep-data scanlines; HDR pixel-format integration with
-//! `oxideav-core`.
+//! deep-tile data; HDR pixel-format integration with `oxideav-core`.
 
 pub mod decoder;
+pub mod deep;
 pub mod encoder;
 pub mod error;
 pub mod half;
@@ -79,6 +96,9 @@ pub mod types;
 pub const CODEC_ID_STR: &str = "openexr";
 
 pub use decoder::{mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart};
+pub use deep::{
+    encode_exr_deep_scanline, parse_exr_deep_scanline, DeepExrImage, DeepScanlineInput,
+};
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,
 };

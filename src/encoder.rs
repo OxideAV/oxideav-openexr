@@ -19,7 +19,16 @@
 //! transforms and run the result through zlib. If the compressed-plus-
 //! transformed buffer would be larger than the raw payload, the spec
 //! says we MUST emit the raw bytes — that case is handled below.
+//!
+//! Sub-sampled channels (`xSampling != 1` or `ySampling != 1`): for each
+//! image scanline `y`, only channels with `y % ySampling == 0`
+//! contribute samples to the block payload (per the openexr.com spec),
+//! and each contributing channel writes `subsampled_dim(width, xSampling)`
+//! samples. The per-channel plane the caller supplies must already be
+//! sized to its sub-sampled dimensions (matches the decoder's `ExrPlane`
+//! layout).
 
+use crate::decoder::subsampled_dim;
 use crate::error::{ExrError, Result};
 use crate::header::{encode_header, VersionField};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
@@ -185,16 +194,18 @@ pub fn encode_exr_scanline(
         )));
     }
     for (ch, p) in channels.iter().zip(planes.iter()) {
-        if ch.x_sampling != 1 || ch.y_sampling != 1 {
-            return Err(ExrError::unsupported(format!(
-                "channel '{}' x_sampling={} y_sampling={} (sub-sampled encode is round 3; decode supports it)",
+        if ch.x_sampling <= 0 || ch.y_sampling <= 0 {
+            return Err(ExrError::invalid(format!(
+                "channel '{}' x_sampling={} y_sampling={} (must be positive)",
                 ch.name, ch.x_sampling, ch.y_sampling
             )));
         }
-        let need = (width as usize) * (height as usize);
+        let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
+        let ph = subsampled_dim(height, ch.y_sampling as u32) as usize;
+        let need = pw * ph;
         if p.len() != need {
             return Err(ExrError::invalid(format!(
-                "channel '{}' plane length {} != width*height = {need}",
+                "channel '{}' plane length {} != subsampled width*height = {pw}*{ph} = {need}",
                 ch.name,
                 p.len()
             )));
@@ -221,11 +232,6 @@ pub fn encode_exr_scanline(
         )));
     }
 
-    let bpp: usize = channels
-        .iter()
-        .map(|c| c.pixel_type.bytes_per_sample())
-        .sum();
-    let row_bytes = bpp * width as usize;
     let block_h = compression.scanlines_per_block();
     let num_blocks = height.div_ceil(block_h) as usize;
 
@@ -233,18 +239,28 @@ pub fn encode_exr_scanline(
     let header_bytes = encode_header(VersionField::from_u32(2), &attributes);
 
     // Build each block's payload (raw uncompressed bytes), then
-    // compress if requested.
+    // compress if requested. With sub-sampling, the per-line bytes
+    // depend on which channels' y_sampling divide the image row: only
+    // those channels contribute samples, and each contributes its
+    // sub-sampled-width count.
     let mut block_payloads: Vec<Vec<u8>> = Vec::with_capacity(num_blocks);
     for block_idx in 0..num_blocks {
         let row0 = block_idx as u32 * block_h;
         let lines_in_block = (height - row0).min(block_h) as usize;
-        let mut raw = Vec::with_capacity(lines_in_block * row_bytes);
+        let mut raw: Vec<u8> = Vec::new();
         for line in 0..lines_in_block {
             let y = row0 as usize + line;
             for (ch_idx, ch) in channels.iter().enumerate() {
+                let ys = ch.y_sampling as u32;
+                if (y as u32) % ys != 0 {
+                    continue;
+                }
+                let xs = ch.x_sampling as u32;
+                let pw = subsampled_dim(width, xs) as usize;
+                let plane_y = y / ys as usize;
                 let plane = planes[ch_idx];
-                for x in 0..width as usize {
-                    let v = plane[y * width as usize + x];
+                for x in 0..pw {
+                    let v = plane[plane_y * pw + x];
                     match ch.pixel_type {
                         PixelType::Half => {
                             raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes())

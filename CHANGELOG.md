@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-73 sub-sampled channel **encoder**. `encode_exr_scanline` and
+  `encode_exr_multipart` now honour `xSampling != 1` / `ySampling != 1`
+  per the openexr.com spec, matching the per-line "channels whose
+  ySampling divides this row contribute samples; each channel writes
+  sub-sampled width samples" rule the decoder already uses. The
+  earlier explicit "(sub-sampled encode is round 3; decode supports
+  it)" rejection is gone. Cross-validated against
+  `exrmetrics --convert -z none` on a 4:2:0-style chroma layout
+  (Y at 1×1, U/V at 2×2) — see `tests/subsampled_encoder.rs`.
+- Round-73 deep-scanline read + write scaffold. New public API:
+  `parse_exr_deep_scanline`, `encode_exr_deep_scanline`, `DeepExrImage`,
+  `DeepScanlineInput`. Single-part deep files (version-field bit 11,
+  `type = "deepscanline"`, required `chunkCount` + `maxSamplesPerPixel`
+  + `version` attributes) round-trip through both our reader and the
+  reference `exrmetrics --convert -z none` pipeline. The pixel offset
+  table (cumulative-inclusive `int` per column) plus non-interleaved
+  per-channel sample data layout follows the openexr.com File Layout
+  page §Deep scanline part verbatim. Compression set: `NONE` / `RLE` /
+  `ZIPS`. `ZIP_COMPRESSION` is intentionally rejected because the
+  reference `exrinfo` returns `EXR_ERR_INVALID_ATTR: Invalid compression
+  for deep data` on deep ZIP files — the spec page lists ZIP but the
+  reference disagrees, and we side with the reference. Validated via
+  `exrheader` + `exrinfo` + `exrmetrics --convert` in
+  `tests/deep_validation.rs`.
+
+### Changed
+
+- Lib top-level docs updated to describe the round-73 surface and to
+  note B44 / Pxr24 cannot be implemented from the openexr.com public
+  documentation alone (algorithm sketched in the Technical
+  Introduction but exact byte layout is left to the reference source,
+  which is off-limits).
+
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.1...v0.0.2) - 2026-05-07
 
 ### Other

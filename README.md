@@ -24,7 +24,8 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Tiled `MIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
 | Tiled `RIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
 | Multi-part EXR (scanline parts)     | parse + write (validated against `exrmultipart -separate`) |
-| Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse-only (round-2 followup for encode) |
+| Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse + write (validated against `exrmetrics --convert`) |
+| Deep scanline (`deepscanline`)      | parse + write — NONE/RLE/ZIPS (validated against `exrheader` + `exrmetrics --convert -z none`) |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
 | Spec predictor + interleave         | bit-exact against `exrmetrics`-produced files    |
@@ -41,13 +42,17 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
   Recognised in the type enum but rejected on parse. PIZ requires a
   wavelet + Huffman coder for which we don't yet have a clean-room
   trace doc; the openexr.com public spec page gives only a one-line
-  summary.
+  summary. B44/Pxr24 are mentioned in the Technical Introduction at a
+  high level only — exact 14-byte block layout is left to the
+  reference source, which we don't consult.
+* `ZIP_COMPRESSION` is rejected for deep data (matching the openexr.com
+  reference `exrinfo`, which returns `EXR_ERR_INVALID_ATTR` on deep ZIP
+  files even though the spec page text lists ZIP as permitted).
 * Tiled-output encode is `ONE_LEVEL` only; `MIPMAP_LEVELS` /
   `RIPMAP_LEVELS` writers are deferred (decoder reads them).
 * Multipart-output encode covers scanline parts only; tiled or deep
   parts not yet emitted.
-* Sub-sampled channel encoding (decode supports it).
-* Deep-data scanlines.
+* Multi-part deep + deep-tiled files.
 * HDR pixel-format integration with `oxideav-core` (the
   `Decoder`/`Encoder` shims clamp to `Rgba` 8-bit pending an
   `Rgba128Float`-style pixel format addition to core).

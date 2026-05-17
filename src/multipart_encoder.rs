@@ -21,7 +21,7 @@
 //! followup. The decoder's `parse_exr_multipart` already round-trips
 //! files we emit here.
 
-use crate::decoder::{apply_zip_interleave, apply_zip_predictor};
+use crate::decoder::{apply_zip_interleave, apply_zip_predictor, subsampled_dim};
 use crate::error::{ExrError, Result};
 use crate::header::{encode_attribute_value, VersionField};
 use crate::types::{
@@ -87,16 +87,18 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
             }
         }
         for (ch, plane) in p.channels.iter().zip(p.planes.iter()) {
-            if ch.x_sampling != 1 || ch.y_sampling != 1 {
-                return Err(ExrError::unsupported(format!(
-                    "part '{}': sub-sampled channels in multipart encode (not yet)",
-                    p.name
+            if ch.x_sampling <= 0 || ch.y_sampling <= 0 {
+                return Err(ExrError::invalid(format!(
+                    "part '{}': channel '{}' x_sampling={} y_sampling={} (must be positive)",
+                    p.name, ch.name, ch.x_sampling, ch.y_sampling
                 )));
             }
-            let need = (p.width as usize) * (p.height as usize);
+            let pw = subsampled_dim(p.width, ch.x_sampling as u32) as usize;
+            let ph = subsampled_dim(p.height, ch.y_sampling as u32) as usize;
+            let need = pw * ph;
             if plane.len() != need {
                 return Err(ExrError::invalid(format!(
-                    "part '{}': channel '{}' plane length {} != width*height = {need}",
+                    "part '{}': channel '{}' plane length {} != subsampled width*height = {pw}*{ph} = {need}",
                     p.name,
                     ch.name,
                     plane.len()
@@ -142,25 +144,26 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
     let mut part_block_payloads: Vec<Vec<Vec<u8>>> = Vec::with_capacity(parts.len());
     for p in parts {
         let block_h = p.compression.scanlines_per_block();
-        let bpp: usize = p
-            .channels
-            .iter()
-            .map(|c| c.pixel_type.bytes_per_sample())
-            .sum();
-        let row_bytes = bpp * p.width as usize;
         let cc = chunk_counts[part_block_payloads.len()] as usize;
 
         let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(cc);
         for block_idx in 0..cc {
             let row0 = block_idx as u32 * block_h;
             let lines_in_block = (p.height - row0).min(block_h) as usize;
-            let mut raw = Vec::with_capacity(lines_in_block * row_bytes);
+            let mut raw: Vec<u8> = Vec::new();
             for line in 0..lines_in_block {
                 let y = row0 as usize + line;
                 for (ch_idx, ch) in p.channels.iter().enumerate() {
+                    let ys = ch.y_sampling as u32;
+                    if (y as u32) % ys != 0 {
+                        continue;
+                    }
+                    let xs = ch.x_sampling as u32;
+                    let pw = subsampled_dim(p.width, xs) as usize;
+                    let plane_y = y / ys as usize;
                     let plane = p.planes[ch_idx];
-                    for x in 0..p.width as usize {
-                        let v = plane[y * p.width as usize + x];
+                    for x in 0..pw {
+                        let v = plane[plane_y * pw + x];
                         match ch.pixel_type {
                             PixelType::Half => {
                                 raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes())
