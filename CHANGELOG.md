@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.2...v0.0.3) - 2026-05-17
+
+### Other
+
+- round 73: sub-sampled channel encoder + deep scanline read/write scaffold
+
 ### Added
 
 - Round-73 sub-sampled channel **encoder**. `encode_exr_scanline` and
