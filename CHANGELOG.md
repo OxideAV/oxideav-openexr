@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-78 `MIPMAP_LEVELS` tiled-output encoder. New public API:
+  `encode_exr_tiled_rgba_float_mipmap_box_filter`, `encode_exr_tiled_mipmap`,
+  `build_box_filter_pyramid`, `mipmap_level_count_round_down`, plus the
+  `MipmapLevel` struct. Writes single-part tiled EXR files with
+  `tiledesc.level_mode = 1` (MIPMAP_LEVELS, ROUND_DOWN), full-pyramid
+  chunk count, and tile chunks emitted in the spec's iteration order
+  (levels 0..N-1, INCREASING_Y row-major within each level, `lvlx ==
+  lvly == level` per the openexr.com Technical Introduction). Supports
+  NONE / ZIP / ZIPS / RLE compression. Cross-validated against
+  `exrmetrics --convert -z none` (which decodes our pyramid back to an
+  uncompressed scanline file pixel-exactly at level 0) and `exrheader`
+  (which reports the file as tiled mipmap). See
+  `tests/mipmap_encoder_validation.rs`. The `build_box_filter_pyramid`
+  helper synthesises a ROUND_DOWN 2×2 box-filter pyramid for callers
+  who don't need to control filtering; callers needing custom filtering
+  build the `Vec<MipmapLevel>` themselves and call `encode_exr_tiled_mipmap`.
 - Round-73 sub-sampled channel **encoder**. `encode_exr_scanline` and
   `encode_exr_multipart` now honour `xSampling != 1` / `ySampling != 1`
   per the openexr.com spec, matching the per-line "channels whose

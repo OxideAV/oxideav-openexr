@@ -21,7 +21,8 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
 | Single-part scanline                | parse + write                                    |
 | Single-part tiled (`ONE_LEVEL`)     | parse + write (validated against `exrmetrics`)   |
-| Tiled `MIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
+| Tiled `MIPMAP_LEVELS` (read)        | parse-only — full-res level decoded, reductions skipped |
+| Tiled `MIPMAP_LEVELS` (write)       | full pyramid encode (NONE / ZIP / ZIPS / RLE) — validated against `exrmetrics --convert` and `exrheader` |
 | Tiled `RIPMAP_LEVELS`               | parse-only — full-res level decoded, reductions skipped |
 | Multi-part EXR (scanline parts)     | parse + write (validated against `exrmultipart -separate`) |
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse + write (validated against `exrmetrics --convert`) |
@@ -48,8 +49,9 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 * `ZIP_COMPRESSION` is rejected for deep data (matching the openexr.com
   reference `exrinfo`, which returns `EXR_ERR_INVALID_ATTR` on deep ZIP
   files even though the spec page text lists ZIP as permitted).
-* Tiled-output encode is `ONE_LEVEL` only; `MIPMAP_LEVELS` /
-  `RIPMAP_LEVELS` writers are deferred (decoder reads them).
+* Tiled-output encode now covers `ONE_LEVEL` + `MIPMAP_LEVELS` (full
+  pyramid, ROUND_DOWN, NONE / ZIP / ZIPS / RLE). `RIPMAP_LEVELS` writer
+  is still deferred (decoder reads it).
 * Multipart-output encode covers scanline parts only; tiled or deep
   parts not yet emitted.
 * Multi-part deep + deep-tiled files.
