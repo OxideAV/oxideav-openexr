@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-92 multi-part deep scanline READ. New public API:
+  `parse_exr_deep_multipart`, `DeepScanlinePart`. Walks files with
+  version-field bits `0x1800` (multipart + non_image) set; per-part
+  `type = "deepscanline"` + `name = "<partName>"` + `chunkCount` +
+  `maxSamplesPerPixel` + `version=1`. Chunks read via a linear scan
+  with `i32 part_number` prefix on each record followed by the
+  standard deep chunk body (`i32 Y, u64 packed_table, u64 packed_data,
+  u64 unpacked_data, table_bytes, data_bytes`). Compression NONE /
+  RLE / ZIPS — `ZIP_COMPRESSION` continues to be rejected for deep
+  data per the reference `exrinfo` convention. The flat
+  `parse_exr_multipart` now explicitly rejects deep parts with a
+  message pointing at the new entry. Multi-part deep WRITE remains a
+  followup. Cross-validated against `exrmultipart -combine`-built
+  fixtures with two-part (ZIPS + NONE), three-part (ZIPS + NONE +
+  RLE), and many-chunk (12×10 ZIPS) layouts — see
+  `tests/deep_validation.rs`.
 - Round-78 `MIPMAP_LEVELS` tiled-output encoder. New public API:
   `encode_exr_tiled_rgba_float_mipmap_box_filter`, `encode_exr_tiled_mipmap`,
   `build_box_filter_pyramid`, `mipmap_level_count_round_down`, plus the

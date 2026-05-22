@@ -224,6 +224,381 @@ fn decompress_buffer(
     Ok(out)
 }
 
+/// One part of a multi-part deep file. Same shape as [`DeepExrImage`]
+/// plus a `name` slot identifying the part (the `name` attribute is
+/// mandatory on every multi-part header per the openexr.com spec).
+///
+/// Returned by [`parse_exr_deep_multipart`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeepScanlinePart {
+    pub name: String,
+    pub data_window: Box2i,
+    pub display_window: Box2i,
+    pub line_order: LineOrder,
+    pub compression: Compression,
+    pub channels: Vec<Channel>,
+    /// `width * height` long.
+    pub samples_per_pixel: Vec<u32>,
+    /// One `Vec<f32>` per channel; total length per channel equals the
+    /// sum of `samples_per_pixel`. UINT stored as the u32 bits cast to
+    /// f32 (matching the flat-EXR convention).
+    pub channel_samples: Vec<Vec<f32>>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl DeepScanlinePart {
+    pub fn width(&self) -> u32 {
+        self.data_window.width()
+    }
+    pub fn height(&self) -> u32 {
+        self.data_window.height()
+    }
+    pub fn total_samples(&self) -> u64 {
+        self.samples_per_pixel.iter().map(|&n| n as u64).sum()
+    }
+}
+
+/// Parse a multi-part deep EXR file (version-field bits 0x1800
+/// = multipart + non_image).
+///
+/// Each part must carry `type = "deepscanline"` plus the standard
+/// per-part required attributes (`name`, `chunkCount`, `dataWindow`,
+/// `displayWindow`, `channels`, `compression`, `lineOrder`,
+/// `pixelAspectRatio`, `screenWindowCenter`, `screenWindowWidth`) and
+/// the deep-specific `version` (always 1) + `maxSamplesPerPixel`.
+///
+/// The on-disk layout is a straight extension of flat multi-part: the
+/// per-part headers double-NUL-terminate, followed by per-part offset
+/// tables (each `chunkCount` × u64), followed by interleaved chunks
+/// each prefixed with `i32 part_number` then the standard deep chunk
+/// record `i32 Y + u64 packed_table + u64 packed_data + u64
+/// unpacked_data + packed_table_bytes + packed_sample_bytes`.
+///
+/// Like [`crate::parse_exr_multipart`], we walk chunks linearly rather
+/// than via the offset table, because the reference
+/// `exrmultipart -combine` emits zero-filled offset tables for parts
+/// beyond the first.
+///
+/// Compression: NONE / RLE / ZIPS only (matching
+/// [`parse_exr_deep_scanline`] and the reference `exrinfo`'s rejection
+/// of deep ZIP).
+pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
+    let parts = parse_multipart_headers_allow_deep(bytes)?;
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "multi-part deep file has no parts".to_string(),
+        ));
+    }
+    // Every part must be deepscanline. (deeptile is a followup.)
+    for (i, part) in parts.iter().enumerate() {
+        let part_type = find_string_attr(&part.attributes, "type").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep: part {i} missing required 'type' attribute"
+            ))
+        })?;
+        if part_type != "deepscanline" {
+            return Err(ExrError::unsupported(format!(
+                "multi-part deep: part {i} type='{part_type}' \
+                 (only 'deepscanline' supported — 'deeptile' is a followup, \
+                 'scanlineimage'/'tiledimage' would route through \
+                 parse_exr_multipart)"
+            )));
+        }
+    }
+    if !parts[0].version.non_image {
+        return Err(ExrError::invalid(
+            "parse_exr_deep_multipart called on a multi-part file without the \
+             non_image (deep) version bit set"
+                .to_string(),
+        ));
+    }
+    if !parts[0].version.multipart {
+        return Err(ExrError::invalid(
+            "parse_exr_deep_multipart called on a non-multipart EXR".to_string(),
+        ));
+    }
+
+    // Per-part metadata.
+    struct PartState {
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        channels: Vec<Channel>,
+        attributes: Vec<Attribute>,
+        chunk_count: usize,
+        width: u32,
+        height: u32,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+    }
+
+    let mut state: Vec<PartState> = Vec::with_capacity(parts.len());
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+
+    for (i, part) in parts.iter().enumerate() {
+        let name = find_string_attr(&part.attributes, "name").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep part {i} missing required 'name' attribute"
+            ))
+        })?;
+        let chunk_count = crate::decoder::find_chunk_count(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}') missing required 'chunkCount' attribute"
+            ))
+        })?;
+        let data_window = find_box2i(&part.attributes, "dataWindow").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}') missing required 'dataWindow' attribute"
+            ))
+        })?;
+        let display_window = find_box2i(&part.attributes, "displayWindow").unwrap_or(data_window);
+        let line_order =
+            find_line_order(&part.attributes, "lineOrder").unwrap_or(LineOrder::IncreasingY);
+        let compression = find_compression(&part.attributes, "compression").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}') missing required 'compression' attribute"
+            ))
+        })?;
+        if !matches!(
+            compression,
+            Compression::None | Compression::Rle | Compression::Zips
+        ) {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}') uses compression \
+                 {compression:?} (openexr.com reference accepts only \
+                 NONE/RLE/ZIPS for deep)"
+            )));
+        }
+        let channels = find_channels(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}') missing required 'channels' attribute"
+            ))
+        })?;
+        let mut sorted_channels = channels.clone();
+        sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+        for ch in &sorted_channels {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part deep part {i} ('{name}'): sub-sampled channel '{}'",
+                    ch.name
+                )));
+            }
+        }
+        let width = data_window.width();
+        let height = data_window.height();
+        if width == 0 || height == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}'): dataWindow {width}×{height} must be > 0"
+            )));
+        }
+        let block_h = compression.scanlines_per_block();
+        let expected_chunks = height.div_ceil(block_h) as usize;
+        if chunk_count != expected_chunks {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {i} ('{name}'): chunkCount={chunk_count} \
+                 disagrees with height/block_h math ({expected_chunks})"
+            )));
+        }
+        chunk_counts.push(chunk_count);
+        let pixels = (width as usize) * (height as usize);
+        state.push(PartState {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            channels: sorted_channels.clone(),
+            attributes: part.attributes.clone(),
+            chunk_count,
+            width,
+            height,
+            samples_per_pixel: vec![0u32; pixels],
+            channel_samples: (0..sorted_channels.len()).map(|_| Vec::new()).collect(),
+        });
+    }
+
+    // Skip past the offset tables (may be zero-filled).
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let tables_start = parts.last().unwrap().end_offset;
+    let chunk_scan_start = tables_start + total_chunks * 8;
+    if chunk_scan_start > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "multi-part deep offset tables run past EOF (need {chunk_scan_start}, have {})",
+            bytes.len()
+        )));
+    }
+
+    // Linear scan: each chunk is `i32 part_number + i32 Y + 3*u64
+    // sizes + packed_table + packed_data`.
+    let mut scan_pos = chunk_scan_start;
+    for _ in 0..total_chunks {
+        if scan_pos + 4 + 4 + 24 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep: unexpected EOF at chunk scan position {scan_pos}"
+            )));
+        }
+        let part_num = i32::from_le_bytes(bytes[scan_pos..scan_pos + 4].try_into().unwrap());
+        let y_coord = i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+        let packed_table =
+            u64::from_le_bytes(bytes[scan_pos + 8..scan_pos + 16].try_into().unwrap()) as usize;
+        let packed_data =
+            u64::from_le_bytes(bytes[scan_pos + 16..scan_pos + 24].try_into().unwrap()) as usize;
+        let unpacked_data =
+            u64::from_le_bytes(bytes[scan_pos + 24..scan_pos + 32].try_into().unwrap()) as usize;
+        if part_num < 0 || part_num as usize >= state.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep chunk at {scan_pos}: part_number={part_num} out of range 0..{}",
+                state.len()
+            )));
+        }
+        let table_start = scan_pos + 32;
+        let table_end = table_start + packed_table;
+        let data_start = table_end;
+        let data_end = data_start + packed_data;
+        if data_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep chunk at {scan_pos}: payload runs past EOF"
+            )));
+        }
+
+        let part_idx = part_num as usize;
+        let ps = &mut state[part_idx];
+        let width = ps.width;
+        let height = ps.height;
+        let compression = ps.compression;
+        let row_in_image = (y_coord - ps.data_window.y_min) as i64;
+        if row_in_image < 0 || row_in_image as u32 >= height {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {part_idx} ('{}'): chunk Y={y_coord} outside dataWindow",
+                ps.name
+            )));
+        }
+        let block_y0 = row_in_image as u32;
+        let block_h = compression.scanlines_per_block();
+        let rows_in_block = ((height - block_y0).min(block_h)) as usize;
+        let entries_in_table = rows_in_block * width as usize;
+        let unpacked_table_size = entries_in_table * 4;
+
+        let table_bytes = decompress_buffer(
+            &bytes[table_start..table_end],
+            unpacked_table_size,
+            compression,
+        )?;
+        let mut cumulative_flat: Vec<i32> = Vec::with_capacity(entries_in_table);
+        for chunk in table_bytes.chunks_exact(4) {
+            cumulative_flat.push(i32::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        if cumulative_flat.len() != entries_in_table {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {part_idx} ('{}'): offset-table size mismatch ({} != {entries_in_table})",
+                ps.name,
+                cumulative_flat.len()
+            )));
+        }
+
+        let mut block_samples_total: u64 = 0;
+        for r in 0..rows_in_block {
+            let row_slice = &cumulative_flat[r * width as usize..(r + 1) * width as usize];
+            let per_pixel = per_pixel_from_cumulative(row_slice)?;
+            let dst_row = block_y0 as usize + r;
+            let dst_base = dst_row * width as usize;
+            for (i, &n) in per_pixel.iter().enumerate() {
+                ps.samples_per_pixel[dst_base + i] = n;
+                block_samples_total += n as u64;
+            }
+        }
+
+        let block_bpp: usize = ps
+            .channels
+            .iter()
+            .map(|c| c.pixel_type.bytes_per_sample())
+            .sum();
+        let expected_unpacked = block_samples_total as usize * block_bpp;
+        if expected_unpacked != unpacked_data {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {part_idx} ('{}'): derived unpacked_data={expected_unpacked} \
+                 disagrees with header unpacked_data={unpacked_data}",
+                ps.name
+            )));
+        }
+        let sample_bytes =
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?;
+        let mut p = 0usize;
+        // Snapshot channel types/names so we can borrow channel_samples mutably below.
+        let channel_types: Vec<(PixelType, String)> = ps
+            .channels
+            .iter()
+            .map(|c| (c.pixel_type, c.name.clone()))
+            .collect();
+        for (ch_idx, (pixel_type, ch_name)) in channel_types.iter().enumerate() {
+            let bps = pixel_type.bytes_per_sample();
+            let need = block_samples_total as usize * bps;
+            if p + need > sample_bytes.len() {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep part {part_idx} ('{}'): channel '{ch_name}' bytes past payload end",
+                    ps.name
+                )));
+            }
+            for s in 0..(block_samples_total as usize) {
+                let off = p + s * bps;
+                let v = match pixel_type {
+                    PixelType::Half => crate::half::half_to_f32(u16::from_le_bytes(
+                        sample_bytes[off..off + 2].try_into().unwrap(),
+                    )),
+                    PixelType::Float => {
+                        f32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap())
+                    }
+                    PixelType::Uint => {
+                        let bits =
+                            u32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap());
+                        bits as f32
+                    }
+                };
+                ps.channel_samples[ch_idx].push(v);
+            }
+            p += need;
+        }
+        if p != sample_bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {part_idx} ('{}'): consumed {p} of {} payload bytes",
+                ps.name,
+                sample_bytes.len()
+            )));
+        }
+
+        scan_pos = data_end;
+        let _ = ps.chunk_count; // reserved for future bounds checks
+    }
+
+    Ok(state
+        .into_iter()
+        .map(|ps| DeepScanlinePart {
+            name: ps.name,
+            data_window: ps.data_window,
+            display_window: ps.display_window,
+            line_order: ps.line_order,
+            compression: ps.compression,
+            channels: ps.channels,
+            samples_per_pixel: ps.samples_per_pixel,
+            channel_samples: ps.channel_samples,
+            attributes: ps.attributes,
+        })
+        .collect())
+}
+
+/// Variant of [`crate::header::parse_multipart_headers`] that — like
+/// [`parse_header_allow_deep`] for single-part — tolerates the
+/// `non_image` bit (which `parse_multipart_headers` no longer rejects
+/// directly, but we still need this wrapper for the explicit deep walk).
+///
+/// Today this is just a thin pass-through; the historical name is
+/// retained for symmetry with the single-part deep parser.
+fn parse_multipart_headers_allow_deep(bytes: &[u8]) -> Result<Vec<crate::header::ParsedHeader>> {
+    crate::header::parse_multipart_headers(bytes)
+}
+
 /// Parse a single-part deep scanline EXR. Multi-part deep is a followup.
 pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
     // parse_header rejects non_image; we need our own header walker so

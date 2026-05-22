@@ -23,8 +23,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_deep_scanline, parse_exr_deep_scanline, Channel, Compression, DeepScanlineInput,
-    PixelType,
+    encode_exr_deep_scanline, parse_exr_deep_multipart, parse_exr_deep_scanline, Channel,
+    Compression, DeepScanlineInput, PixelType,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -219,4 +219,310 @@ fn exrmetrics_decodes_our_deep_zips() {
 #[test]
 fn exrmetrics_decodes_our_deep_rle() {
     cross_roundtrip_via_exrmetrics(Compression::Rle);
+}
+
+// ----------------------------------------------------------------------
+// Round-92 multi-part deep READ validation.
+//
+// Strategy: write two distinct single-part deep .exr files with our
+// writer (different compressions + different pixel patterns), feed them
+// to `exrmultipart -combine` to produce a real multi-part deep file
+// (version-field bits 0x1800, per-part `type=deepscanline`, per-part
+// `name`), then read it back with `parse_exr_deep_multipart` and
+// confirm every sample round-trips bit-exactly.
+// ----------------------------------------------------------------------
+
+fn build_synthetic_seeded(w: u32, h: u32, scale_base: f32) -> (Vec<u32>, [Vec<f32>; 4]) {
+    let pixels = (w * h) as usize;
+    let mut spp = Vec::with_capacity(pixels);
+    for i in 0..pixels {
+        spp.push((i as u32) % 4);
+    }
+    let total: usize = spp.iter().sum::<u32>() as usize;
+    let mk = |scale: f32| -> Vec<f32> { (0..total).map(|i| (i as f32) * scale).collect() };
+    (
+        spp,
+        [
+            mk(scale_base + 0.05),
+            mk(scale_base + 0.10),
+            mk(scale_base + 0.15),
+            mk(scale_base + 0.20),
+        ],
+    )
+}
+
+#[test]
+fn deep_multipart_two_parts_via_exrmultipart_combine() {
+    if !tool_available("exrmultipart") {
+        eprintln!("exrmultipart not available, skipping");
+        return;
+    }
+    // Write part A (ZIPS) and part B (NONE) as standalone deep files.
+    let (spp_a, planes_a) = build_synthetic_seeded(8, 4, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(8, 4, 0.5);
+    let ch = channels_rgba_float();
+    let a_bytes = encode_exr_deep_scanline(&DeepScanlineInput {
+        width: 8,
+        height: 4,
+        channels: ch.clone(),
+        samples_per_pixel: &spp_a,
+        channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+        compression: Compression::Zips,
+    })
+    .unwrap();
+    let b_bytes = encode_exr_deep_scanline(&DeepScanlineInput {
+        width: 8,
+        height: 4,
+        channels: ch,
+        samples_per_pixel: &spp_b,
+        channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+        compression: Compression::None,
+    })
+    .unwrap();
+
+    let dir = tempdir();
+    let a_path = format!("{dir}/partA.exr");
+    let b_path = format!("{dir}/partB.exr");
+    let combined_path = format!("{dir}/combined.exr");
+    std::fs::write(&a_path, &a_bytes).unwrap();
+    std::fs::write(&b_path, &b_bytes).unwrap();
+
+    let out = Command::new("exrmultipart")
+        .arg("-combine")
+        .arg("-i")
+        .arg(format!("{a_path}::partA"))
+        .arg(format!("{b_path}::partB"))
+        .arg("-o")
+        .arg(&combined_path)
+        .output()
+        .expect("exrmultipart spawn");
+    assert!(
+        out.status.success(),
+        "exrmultipart -combine failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let combined = std::fs::read(&combined_path).unwrap();
+    let parts = parse_exr_deep_multipart(&combined).unwrap();
+    assert_eq!(parts.len(), 2, "expected two parts after combine");
+
+    // Order is the order we passed to -combine.
+    assert_eq!(parts[0].name, "partA");
+    assert_eq!(parts[0].compression, Compression::Zips);
+    assert_eq!(parts[0].samples_per_pixel, spp_a);
+    for (got, want) in parts[0].channel_samples.iter().zip(planes_a.iter()) {
+        assert_eq!(got, want, "partA channel mismatch");
+    }
+
+    assert_eq!(parts[1].name, "partB");
+    assert_eq!(parts[1].compression, Compression::None);
+    assert_eq!(parts[1].samples_per_pixel, spp_b);
+    for (got, want) in parts[1].channel_samples.iter().zip(planes_b.iter()) {
+        assert_eq!(got, want, "partB channel mismatch");
+    }
+
+    let _ = std::fs::remove_file(&a_path);
+    let _ = std::fs::remove_file(&b_path);
+    let _ = std::fs::remove_file(&combined_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn deep_multipart_three_parts_mixed_compressions() {
+    if !tool_available("exrmultipart") {
+        eprintln!("exrmultipart not available, skipping");
+        return;
+    }
+    // Three distinct deep parts: ZIPS / NONE / RLE.
+    let (spp_a, planes_a) = build_synthetic_seeded(6, 3, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(6, 3, 1.0);
+    let (spp_c, planes_c) = build_synthetic_seeded(6, 3, 2.0);
+    let ch = channels_rgba_float();
+    let mk_bytes = |spp: &[u32], planes: &[Vec<f32>; 4], z: Compression| -> Vec<u8> {
+        encode_exr_deep_scanline(&DeepScanlineInput {
+            width: 6,
+            height: 3,
+            channels: ch.clone(),
+            samples_per_pixel: spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: z,
+        })
+        .unwrap()
+    };
+    let a_bytes = mk_bytes(&spp_a, &planes_a, Compression::Zips);
+    let b_bytes = mk_bytes(&spp_b, &planes_b, Compression::None);
+    let c_bytes = mk_bytes(&spp_c, &planes_c, Compression::Rle);
+
+    let dir = tempdir();
+    let a_path = format!("{dir}/a.exr");
+    let b_path = format!("{dir}/b.exr");
+    let c_path = format!("{dir}/c.exr");
+    let combined_path = format!("{dir}/combined.exr");
+    std::fs::write(&a_path, &a_bytes).unwrap();
+    std::fs::write(&b_path, &b_bytes).unwrap();
+    std::fs::write(&c_path, &c_bytes).unwrap();
+
+    let out = Command::new("exrmultipart")
+        .arg("-combine")
+        .arg("-i")
+        .arg(format!("{a_path}::alpha"))
+        .arg(format!("{b_path}::beta"))
+        .arg(format!("{c_path}::gamma"))
+        .arg("-o")
+        .arg(&combined_path)
+        .output()
+        .expect("exrmultipart spawn");
+    assert!(out.status.success(), "exrmultipart -combine failed");
+
+    let combined = std::fs::read(&combined_path).unwrap();
+    let parts = parse_exr_deep_multipart(&combined).unwrap();
+    assert_eq!(parts.len(), 3);
+    let expected = [
+        ("alpha", Compression::Zips, &spp_a, &planes_a),
+        ("beta", Compression::None, &spp_b, &planes_b),
+        ("gamma", Compression::Rle, &spp_c, &planes_c),
+    ];
+    for (got, (name, comp, spp, planes)) in parts.iter().zip(expected.iter()) {
+        assert_eq!(&got.name, name);
+        assert_eq!(got.compression, *comp);
+        assert_eq!(got.samples_per_pixel, **spp);
+        for (got_ch, want_ch) in got.channel_samples.iter().zip(planes.iter()) {
+            assert_eq!(got_ch, want_ch, "{name} channel mismatch");
+        }
+    }
+
+    let _ = std::fs::remove_file(&a_path);
+    let _ = std::fs::remove_file(&b_path);
+    let _ = std::fs::remove_file(&c_path);
+    let _ = std::fs::remove_file(&combined_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn deep_multipart_multi_row_zips_via_combine() {
+    // Larger dimensions so each part has many ZIPS chunks.
+    if !tool_available("exrmultipart") {
+        eprintln!("exrmultipart not available, skipping");
+        return;
+    }
+    let (spp_a, planes_a) = build_synthetic_seeded(12, 10, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(12, 10, 0.25);
+    let ch = channels_rgba_float();
+    let mk_bytes = |spp: &[u32], planes: &[Vec<f32>; 4]| -> Vec<u8> {
+        encode_exr_deep_scanline(&DeepScanlineInput {
+            width: 12,
+            height: 10,
+            channels: ch.clone(),
+            samples_per_pixel: spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zips,
+        })
+        .unwrap()
+    };
+    let a_bytes = mk_bytes(&spp_a, &planes_a);
+    let b_bytes = mk_bytes(&spp_b, &planes_b);
+
+    let dir = tempdir();
+    let a_path = format!("{dir}/a.exr");
+    let b_path = format!("{dir}/b.exr");
+    let combined_path = format!("{dir}/combined.exr");
+    std::fs::write(&a_path, &a_bytes).unwrap();
+    std::fs::write(&b_path, &b_bytes).unwrap();
+    let out = Command::new("exrmultipart")
+        .arg("-combine")
+        .arg("-i")
+        .arg(format!("{a_path}::foo"))
+        .arg(format!("{b_path}::bar"))
+        .arg("-o")
+        .arg(&combined_path)
+        .output()
+        .expect("exrmultipart spawn");
+    assert!(out.status.success(), "exrmultipart -combine failed");
+
+    let parts = parse_exr_deep_multipart(&std::fs::read(&combined_path).unwrap()).unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "foo");
+    assert_eq!(parts[1].name, "bar");
+    assert_eq!(parts[0].samples_per_pixel, spp_a);
+    assert_eq!(parts[1].samples_per_pixel, spp_b);
+    for (got, want) in parts[0].channel_samples.iter().zip(planes_a.iter()) {
+        assert_eq!(got, want);
+    }
+    for (got, want) in parts[1].channel_samples.iter().zip(planes_b.iter()) {
+        assert_eq!(got, want);
+    }
+    let _ = std::fs::remove_file(&a_path);
+    let _ = std::fs::remove_file(&b_path);
+    let _ = std::fs::remove_file(&combined_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn deep_multipart_rejects_flat_multipart() {
+    use oxideav_openexr::{encode_exr_multipart_rgba_float_with, Compression};
+    // A flat multi-part file should not be readable as a deep multi-part.
+    let bytes = encode_exr_multipart_rgba_float_with(&[(
+        "x".to_string(),
+        4,
+        4,
+        &vec![0.0f32; 4 * 4 * 4],
+        Compression::None,
+    )])
+    .unwrap();
+    let r = parse_exr_deep_multipart(&bytes);
+    assert!(
+        r.is_err(),
+        "flat multipart must be rejected by the deep walker"
+    );
+}
+
+#[test]
+fn parse_exr_multipart_rejects_deep_multipart() {
+    // The flat multipart walker must redirect deep multipart input to
+    // parse_exr_deep_multipart.
+    if !tool_available("exrmultipart") {
+        eprintln!("exrmultipart not available, skipping");
+        return;
+    }
+    use oxideav_openexr::parse_exr_multipart;
+    let (spp_a, planes_a) = build_synthetic_seeded(4, 2, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(4, 2, 0.5);
+    let ch = channels_rgba_float();
+    let mk = |spp: &[u32], planes: &[Vec<f32>; 4]| -> Vec<u8> {
+        encode_exr_deep_scanline(&DeepScanlineInput {
+            width: 4,
+            height: 2,
+            channels: ch.clone(),
+            samples_per_pixel: spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::None,
+        })
+        .unwrap()
+    };
+    let a_bytes = mk(&spp_a, &planes_a);
+    let b_bytes = mk(&spp_b, &planes_b);
+    let dir = tempdir();
+    let a_path = format!("{dir}/a.exr");
+    let b_path = format!("{dir}/b.exr");
+    let combined_path = format!("{dir}/combined.exr");
+    std::fs::write(&a_path, &a_bytes).unwrap();
+    std::fs::write(&b_path, &b_bytes).unwrap();
+    let out = Command::new("exrmultipart")
+        .arg("-combine")
+        .arg("-i")
+        .arg(format!("{a_path}::a"))
+        .arg(format!("{b_path}::b"))
+        .arg("-o")
+        .arg(&combined_path)
+        .output()
+        .expect("exrmultipart spawn");
+    assert!(out.status.success());
+    let combined = std::fs::read(&combined_path).unwrap();
+    let r = parse_exr_multipart(&combined);
+    assert!(r.is_err(), "parse_exr_multipart must reject deep parts");
+    let _ = std::fs::remove_file(&a_path);
+    let _ = std::fs::remove_file(&b_path);
+    let _ = std::fs::remove_file(&combined_path);
+    let _ = std::fs::remove_dir(&dir);
 }

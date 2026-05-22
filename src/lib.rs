@@ -85,12 +85,27 @@
 //!   box-filter pyramid; callers needing custom filtering supply their
 //!   own `Vec<MipmapLevel>`.
 //!
+//! Round-92 surface (this crate, this round):
+//! * Multi-part deep scanline READ — [`parse_exr_deep_multipart`] +
+//!   [`DeepScanlinePart`]. Walks files with version-field bits 0x1800
+//!   (multipart + non_image) set, each part `type = "deepscanline"`,
+//!   `name = <partName>`. Chunks are linearly scanned (matching the
+//!   robust strategy already used by [`parse_exr_multipart`] for
+//!   zero-filled offset tables emitted by `exrmultipart -combine`).
+//!   Each chunk record is `i32 part_number, i32 Y, u64 packed_table,
+//!   u64 packed_data, u64 unpacked_data, table_bytes, data_bytes`.
+//!   Compression NONE / RLE / ZIPS. Cross-validated against
+//!   `exrmultipart -combine`-built fixtures composed of two and three
+//!   distinct deep parts (different compressions, different pixel
+//!   patterns) — see `tests/deep_validation.rs`. Multi-part deep WRITE
+//!   remains a followup.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); `RIPMAP_LEVELS` tiled-output writes; tiled or deep
-//! parts inside multi-part files; deep-tile data; HDR pixel-format
-//! integration with `oxideav-core`.
+//! public spec); `RIPMAP_LEVELS` tiled-output writes; multi-part WRITE
+//! for deep + tiled parts; deep-tile data (`type = "deeptile"`); HDR
+//! pixel-format integration with `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -113,7 +128,8 @@ pub const CODEC_ID_STR: &str = "openexr";
 
 pub use decoder::{mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart};
 pub use deep::{
-    encode_exr_deep_scanline, parse_exr_deep_scanline, DeepExrImage, DeepScanlineInput,
+    encode_exr_deep_scanline, parse_exr_deep_multipart, parse_exr_deep_scanline, DeepExrImage,
+    DeepScanlineInput, DeepScanlinePart,
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,

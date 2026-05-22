@@ -27,6 +27,7 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Multi-part EXR (scanline parts)     | parse + write (validated against `exrmultipart -separate`) |
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse + write (validated against `exrmetrics --convert`) |
 | Deep scanline (`deepscanline`)      | parse + write — NONE/RLE/ZIPS (validated against `exrheader` + `exrmetrics --convert -z none`) |
+| Multi-part deep scanline (read)     | parse — NONE/RLE/ZIPS, per-part `Vec<DeepScanlinePart>` (validated against `exrmultipart -combine`) |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
 | Spec predictor + interleave         | bit-exact against `exrmetrics`-produced files    |
@@ -53,8 +54,9 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
   pyramid, ROUND_DOWN, NONE / ZIP / ZIPS / RLE). `RIPMAP_LEVELS` writer
   is still deferred (decoder reads it).
 * Multipart-output encode covers scanline parts only; tiled or deep
-  parts not yet emitted.
-* Multi-part deep + deep-tiled files.
+  parts not yet emitted (multi-part deep READ is supported via
+  `parse_exr_deep_multipart`).
+* Deep-tiled files (`type = "deeptile"`).
 * HDR pixel-format integration with `oxideav-core` (the
   `Decoder`/`Encoder` shims clamp to `Rgba` 8-bit pending an
   `Rgba128Float`-style pixel format addition to core).

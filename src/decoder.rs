@@ -815,6 +815,22 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
             "multi-part file has no parts".to_string(),
         ));
     }
+    // Reject deep parts here — multi-part deep files (non_image bit set)
+    // have one or more `type=deepscanline` parts which must be parsed
+    // through parse_exr_deep_multipart instead. We don't allow a hybrid
+    // walk because a deep chunk's record layout is different
+    // (`i32 part | i32 Y | 3*u64 sizes | table | data` vs
+    // `i32 part | i32 Y | i32 size | payload`).
+    for (i, part) in parts.iter().enumerate() {
+        if let Some(t) = find_part_type(&part.attributes) {
+            if t == "deepscanline" || t == "deeptile" {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part part {i} has type='{t}' — call \
+                     parse_exr_deep_multipart() for deep multi-part files"
+                )));
+            }
+        }
+    }
 
     // Collect chunkCount per part (mandatory in multi-part files).
     let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
@@ -999,8 +1015,24 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
     Ok(images)
 }
 
+/// Find the `type` (string) attribute in a part's attribute list. Used
+/// to discriminate `scanlineimage` from `tiledimage` / `deepscanline`
+/// / `deeptile` in multi-part files.
+pub(crate) fn find_part_type(attrs: &[Attribute]) -> Option<String> {
+    for a in attrs {
+        if a.name == "type" {
+            if let AttributeValue::Other { type_name, data } = &a.value {
+                if type_name == "string" {
+                    return Some(String::from_utf8_lossy(data).to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Find the `chunkCount` attribute in a part's attribute list.
-fn find_chunk_count(attrs: &[Attribute]) -> Option<usize> {
+pub(crate) fn find_chunk_count(attrs: &[Attribute]) -> Option<usize> {
     for a in attrs {
         if a.name == "chunkCount" {
             if let AttributeValue::Other { type_name, data } = &a.value {

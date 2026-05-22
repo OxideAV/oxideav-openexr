@@ -202,6 +202,11 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
 ///
 /// Returns `Err` if the magic is bad, the `multipart` bit is NOT set,
 /// or the stream is truncated.
+///
+/// The `non_image` (deep) bit is accepted — multi-part deep files set
+/// `version` to `0x1800` (bits 11 + 12) per the openexr.com spec.
+/// Per-part `type` discrimination ("scanlineimage" vs "deepscanline"
+/// vs "tiledimage" vs "deeptile") is left to the caller.
 pub fn parse_multipart_headers(bytes: &[u8]) -> Result<Vec<ParsedHeader>> {
     let mut c = Cursor::new(bytes);
     let magic = c.u32()?;
@@ -216,11 +221,10 @@ pub fn parse_multipart_headers(bytes: &[u8]) -> Result<Vec<ParsedHeader>> {
             "parse_multipart_headers called on a non-multipart EXR file".to_string(),
         ));
     }
-    if version.non_image {
-        return Err(ExrError::unsupported(
-            "non-image / deep-data EXR files (deferred)".to_string(),
-        ));
-    }
+    // non_image (deep) is now permitted — the caller dispatches per-part
+    // by reading the `type` attribute. parse_exr_multipart still rejects
+    // any deep part (with a clear pointer to parse_exr_deep_multipart);
+    // parse_exr_deep_multipart accepts only deep parts.
 
     let max_name = if version.long_names { 255 } else { 31 };
     let mut parts: Vec<ParsedHeader> = Vec::new();
