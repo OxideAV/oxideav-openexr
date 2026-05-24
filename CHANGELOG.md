@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-124 `RIPMAP_LEVELS` tiled-output encoder. New public API:
+  `encode_exr_tiled_rgba_float_ripmap_box_filter`,
+  `encode_exr_tiled_ripmap`, `build_box_filter_ripmap`,
+  `ripmap_level_counts_round_down`, plus the `RipmapPyramid` /
+  `RipmapLevel` types. Writes single-part tiled EXR files with the full
+  2-D reduction grid (`tiledesc.level_mode = 2`, ROUND_DOWN): x-levels
+  reduce width only, y-levels reduce height only, so cell `(lvlx, lvly)`
+  is `mipmap_level_dim(w, lvlx) × mipmap_level_dim(h, lvly)`. The offset
+  table and chunk stream walk `lvly` outer, `lvlx` inner, INCREASING_Y
+  row-major within each level (matching the decoder's existing RIPMAP
+  `compute_total_tiles` ordering). NONE / ZIP / ZIPS / RLE compression.
+  `build_box_filter_ripmap` generates a default separable 2× box-filter
+  grid; callers needing custom filtering supply their own `RipmapPyramid`.
+  Cross-validated against `exrmetrics --convert -z none` (decodes our
+  grid back to a scanline file pixel-exactly at level (0,0)) and
+  `exrheader` (reports `ripmap`); our decoder is additionally pinned
+  against an `exrmaketiled -r` reference file — see
+  `tests/ripmap_encoder_validation.rs`.
 - Round-92 multi-part deep scanline READ. New public API:
   `parse_exr_deep_multipart`, `DeepScanlinePart`. Walks files with
   version-field bits `0x1800` (multipart + non_image) set; per-part

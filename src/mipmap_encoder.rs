@@ -491,6 +491,496 @@ fn compress_tile_payload(raw: Vec<u8>, compression: Compression) -> Result<Vec<u
     })
 }
 
+// ---------------------------------------------------------------------------
+// RIPMAP_LEVELS tiled-output encoder
+// ---------------------------------------------------------------------------
+//
+// A RIPMAP file stores a 2-D grid of reduction levels: x-levels reduce only
+// the horizontal resolution and y-levels reduce only the vertical
+// resolution, so level `(lvlx, lvly)` has dimensions
+// `(mipmap_level_dim(w, lvlx), mipmap_level_dim(h, lvly))`. The number of
+// x-levels is `mipmap_level_count(w)` and the number of y-levels is
+// `mipmap_level_count(h)`, independently.
+//
+// The on-disk container is identical to the MIPMAP writer (same chunk
+// format: `tx i32 | ty i32 | lvlx i32 | lvly i32 | size i32 | payload`)
+// except:
+//   * `tiledesc` mode byte = `0x02` (RIPMAP_LEVELS + ROUND_DOWN), and
+//   * the offset table / chunk order walks the full 2-D level grid with
+//     `lvly` as the outer loop and `lvlx` as the inner loop (matching the
+//     decoder's `compute_total_tiles` RIPMAP branch in `decoder.rs`), and
+//     within each level tiles are emitted INCREASING_Y row-major
+//     (`ty` outer, `tx` inner).
+//
+// This is pure offset-table / container mechanics; no per-compressor table
+// is involved (only NONE / ZIP / ZIPS / RLE, exactly as the MIPMAP writer).
+
+/// One x/y reduction level of a ripmap grid: explicit width/height plus one
+/// f32 plane per channel (same alphabetical channel order as the file's
+/// channel list). Plane lengths must equal `width * height`.
+pub type RipmapLevel = MipmapLevel;
+
+/// A full ROUND_DOWN ripmap pyramid: a 2-D grid of [`RipmapLevel`]s indexed
+/// `grid[lvly][lvlx]`. `grid.len()` is the y-level count
+/// (`mipmap_level_count(height)`) and every row has the same length, the
+/// x-level count (`mipmap_level_count(width)`).
+#[derive(Debug, Clone)]
+pub struct RipmapPyramid {
+    /// `grid[lvly][lvlx]`. Level `(lvlx, lvly)` is at `grid[lvly][lvlx]`.
+    pub grid: Vec<Vec<RipmapLevel>>,
+}
+
+/// Number of x-levels and y-levels (`(nx, ny)`) for a ROUND_DOWN ripmap of
+/// the given full-resolution dimensions.
+pub fn ripmap_level_counts_round_down(width: u32, height: u32) -> (u32, u32) {
+    (
+        crate::decoder::mipmap_level_count(width, false),
+        crate::decoder::mipmap_level_count(height, false),
+    )
+}
+
+/// Build a ROUND_DOWN ripmap pyramid from level-(0,0) planes by separable
+/// 2× box filtering. The x-reduction halves the width (averaging adjacent
+/// horizontal pairs) and the y-reduction halves the height (averaging
+/// adjacent vertical pairs); level `(lvlx, lvly)` is produced by `lvlx`
+/// horizontal reductions followed by `lvly` vertical reductions. Odd
+/// dimensions drop the last row/column (ROUND_DOWN).
+pub fn build_box_filter_ripmap(
+    width: u32,
+    height: u32,
+    level0_planes: &[Vec<f32>],
+) -> RipmapPyramid {
+    let (nx, ny) = ripmap_level_counts_round_down(width, height);
+
+    // First build the x-reduction series at full height (lvly = 0):
+    // x_series[lvlx] has dims (mipmap_level_dim(w, lvlx), height).
+    let mut x_series: Vec<RipmapLevel> = Vec::with_capacity(nx as usize);
+    x_series.push(RipmapLevel {
+        width,
+        height,
+        planes: level0_planes.to_vec(),
+    });
+    for lvlx in 1..nx {
+        let prev = &x_series[(lvlx - 1) as usize];
+        let lw = (prev.width / 2).max(1);
+        let lh = prev.height;
+        let mut planes: Vec<Vec<f32>> = Vec::with_capacity(prev.planes.len());
+        for src in &prev.planes {
+            let mut dst = vec![0.0_f32; (lw * lh) as usize];
+            let pw = prev.width as usize;
+            for y in 0..lh as usize {
+                for x in 0..lw as usize {
+                    let sx = x * 2;
+                    let sx1 = (sx + 1).min(prev.width as usize - 1);
+                    let v0 = src[y * pw + sx];
+                    let v1 = src[y * pw + sx1];
+                    dst[y * lw as usize + x] = 0.5 * (v0 + v1);
+                }
+            }
+            planes.push(dst);
+        }
+        x_series.push(RipmapLevel {
+            width: lw,
+            height: lh,
+            planes,
+        });
+    }
+
+    // For each x-level, build its y-reduction column.
+    let mut grid: Vec<Vec<RipmapLevel>> = Vec::with_capacity(ny as usize);
+    // grid[0] = x_series (all lvly = 0).
+    grid.push(x_series.clone());
+    for lvly in 1..ny {
+        let prev_row = &grid[(lvly - 1) as usize];
+        let mut row: Vec<RipmapLevel> = Vec::with_capacity(nx as usize);
+        for cell in prev_row {
+            let lw = cell.width;
+            let lh = (cell.height / 2).max(1);
+            let mut planes: Vec<Vec<f32>> = Vec::with_capacity(cell.planes.len());
+            for src in &cell.planes {
+                let mut dst = vec![0.0_f32; (lw * lh) as usize];
+                let cw = cell.width as usize;
+                for y in 0..lh as usize {
+                    let sy = y * 2;
+                    let sy1 = (sy + 1).min(cell.height as usize - 1);
+                    for x in 0..lw as usize {
+                        let v0 = src[sy * cw + x];
+                        let v1 = src[sy1 * cw + x];
+                        dst[y * lw as usize + x] = 0.5 * (v0 + v1);
+                    }
+                }
+                planes.push(dst);
+            }
+            row.push(RipmapLevel {
+                width: lw,
+                height: lh,
+                planes,
+            });
+        }
+        grid.push(row);
+    }
+
+    RipmapPyramid { grid }
+}
+
+/// Encode an RGBA-float RIPMAP_LEVELS tiled EXR using a separable 2× box
+/// filter to generate the ripmap grid from the caller's level-(0,0) image.
+///
+/// `samples` is `width * height * 4` long in `R, G, B, A` pixel order.
+/// Uses ROUND_DOWN rounding (the OpenEXR default).
+pub fn encode_exr_tiled_rgba_float_ripmap_box_filter(
+    width: u32,
+    height: u32,
+    samples: &[f32],
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+) -> Result<Vec<u8>> {
+    let need = (width as usize) * (height as usize) * 4;
+    if samples.len() != need {
+        return Err(ExrError::invalid(format!(
+            "samples length {} != width({width})*height({height})*4 = {need}",
+            samples.len()
+        )));
+    }
+    let pixels = (width as usize) * (height as usize);
+    let mut a = Vec::with_capacity(pixels);
+    let mut b = Vec::with_capacity(pixels);
+    let mut g = Vec::with_capacity(pixels);
+    let mut r = Vec::with_capacity(pixels);
+    for px in 0..pixels {
+        r.push(samples[px * 4]);
+        g.push(samples[px * 4 + 1]);
+        b.push(samples[px * 4 + 2]);
+        a.push(samples[px * 4 + 3]);
+    }
+
+    let channels = vec![
+        Channel {
+            name: "A".to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        },
+        Channel {
+            name: "B".to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        },
+        Channel {
+            name: "G".to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        },
+        Channel {
+            name: "R".to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        },
+    ];
+
+    let pyramid = build_box_filter_ripmap(width, height, &[a, b, g, r]);
+    encode_exr_tiled_ripmap(&channels, &pyramid, compression, tile_x, tile_y)
+}
+
+/// General RIPMAP_LEVELS tiled encoder. Writes a single-part tiled EXR
+/// where the offset table walks the full 2-D level grid (`lvly` outer,
+/// `lvlx` inner) and within each level emits tile chunks in INCREASING_Y
+/// row-major order.
+///
+/// All channels MUST have `x_sampling == 1 && y_sampling == 1`. The grid
+/// must be `ripmap_level_counts_round_down(w, h)` shaped, with each cell's
+/// `width`/`height` matching `mipmap_level_dim(w, lvlx, false)` /
+/// `mipmap_level_dim(h, lvly, false)` and each plane length equal to
+/// `cell_w * cell_h`. Supports NONE / ZIP / ZIPS / RLE.
+pub fn encode_exr_tiled_ripmap(
+    channels: &[Channel],
+    pyramid: &RipmapPyramid,
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+) -> Result<Vec<u8>> {
+    if pyramid.grid.is_empty() || pyramid.grid[0].is_empty() {
+        return Err(ExrError::invalid(
+            "ripmap pyramid grid must have at least one cell".to_string(),
+        ));
+    }
+    if tile_x == 0 || tile_y == 0 {
+        return Err(ExrError::invalid(format!(
+            "tile size {tile_x}×{tile_y} must both be > 0"
+        )));
+    }
+    if !matches!(
+        compression,
+        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+    ) {
+        return Err(ExrError::unsupported(format!(
+            "compression {compression:?} (ripmap tiled encoder supports NONE + ZIP + ZIPS + RLE)"
+        )));
+    }
+    for ch in channels {
+        if ch.x_sampling != 1 || ch.y_sampling != 1 {
+            return Err(ExrError::unsupported(format!(
+                "channel '{}' sampling != 1×1 in tiled encode (spec requires 1×1 in tiled files)",
+                ch.name
+            )));
+        }
+    }
+    for win in channels.windows(2) {
+        if win[0].name >= win[1].name {
+            return Err(ExrError::invalid(format!(
+                "channels not in alphabetical order: '{}' >= '{}'",
+                win[0].name, win[1].name
+            )));
+        }
+    }
+
+    // Full-resolution dimensions come from level (0,0).
+    let width = pyramid.grid[0][0].width;
+    let height = pyramid.grid[0][0].height;
+    let (nx, ny) = ripmap_level_counts_round_down(width, height);
+    if pyramid.grid.len() as u32 != ny {
+        return Err(ExrError::invalid(format!(
+            "ripmap grid has {} y-levels, expected {ny} for height {height} ROUND_DOWN",
+            pyramid.grid.len()
+        )));
+    }
+    for (lvly, row) in pyramid.grid.iter().enumerate() {
+        if row.len() as u32 != nx {
+            return Err(ExrError::invalid(format!(
+                "ripmap grid row {lvly} has {} x-levels, expected {nx} for width {width} ROUND_DOWN",
+                row.len()
+            )));
+        }
+        for (lvlx, cell) in row.iter().enumerate() {
+            let want_w = crate::decoder::mipmap_level_dim(width, lvlx as u32, false);
+            let want_h = crate::decoder::mipmap_level_dim(height, lvly as u32, false);
+            if cell.width != want_w || cell.height != want_h {
+                return Err(ExrError::invalid(format!(
+                    "ripmap level ({lvlx},{lvly}) is {}×{} but spec requires {want_w}×{want_h} (ROUND_DOWN)",
+                    cell.width, cell.height
+                )));
+            }
+            if cell.planes.len() != channels.len() {
+                return Err(ExrError::invalid(format!(
+                    "ripmap level ({lvlx},{lvly}) has {} planes but {} channels declared",
+                    cell.planes.len(),
+                    channels.len()
+                )));
+            }
+            for (ch, p) in channels.iter().zip(cell.planes.iter()) {
+                let need = (cell.width as usize) * (cell.height as usize);
+                if p.len() != need {
+                    return Err(ExrError::invalid(format!(
+                        "ripmap level ({lvlx},{lvly}) channel '{}' plane length {} != {}*{} = {need}",
+                        ch.name,
+                        p.len(),
+                        cell.width,
+                        cell.height
+                    )));
+                }
+            }
+        }
+    }
+
+    // chunk count = sum over the whole grid of per-level tile-grid size.
+    let mut chunk_count: u32 = 0;
+    for row in &pyramid.grid {
+        for cell in row {
+            chunk_count += cell.width.div_ceil(tile_x) * cell.height.div_ceil(tile_y);
+        }
+    }
+
+    let attrs = build_tiled_ripmap_attributes(
+        channels,
+        width,
+        height,
+        compression,
+        tile_x,
+        tile_y,
+        chunk_count,
+    );
+
+    let version = VersionField::from_u32(2 | 0x200);
+    let header_bytes = encode_header(version, &attrs);
+
+    // Build per-tile payloads. Iteration order: lvly outer (0..ny), lvlx
+    // inner (0..nx), then within a level ty outer, tx inner.
+    #[allow(clippy::type_complexity)]
+    let mut tile_chunks: Vec<(u32, u32, u32, u32, Vec<u8>)> =
+        Vec::with_capacity(chunk_count as usize);
+    for (lvly, row) in pyramid.grid.iter().enumerate() {
+        for (lvlx, cell) in row.iter().enumerate() {
+            let tx_count = cell.width.div_ceil(tile_x);
+            let ty_count = cell.height.div_ceil(tile_y);
+            let bpp: usize = channels
+                .iter()
+                .map(|c| c.pixel_type.bytes_per_sample())
+                .sum();
+            for ty in 0..ty_count {
+                for tx in 0..tx_count {
+                    let x0 = tx * tile_x;
+                    let y0 = ty * tile_y;
+                    let x1 = (x0 + tile_x).min(cell.width);
+                    let y1 = (y0 + tile_y).min(cell.height);
+                    let tw = (x1 - x0) as usize;
+                    let th = (y1 - y0) as usize;
+                    let mut raw = Vec::with_capacity(tw * th * bpp);
+                    for line in 0..th {
+                        let dst_y = y0 as usize + line;
+                        for (ch_idx, ch) in channels.iter().enumerate() {
+                            let plane = &cell.planes[ch_idx];
+                            for xx in 0..tw {
+                                let dst_x = x0 as usize + xx;
+                                let v = plane[dst_y * cell.width as usize + dst_x];
+                                match ch.pixel_type {
+                                    PixelType::Half => raw.extend_from_slice(
+                                        &crate::half::f32_to_half(v).to_le_bytes(),
+                                    ),
+                                    PixelType::Float => raw.extend_from_slice(&v.to_le_bytes()),
+                                    PixelType::Uint => {
+                                        let u = if v.is_nan() || v < 0.0 {
+                                            0u32
+                                        } else if v >= (u32::MAX as f32) {
+                                            u32::MAX
+                                        } else {
+                                            (v + 0.5) as u32
+                                        };
+                                        raw.extend_from_slice(&u.to_le_bytes());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let payload = compress_tile_payload(raw, compression)?;
+                    tile_chunks.push((tx, ty, lvlx as u32, lvly as u32, payload));
+                }
+            }
+        }
+    }
+
+    // Absolute byte offsets for each tile chunk.
+    let offset_table_size = (chunk_count as usize) * 8;
+    let chunks_start = header_bytes.len() + offset_table_size;
+    let mut tile_offsets: Vec<u64> = Vec::with_capacity(chunk_count as usize);
+    {
+        let mut running = chunks_start;
+        for (_, _, _, _, p) in &tile_chunks {
+            tile_offsets.push(running as u64);
+            running += 20 + p.len();
+        }
+    }
+    let total_size = tile_offsets
+        .last()
+        .map(|&o| o as usize)
+        .unwrap_or(chunks_start)
+        + tile_chunks
+            .last()
+            .map(|(_, _, _, _, p)| 20 + p.len())
+            .unwrap_or(0);
+
+    let mut out = Vec::with_capacity(total_size);
+    out.extend_from_slice(&header_bytes);
+    for &off in &tile_offsets {
+        out.extend_from_slice(&off.to_le_bytes());
+    }
+    for (tx, ty, lx, ly, p) in tile_chunks {
+        out.extend_from_slice(&(tx as i32).to_le_bytes());
+        out.extend_from_slice(&(ty as i32).to_le_bytes());
+        out.extend_from_slice(&(lx as i32).to_le_bytes());
+        out.extend_from_slice(&(ly as i32).to_le_bytes());
+        out.extend_from_slice(&(p.len() as i32).to_le_bytes());
+        out.extend_from_slice(&p);
+    }
+    Ok(out)
+}
+
+fn build_tiled_ripmap_attributes(
+    channels: &[Channel],
+    width: u32,
+    height: u32,
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    chunk_count: u32,
+) -> Vec<Attribute> {
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (width - 1) as i32,
+        y_max: (height - 1) as i32,
+    };
+    // tiledesc: u32 xSize | u32 ySize | u8 mode. mode = (round_mode << 4)
+    // | level_mode; RIPMAP_LEVELS = 2, ROUND_DOWN = 0.
+    let mut tiledesc = Vec::with_capacity(9);
+    tiledesc.extend_from_slice(&tile_x.to_le_bytes());
+    tiledesc.extend_from_slice(&tile_y.to_le_bytes());
+    tiledesc.push(0x02);
+
+    vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(channels.to_vec()),
+        },
+        Attribute {
+            name: "chunkCount".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: (chunk_count as i32).to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "tiles".to_string(),
+            value: AttributeValue::Other {
+                type_name: "tiledesc".to_string(),
+                data: tiledesc,
+            },
+        },
+        Attribute {
+            name: "type".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"tiledimage".to_vec(),
+            },
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,5 +1199,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ripmap_none_self_roundtrip_level0() {
+        // 48×32 (non-square so x/y level dims differ), 16×16 tiles.
+        // Self-roundtrip should recover the level-(0,0) RGBA samples.
+        let w = 48;
+        let h = 32;
+        let samples = make_image(w, h);
+        let bytes = encode_exr_tiled_rgba_float_ripmap_box_filter(
+            w,
+            h,
+            &samples,
+            Compression::None,
+            16,
+            16,
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert_eq!(img.width(), w);
+        assert_eq!(img.height(), h);
+        assert_planes_match_rgba(&img, &samples);
+    }
+
+    #[test]
+    fn ripmap_zip_self_roundtrip_level0() {
+        let w = 48;
+        let h = 32;
+        let samples = make_image(w, h);
+        let bytes =
+            encode_exr_tiled_rgba_float_ripmap_box_filter(w, h, &samples, Compression::Zip, 16, 16)
+                .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert_planes_match_rgba(&img, &samples);
+    }
+
+    #[test]
+    fn ripmap_rle_self_roundtrip_level0() {
+        let w = 48;
+        let h = 32;
+        let samples = make_image(w, h);
+        let bytes =
+            encode_exr_tiled_rgba_float_ripmap_box_filter(w, h, &samples, Compression::Rle, 16, 16)
+                .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert_planes_match_rgba(&img, &samples);
+    }
+
+    #[test]
+    fn ripmap_grid_shape_and_dims() {
+        // Constant plane → every cell stays constant; verify grid shape.
+        let w = 48u32;
+        let h = 32u32;
+        let plane: Vec<f32> = vec![0.5; (w * h) as usize];
+        let pyr = build_box_filter_ripmap(w, h, &[plane]);
+        let (nx, ny) = ripmap_level_counts_round_down(w, h);
+        assert_eq!((nx, ny), (6, 6));
+        assert_eq!(pyr.grid.len() as u32, ny);
+        for (lvly, row) in pyr.grid.iter().enumerate() {
+            assert_eq!(row.len() as u32, nx, "row {lvly} width");
+            for (lvlx, cell) in row.iter().enumerate() {
+                let want_w = crate::decoder::mipmap_level_dim(w, lvlx as u32, false);
+                let want_h = crate::decoder::mipmap_level_dim(h, lvly as u32, false);
+                assert_eq!(
+                    (cell.width, cell.height),
+                    (want_w, want_h),
+                    "cell ({lvlx},{lvly}) dims"
+                );
+                assert_eq!(cell.planes[0].len(), (want_w * want_h) as usize);
+                for &v in &cell.planes[0] {
+                    assert!((v - 0.5).abs() < 1e-9, "constant should stay 0.5");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ripmap_rejects_unsupported_compression() {
+        let w = 16u32;
+        let h = 16u32;
+        let samples = make_image(w, h);
+        let err =
+            encode_exr_tiled_rgba_float_ripmap_box_filter(w, h, &samples, Compression::Piz, 16, 16)
+                .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Piz") || msg.contains("ripmap"), "got: {msg}");
     }
 }

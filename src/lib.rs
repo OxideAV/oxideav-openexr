@@ -100,12 +100,28 @@
 //!   patterns) — see `tests/deep_validation.rs`. Multi-part deep WRITE
 //!   remains a followup.
 //!
+//! Round-124 surface (this crate, this round):
+//! * `RIPMAP_LEVELS` tiled-output encoder
+//!   ([`encode_exr_tiled_rgba_float_ripmap_box_filter`] /
+//!   [`encode_exr_tiled_ripmap`]) — single-part tiled files carrying the
+//!   full 2-D reduction grid (`tiledesc.level_mode = 2`). x-levels reduce
+//!   width only, y-levels reduce height only, so cell `(lvlx, lvly)` is
+//!   `mipmap_level_dim(w, lvlx) × mipmap_level_dim(h, lvly)`. The offset
+//!   table / chunk order walks `lvly` outer, `lvlx` inner (matching the
+//!   decoder's `compute_total_tiles` RIPMAP branch), INCREASING_Y
+//!   row-major within each level. NONE / ZIP / ZIPS / RLE. Cross-validated
+//!   against `exrmetrics --convert` + `exrheader`, and our decoder is
+//!   pinned against an `exrmaketiled -r` reference file (see
+//!   `tests/ripmap_encoder_validation.rs`). [`build_box_filter_ripmap`]
+//!   gives a default separable 2× box-filter grid; callers needing custom
+//!   filtering supply their own [`RipmapPyramid`].
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); `RIPMAP_LEVELS` tiled-output writes; multi-part WRITE
-//! for deep + tiled parts; deep-tile data (`type = "deeptile"`); HDR
-//! pixel-format integration with `oxideav-core`.
+//! public spec); multi-part WRITE for deep + tiled parts; deep-tile data
+//! (`type = "deeptile"`); HDR pixel-format integration with
+//! `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -140,8 +156,10 @@ pub use header::{
 };
 pub use image::{ExrImage, ExrPlane};
 pub use mipmap_encoder::{
-    build_box_filter_pyramid, encode_exr_tiled_mipmap,
-    encode_exr_tiled_rgba_float_mipmap_box_filter, mipmap_level_count_round_down, MipmapLevel,
+    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap,
+    encode_exr_tiled_rgba_float_mipmap_box_filter, encode_exr_tiled_rgba_float_ripmap_box_filter,
+    encode_exr_tiled_ripmap, mipmap_level_count_round_down, ripmap_level_counts_round_down,
+    MipmapLevel, RipmapLevel, RipmapPyramid,
 };
 pub use multipart_encoder::{
     encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,
