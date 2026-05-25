@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-130 single-part deep TILED WRITE + READ. New public API:
+  `encode_exr_deep_tiled`, `parse_exr_deep_tiled`, `DeepTiledInput`,
+  `DeepTiledImage`. Emits / consumes single-part deep-tiled files with
+  `type = "deeptile"`, the `tiles[tiledesc]` attribute (ONE_LEVEL +
+  ROUND_DOWN), `chunkCount = tx_count * ty_count`, `version = 1`, and
+  `maxSamplesPerPixel`. Empirical version-field discovery: single-part
+  deep tiled sets the `non_image` (0x800) bit ONLY — `exrheader`
+  rejects files that also set `single_tile` (0x200) here. Each tile
+  chunk on disk: `i32 tx, i32 ty, i32 lvlx, i32 lvly, u64 packed_table,
+  u64 packed_data, u64 unpacked_data, packed_table_bytes,
+  packed_sample_bytes`. Per-tile offset table is `tw * th * 4` bytes of
+  cumulative i32 entries (row-major within the tile's valid rectangle)
+  for compressed chunks; the reader additionally accepts the openexr.com
+  reference's NONE-compression convention of padding to
+  `tile_x * tile_y * 4` bytes so files produced by `exrmetrics --convert
+  -z none` round-trip cleanly. Sample data is non-interleaved
+  (channel-major within each tile). Compression NONE / RLE / ZIPS (deep
+  ZIP rejected to match the openexr.com reference's `exrinfo`). The
+  reader trims edge tiles to their valid pixel rectangle and reassembles
+  channel samples into pixel-scan row-major order before return, so
+  callers don't have to know the file was tiled. Tests in `src/deep.rs`
+  (9 unit tests covering NONE/ZIPS/RLE self-roundtrip, 13×9-in-4×4 edge
+  tiles, all-zero samples, ZIP rejection, sub-sampled rejection,
+  rejection of flat / scanline-deep files) + `tests/deep_validation.rs`
+  (6 cross-validation tests: `exrheader` accepts the file with the
+  expected `deeptile` / `tiles` dump, `exrmetrics --convert -z none`
+  round-trips NONE / ZIPS / RLE / edge-tile cases bit-exactly back
+  through `parse_exr_deep_tiled`, plus a 23×17-in-6×5 pure-Rust
+  roundtrip). MIPMAP/RIPMAP deep tiled + multi-part deep tiled are
+  followups.
 - Round-127 multi-part deep scanline WRITE. New public API:
   `encode_exr_multipart_deep_scanline`, `MultipartDeepScanlinePart`.
   Emits files with version-field bits 0x1800 (multipart + non_image) set,

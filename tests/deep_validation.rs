@@ -23,9 +23,9 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_deep_scanline, encode_exr_multipart_deep_scanline, parse_exr_deep_multipart,
-    parse_exr_deep_scanline, Channel, Compression, DeepScanlineInput, MultipartDeepScanlinePart,
-    PixelType,
+    encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_multipart_deep_scanline,
+    parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled, Channel, Compression,
+    DeepScanlineInput, DeepTiledInput, MultipartDeepScanlinePart, PixelType,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -756,6 +756,171 @@ fn exrmultipart_separate_splits_our_multipart_deep_three_parts() {
     let _ = std::fs::remove_file(&p1);
     let _ = std::fs::remove_file(&p2);
     let _ = std::fs::remove_dir(&dir);
+}
+
+// ----------------------------------------------------------------------
+// Round-130 single-part deep TILED WRITE + READ validation.
+//
+// Strategy: build a single-part deep-tiled file directly with our new
+// `encode_exr_deep_tiled`, then validate:
+//
+//   1. `exrheader` accepts the file and reports `type="deeptile"` +
+//      the `tiles` tiledesc attribute.
+//   2. `exrmetrics --convert -z none` decompresses our deep-tiled file
+//      and re-emits it; we then re-parse the decompressed file with
+//      `parse_exr_deep_tiled` and confirm every sample round-trips
+//      bit-exactly.
+//
+// Per the openexr.com empirical convention, single-part deep-tiled
+// files set the non_image (0x800) version-field bit ONLY; the
+// `tiles[tiledesc]` attribute + `type="deeptile"` string-attribute are
+// what discriminate this file format from deep scanline. `exrheader`
+// rejects files that also set the single_tile (0x200) bit.
+// ----------------------------------------------------------------------
+
+#[test]
+fn exrheader_accepts_our_deep_tiled_file() {
+    if !exrheader_available() {
+        eprintln!("exrheader not available, skipping");
+        return;
+    }
+    let (spp, planes) = build_synthetic(16, 12);
+    let input = DeepTiledInput {
+        width: 16,
+        height: 12,
+        tile_x: 8,
+        tile_y: 4,
+        channels: channels_rgba_float(),
+        samples_per_pixel: &spp,
+        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        compression: Compression::Zips,
+    };
+    let bytes = encode_exr_deep_tiled(&input).unwrap();
+    let dir = tempdir();
+    let path = format!("{dir}/deep_tiled.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("exrheader").arg(&path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "exrheader rejected our deep-tiled file:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("deeptile"),
+        "exrheader output didn't mention 'deeptile':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("tiles") && stdout.contains("tile size"),
+        "exrheader output didn't mention 'tiles' / 'tile size':\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+fn deep_tiled_cross_roundtrip_via_exrmetrics(z: Compression, w: u32, h: u32, tx: u32, ty: u32) {
+    if !tool_available("exrmetrics") {
+        eprintln!("exrmetrics not available, skipping ({z:?})");
+        return;
+    }
+    let (spp, planes) = build_synthetic(w, h);
+    let input = DeepTiledInput {
+        width: w,
+        height: h,
+        tile_x: tx,
+        tile_y: ty,
+        channels: channels_rgba_float(),
+        samples_per_pixel: &spp,
+        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        compression: z,
+    };
+    let bytes = encode_exr_deep_tiled(&input).unwrap();
+    let dir = tempdir();
+    let in_path = format!("{dir}/in.exr");
+    let out_path = format!("{dir}/out.exr");
+    std::fs::write(&in_path, &bytes).unwrap();
+    let out = Command::new("exrmetrics")
+        .arg("--convert")
+        .arg("-z")
+        .arg("none")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_path)
+        .output()
+        .expect("exrmetrics spawn");
+    assert!(
+        out.status.success(),
+        "exrmetrics rejected our deep-tiled {z:?} output:\n stdout: {}\n stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let decoded_bytes = std::fs::read(&out_path).unwrap();
+    let img = parse_exr_deep_tiled(&decoded_bytes).unwrap();
+    assert_eq!(img.width(), w);
+    assert_eq!(img.height(), h);
+    assert_eq!(img.tile_x, tx);
+    assert_eq!(img.tile_y, ty);
+    assert_eq!(img.samples_per_pixel, spp);
+    for (got, want) in img.channel_samples.iter().zip(planes.iter()) {
+        assert_eq!(
+            got, want,
+            "deep tiled cross-roundtrip channel mismatch (z={z:?})"
+        );
+    }
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn exrmetrics_decodes_our_deep_tiled_none() {
+    deep_tiled_cross_roundtrip_via_exrmetrics(Compression::None, 16, 12, 8, 4);
+}
+
+#[test]
+fn exrmetrics_decodes_our_deep_tiled_zips() {
+    deep_tiled_cross_roundtrip_via_exrmetrics(Compression::Zips, 16, 12, 8, 4);
+}
+
+#[test]
+fn exrmetrics_decodes_our_deep_tiled_rle() {
+    deep_tiled_cross_roundtrip_via_exrmetrics(Compression::Rle, 16, 12, 8, 4);
+}
+
+#[test]
+fn exrmetrics_decodes_our_deep_tiled_edge_tiles_13x9_in_4x4() {
+    // 13×9 with 4×4 tiles → right column + bottom row are partial tiles,
+    // exercising the edge-clipping path through the reference tool.
+    deep_tiled_cross_roundtrip_via_exrmetrics(Compression::Zips, 13, 9, 4, 4);
+}
+
+#[test]
+fn our_writer_and_reader_deep_tiled_full_roundtrip() {
+    // Pure-Rust round-trip: our writer → our reader, no external tools.
+    // Larger image with edge tiles in both axes exercises the second
+    // pass that re-emits channel samples in pixel-scan order from the
+    // per-tile sample slabs.
+    let (spp, planes) = build_synthetic(23, 17);
+    let input = DeepTiledInput {
+        width: 23,
+        height: 17,
+        tile_x: 6,
+        tile_y: 5,
+        channels: channels_rgba_float(),
+        samples_per_pixel: &spp,
+        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        compression: Compression::Zips,
+    };
+    let bytes = encode_exr_deep_tiled(&input).unwrap();
+    let img = parse_exr_deep_tiled(&bytes).unwrap();
+    assert_eq!(img.width(), 23);
+    assert_eq!(img.height(), 17);
+    assert_eq!(img.tile_x, 6);
+    assert_eq!(img.tile_y, 5);
+    assert_eq!(img.samples_per_pixel, spp);
+    for (got, want) in img.channel_samples.iter().zip(planes.iter()) {
+        assert_eq!(got, want);
+    }
 }
 
 #[test]

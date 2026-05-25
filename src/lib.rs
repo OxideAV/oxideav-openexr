@@ -130,12 +130,33 @@
 //!   NONE / RLE / ZIPS compression. Deep-tiled WRITE (`type =
 //!   "deeptile"`) still a followup.
 //!
+//! Round-130 surface (this crate, this round):
+//! * Single-part deep TILED WRITE + READ
+//!   ([`encode_exr_deep_tiled`] / [`parse_exr_deep_tiled`] +
+//!   [`DeepTiledInput`] / [`DeepTiledImage`]). Emits files with the
+//!   `non_image` (0x800) version-field bit set ONLY (single-part deep
+//!   tiled files do NOT set `single_tile` — the `tiles[tiledesc]`
+//!   attribute + `type="deeptile"` string attribute are the
+//!   discriminators; `exrheader` rejects files that set both bits).
+//!   Headers carry `type="deeptile"`, `version=1`, `maxSamplesPerPixel`,
+//!   `tiles` tiledesc (ONE_LEVEL + ROUND_DOWN), `chunkCount = tx_count *
+//!   ty_count`. Each tile chunk on disk is `i32 tx, i32 ty, i32 lvlx,
+//!   i32 lvly, u64 packed_table, u64 packed_data, u64 unpacked_data,
+//!   packed_table_bytes, packed_sample_bytes`. Per-tile offset table
+//!   holds `tile_h * tile_w` cumulative i32 entries (per-row within the
+//!   tile rectangle). Edge tiles store only their valid pixel area.
+//!   Sample data is non-interleaved (channel-major within each tile).
+//!   Compression NONE / RLE / ZIPS (deep ZIP rejected, matching the
+//!   single-part deep scanline encoder). Self-roundtrip + cross-validated
+//!   against `exrheader` (header dump + tiledesc + type=deeptile).
+//!   MIPMAP/RIPMAP deep tiled + multi-part deep tiled are followups.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); multi-part WRITE for tiled parts + deep-tile data
-//! (`type = "deeptile"`); HDR pixel-format integration with
-//! `oxideav-core`.
+//! public spec); multi-part WRITE for tiled parts + deep-tile multipart;
+//! multi-level deep tiled (MIPMAP/RIPMAP); HDR pixel-format integration
+//! with `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -158,9 +179,9 @@ pub const CODEC_ID_STR: &str = "openexr";
 
 pub use decoder::{mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart};
 pub use deep::{
-    encode_exr_deep_scanline, encode_exr_multipart_deep_scanline, parse_exr_deep_multipart,
-    parse_exr_deep_scanline, DeepExrImage, DeepScanlineInput, DeepScanlinePart,
-    MultipartDeepScanlinePart,
+    encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_multipart_deep_scanline,
+    parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled, DeepExrImage,
+    DeepScanlineInput, DeepScanlinePart, DeepTiledImage, DeepTiledInput, MultipartDeepScanlinePart,
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,

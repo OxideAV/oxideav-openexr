@@ -1604,6 +1604,835 @@ fn build_deep_part_attrs(
     ]
 }
 
+// ---------------------------------------------------------------------
+// Single-part deep TILED WRITE + READ (round 130).
+//
+// Layout (single-part, version-field bit 0x800 set — `non_image` only):
+//
+//   magic(4) | version(4 with non_image bit set, NOT single_tile = 0x802)
+//
+// Empirical-spec note: single-part deep-tiled files DO NOT set the
+// `single_tile` (0x200) bit. The `tiles[tiledesc]` attribute + the
+// `type = "deeptile"` string-attribute are the discriminators; setting
+// the `single_tile` bit alongside `non_image` causes `exrheader` to
+// reject the file ("Unable to open"). Matches the openexr.com File
+// Layout convention for deep files: deep formats use the non_image bit
+// alone for single-part, and add `multipart` (0x1000) for multi-part.
+//   header attrs (channels, chunkCount[int], compression, dataWindow,
+//     displayWindow, lineOrder, maxSamplesPerPixel[int],
+//     pixelAspectRatio, screenWindowCenter, screenWindowWidth,
+//     tiles[tiledesc], type[string="deeptile"], version[int=1])
+//   NUL terminator
+//   tile-offset table: chunkCount * u64 LE absolute byte offsets
+//   tile chunks each on disk as:
+//     i32 tile_x          (column index in the tile grid)
+//     i32 tile_y          (row index in the tile grid)
+//     i32 lvlx            (always 0 for ONE_LEVEL)
+//     i32 lvly            (always 0 for ONE_LEVEL)
+//     u64 packed_pixel_offset_table_size
+//     u64 packed_sample_data_size
+//     u64 unpacked_sample_data_size
+//     packed_pixel_offset_table_bytes
+//     packed_sample_data_bytes
+//
+// The per-tile pixel-offset table holds `tile_h * tile_w` cumulative
+// i32 entries, one per column per row of the tile rectangle (matching
+// the deep-scanline convention but rectangularly per-tile). After
+// decompression the sample data is non-interleaved (all of channel 0's
+// samples for this tile in pixel-scan order, then channel 1's, ...).
+//
+// Edge tiles store only the valid pixel rectangle (last row / column
+// tiles may be smaller than `tileX × tileY`), matching the flat tiled
+// encoder.
+//
+// ONE_LEVEL only. Multi-level deep tiled (MIPMAP/RIPMAP) is a followup.
+// Compression NONE / RLE / ZIPS (matching the deep scanline encoder;
+// deep ZIP rejected by the openexr.com reference `exrinfo`).
+// ---------------------------------------------------------------------
+
+/// Input descriptor for [`encode_exr_deep_tiled`].
+pub struct DeepTiledInput<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// Tile pixel dimensions. Both must be > 0; edge tiles store only
+    /// the valid pixel rectangle (i.e. last row/column tiles may be
+    /// smaller than `tile_x × tile_y`).
+    pub tile_x: u32,
+    pub tile_y: u32,
+    /// Channels in alphabetical order (sub-sampled channels not
+    /// supported on the deep path).
+    pub channels: Vec<Channel>,
+    /// One u32 per pixel (`width * height` long) — how many samples this
+    /// pixel carries.
+    pub samples_per_pixel: &'a [u32],
+    /// One f32 slice per channel, each `samples_per_pixel.iter().sum()`
+    /// long, in pixel-scan order. UINT stored as the u32 bits cast to
+    /// f32 (matching the [`DeepExrImage`] convention).
+    pub channel_samples: Vec<&'a [f32]>,
+    pub compression: Compression,
+}
+
+/// Single-part deep-tiled EXR returned by [`parse_exr_deep_tiled`].
+///
+/// Pixel data is materialised into the same flat layout
+/// [`DeepExrImage`] uses for scanline files: `samples_per_pixel` is
+/// `width * height` long; each `channel_samples[ch]` is
+/// `samples_per_pixel.iter().sum()` long in pixel-scan order. The
+/// tile-grid structure is fully reassembled into row-major pixel
+/// coordinates before return — callers don't have to know the file was
+/// tiled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeepTiledImage {
+    pub data_window: Box2i,
+    pub display_window: Box2i,
+    pub line_order: LineOrder,
+    pub compression: Compression,
+    /// Tile dimensions as recorded in the `tiles[tiledesc]` attribute.
+    pub tile_x: u32,
+    pub tile_y: u32,
+    pub channels: Vec<Channel>,
+    pub samples_per_pixel: Vec<u32>,
+    pub channel_samples: Vec<Vec<f32>>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl DeepTiledImage {
+    pub fn width(&self) -> u32 {
+        self.data_window.width()
+    }
+    pub fn height(&self) -> u32 {
+        self.data_window.height()
+    }
+    pub fn total_samples(&self) -> u64 {
+        self.samples_per_pixel.iter().map(|&n| n as u64).sum()
+    }
+}
+
+/// Encode a single-part `type="deeptile"` ONE_LEVEL deep-tiled EXR.
+///
+/// Self-roundtrips through [`parse_exr_deep_tiled`]; intended also to
+/// be readable by the reference `exrheader` + `exrmetrics --convert`
+/// flow.
+pub fn encode_exr_deep_tiled(input: &DeepTiledInput) -> Result<Vec<u8>> {
+    // ---- Validate input (mirrors deep scanline + flat tile rules). ----
+    if !matches!(
+        input.compression,
+        Compression::None | Compression::Rle | Compression::Zips
+    ) {
+        return Err(ExrError::unsupported(format!(
+            "deep tiled encode compression {:?} (openexr.com reference accepts \
+             only NONE/RLE/ZIPS for deep — ZIP is listed in the spec page but \
+             exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
+            input.compression
+        )));
+    }
+    if input.width == 0 || input.height == 0 {
+        return Err(ExrError::invalid(format!(
+            "deep tiled dataWindow {}x{} must be > 0",
+            input.width, input.height
+        )));
+    }
+    if input.tile_x == 0 || input.tile_y == 0 {
+        return Err(ExrError::invalid(format!(
+            "deep tile size {}×{} must both be > 0",
+            input.tile_x, input.tile_y
+        )));
+    }
+    let pixels = (input.width as usize) * (input.height as usize);
+    if input.samples_per_pixel.len() != pixels {
+        return Err(ExrError::invalid(format!(
+            "samples_per_pixel len {} != width*height = {pixels}",
+            input.samples_per_pixel.len()
+        )));
+    }
+    if input.channels.len() != input.channel_samples.len() {
+        return Err(ExrError::invalid(format!(
+            "channels.len()={} != channel_samples.len()={}",
+            input.channels.len(),
+            input.channel_samples.len()
+        )));
+    }
+    let total_samples: u64 = input.samples_per_pixel.iter().map(|&n| n as u64).sum();
+    for (ch, slc) in input.channels.iter().zip(input.channel_samples.iter()) {
+        if ch.x_sampling != 1 || ch.y_sampling != 1 {
+            return Err(ExrError::unsupported(format!(
+                "deep tiled encode + sub-sampled channel '{}'",
+                ch.name
+            )));
+        }
+        if slc.len() != total_samples as usize {
+            return Err(ExrError::invalid(format!(
+                "channel '{}' sample slice len {} != total_samples {total_samples}",
+                ch.name,
+                slc.len()
+            )));
+        }
+    }
+    for win in input.channels.windows(2) {
+        if win[0].name >= win[1].name {
+            return Err(ExrError::invalid(format!(
+                "deep tiled channels not alphabetical: '{}' >= '{}'",
+                win[0].name, win[1].name
+            )));
+        }
+    }
+
+    let tx_count = input.width.div_ceil(input.tile_x);
+    let ty_count = input.height.div_ceil(input.tile_y);
+    let chunk_count = (tx_count * ty_count) as usize;
+    let max_samples = input.samples_per_pixel.iter().copied().max().unwrap_or(0) as i32;
+
+    // ---- Header attributes. ----
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (input.width - 1) as i32,
+        y_max: (input.height - 1) as i32,
+    };
+    let mut tiledesc = Vec::with_capacity(9);
+    tiledesc.extend_from_slice(&input.tile_x.to_le_bytes());
+    tiledesc.extend_from_slice(&input.tile_y.to_le_bytes());
+    tiledesc.push(0x00); // ONE_LEVEL + ROUND_DOWN
+
+    let attrs = vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(input.channels.clone()),
+        },
+        Attribute {
+            name: "chunkCount".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: (chunk_count as i32).to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(input.compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "maxSamplesPerPixel".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: max_samples.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "tiles".to_string(),
+            value: AttributeValue::Other {
+                type_name: "tiledesc".to_string(),
+                data: tiledesc,
+            },
+        },
+        Attribute {
+            name: "type".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"deeptile".to_vec(),
+            },
+        },
+        Attribute {
+            name: "version".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: 1i32.to_le_bytes().to_vec(),
+            },
+        },
+    ];
+
+    // Single-part deep-tiled files use the non_image bit (0x800) ONLY —
+    // the openexr.com reference rejects files that also set single_tile
+    // (0x200) here. The `tiles` attribute + `type="deeptile"` string
+    // attribute carry the tile-ness signal instead.
+    let version = VersionField::from_u32(2 | 0x800);
+    let mut header_bytes = Vec::with_capacity(512);
+    header_bytes.extend_from_slice(&EXR_MAGIC.to_le_bytes());
+    header_bytes.extend_from_slice(&version.to_u32().to_le_bytes());
+    for a in &attrs {
+        header_bytes.extend_from_slice(a.name.as_bytes());
+        header_bytes.push(0);
+        let (type_name, payload) = encode_attribute_value(&a.value);
+        header_bytes.extend_from_slice(type_name.as_bytes());
+        header_bytes.push(0);
+        header_bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+        header_bytes.extend_from_slice(&payload);
+    }
+    header_bytes.push(0); // header terminator
+
+    // ---- Build per-tile payloads in ty-outer, tx-inner order. ----
+    struct ChunkBlob {
+        tx: u32,
+        ty: u32,
+        packed_table: Vec<u8>,
+        packed_data: Vec<u8>,
+        unpacked_data_len: u64,
+    }
+    let mut chunks: Vec<ChunkBlob> = Vec::with_capacity(chunk_count);
+
+    let w = input.width as usize;
+    let bpp_total: usize = input
+        .channels
+        .iter()
+        .map(|c| c.pixel_type.bytes_per_sample())
+        .sum();
+
+    // Pre-compute cumulative-EXCLUSIVE per-pixel sample offsets so we can
+    // slice each channel's samples by pixel index.
+    let pixel_sample_starts: Vec<u64> = {
+        let mut v = Vec::with_capacity(pixels + 1);
+        v.push(0u64);
+        let mut acc: u64 = 0;
+        for &n in input.samples_per_pixel {
+            acc += n as u64;
+            v.push(acc);
+        }
+        v
+    };
+
+    for ty in 0..ty_count {
+        for tx in 0..tx_count {
+            let x0 = tx * input.tile_x;
+            let y0 = ty * input.tile_y;
+            let x1 = (x0 + input.tile_x).min(input.width);
+            let y1 = (y0 + input.tile_y).min(input.height);
+            let tw = (x1 - x0) as usize;
+            let th = (y1 - y0) as usize;
+            let entries = tw * th;
+
+            // Per-tile pixel-offset table: `tw * th * 4` bytes of
+            // cumulative-inclusive i32 entries (row-major within the
+            // tile's valid pixel rectangle). The reference reader
+            // unpacks the compressed table to exactly this size; for
+            // NONE compression the reference happens to round up to
+            // `tile_x * tile_y * 4` bytes on disk because its in-memory
+            // buffer is full-tile-sized, but for ZIPS/RLE it reports
+            // `unpacked = tw * th * 4`, which is the canonical encoded
+            // size we always emit here.
+            let mut table_bytes = Vec::with_capacity(entries * 4);
+            let mut tile_spp: Vec<u32> = Vec::with_capacity(entries);
+            for r in 0..th {
+                let dst_y = y0 as usize + r;
+                let mut row_acc: i32 = 0;
+                for c in 0..tw {
+                    let dst_x = x0 as usize + c;
+                    let n = input.samples_per_pixel[dst_y * w + dst_x];
+                    tile_spp.push(n);
+                    row_acc = row_acc.checked_add(n as i32).ok_or_else(|| {
+                        ExrError::invalid(format!(
+                            "deep tile ({tx},{ty}) row {r}: cumulative offset overflows i32"
+                        ))
+                    })?;
+                    table_bytes.extend_from_slice(&row_acc.to_le_bytes());
+                }
+            }
+
+            // Assemble channel-major non-interleaved sample bytes for
+            // this tile.
+            let tile_total_samples: u64 = tile_spp.iter().map(|&n| n as u64).sum();
+            let mut sample_bytes: Vec<u8> =
+                Vec::with_capacity(tile_total_samples as usize * bpp_total);
+            for (ch_idx, ch) in input.channels.iter().enumerate() {
+                let plane = input.channel_samples[ch_idx];
+                for r in 0..th {
+                    let dst_y = y0 as usize + r;
+                    for c in 0..tw {
+                        let dst_x = x0 as usize + c;
+                        let p = dst_y * w + dst_x;
+                        let s_start = pixel_sample_starts[p] as usize;
+                        let s_end = pixel_sample_starts[p + 1] as usize;
+                        for &v in &plane[s_start..s_end] {
+                            match ch.pixel_type {
+                                PixelType::Half => sample_bytes
+                                    .extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes()),
+                                PixelType::Float => {
+                                    sample_bytes.extend_from_slice(&v.to_le_bytes())
+                                }
+                                PixelType::Uint => {
+                                    let u = if v.is_nan() || v < 0.0 {
+                                        0u32
+                                    } else if v >= (u32::MAX as f32) {
+                                        u32::MAX
+                                    } else {
+                                        (v + 0.5) as u32
+                                    };
+                                    sample_bytes.extend_from_slice(&u.to_le_bytes());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let packed_table = compress_buffer(&table_bytes, input.compression)?;
+            let packed_data = compress_buffer(&sample_bytes, input.compression)?;
+            chunks.push(ChunkBlob {
+                tx,
+                ty,
+                packed_table,
+                packed_data,
+                unpacked_data_len: sample_bytes.len() as u64,
+            });
+        }
+    }
+
+    // ---- Compute absolute tile-chunk offsets. ----
+    // Per-tile-chunk header on disk = 4 i32 coords + 3 u64 sizes = 40 B.
+    let offset_table_bytes = chunk_count * 8;
+    let chunks_start = header_bytes.len() + offset_table_bytes;
+    let mut absolute_offsets: Vec<u64> = Vec::with_capacity(chunk_count);
+    let mut running = chunks_start;
+    for c in &chunks {
+        absolute_offsets.push(running as u64);
+        running += 40 + c.packed_table.len() + c.packed_data.len();
+    }
+
+    let mut out = Vec::with_capacity(running);
+    out.extend_from_slice(&header_bytes);
+    for &o in &absolute_offsets {
+        out.extend_from_slice(&o.to_le_bytes());
+    }
+    for c in &chunks {
+        out.extend_from_slice(&(c.tx as i32).to_le_bytes());
+        out.extend_from_slice(&(c.ty as i32).to_le_bytes());
+        out.extend_from_slice(&0i32.to_le_bytes()); // lvlx
+        out.extend_from_slice(&0i32.to_le_bytes()); // lvly
+        out.extend_from_slice(&(c.packed_table.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(c.packed_data.len() as u64).to_le_bytes());
+        out.extend_from_slice(&c.unpacked_data_len.to_le_bytes());
+        out.extend_from_slice(&c.packed_table);
+        out.extend_from_slice(&c.packed_data);
+    }
+    Ok(out)
+}
+
+/// Parse a single-part `type="deeptile"` ONE_LEVEL deep-tiled EXR back
+/// into a [`DeepTiledImage`].
+///
+/// Compression: NONE / RLE / ZIPS (matching the encoder; deep ZIP
+/// rejected by the openexr.com reference). Sub-sampled channels are not
+/// permitted in tiled files (per the EXR file format), so we reject any
+/// channel with `xSampling != 1 || ySampling != 1`.
+///
+/// Multi-level tiled deep (MIPMAP / RIPMAP) is a followup; this round
+/// only accepts ONE_LEVEL (`tiledesc.mode == 0x00`).
+pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
+    let header = parse_header_allow_deep(bytes)?;
+    if header.version.multipart {
+        return Err(ExrError::unsupported(
+            "multi-part deep tiled EXR (single-part parser called on multipart file)".to_string(),
+        ));
+    }
+    if !header.version.non_image {
+        return Err(ExrError::invalid(
+            "parse_exr_deep_tiled called on a flat (non-deep) file".to_string(),
+        ));
+    }
+    // Single-part deep-tiled files do NOT set the single_tile (0x200) bit
+    // — they discriminate via type="deeptile" + the tiles[tiledesc]
+    // attribute. We accept either presence/absence of the bit defensively
+    // (the format string attribute is the source of truth), but rely on
+    // the type attribute below to confirm this is a deeptile file.
+    let part_type = find_string_attr(&header.attributes, "type").ok_or_else(|| {
+        ExrError::invalid("deep tiled file missing required 'type' attribute".to_string())
+    })?;
+    if part_type != "deeptile" {
+        return Err(ExrError::unsupported(format!(
+            "deep tiled file type='{part_type}' (only 'deeptile' supported here — \
+             'deepscanline' routes through parse_exr_deep_scanline)"
+        )));
+    }
+    let chunk_count = find_int_attr(&header.attributes, "chunkCount").ok_or_else(|| {
+        ExrError::invalid("deep tiled file missing required 'chunkCount' attribute".to_string())
+    })? as usize;
+    let data_window = find_box2i(&header.attributes, "dataWindow").ok_or_else(|| {
+        ExrError::invalid("deep tiled file missing required 'dataWindow' attribute".to_string())
+    })?;
+    let display_window = find_box2i(&header.attributes, "displayWindow").unwrap_or(data_window);
+    let line_order =
+        find_line_order(&header.attributes, "lineOrder").unwrap_or(LineOrder::IncreasingY);
+    let compression = find_compression(&header.attributes, "compression").ok_or_else(|| {
+        ExrError::invalid("deep tiled file missing required 'compression' attribute".to_string())
+    })?;
+    if !matches!(
+        compression,
+        Compression::None | Compression::Rle | Compression::Zips
+    ) {
+        return Err(ExrError::invalid(format!(
+            "deep tiled file uses compression {compression:?} (openexr.com reference \
+             accepts only NONE/RLE/ZIPS for deep)"
+        )));
+    }
+    let channels = find_channels(&header.attributes).ok_or_else(|| {
+        ExrError::invalid("deep tiled file missing required 'channels' attribute".to_string())
+    })?;
+    let mut sorted_channels = channels.clone();
+    sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+    for ch in &sorted_channels {
+        if ch.x_sampling != 1 || ch.y_sampling != 1 {
+            return Err(ExrError::unsupported(format!(
+                "deep tiled + sub-sampled channel '{}' (spec requires 1×1 in tiled files)",
+                ch.name
+            )));
+        }
+    }
+
+    // tiles[tiledesc] payload: u32 xSize | u32 ySize | u8 mode.
+    let tile_attr = header
+        .attributes
+        .iter()
+        .find(|a| a.name == "tiles")
+        .ok_or_else(|| {
+            ExrError::invalid("deep tiled file missing required 'tiles' attribute".to_string())
+        })?;
+    let (tile_x, tile_y) = match &tile_attr.value {
+        AttributeValue::Other { type_name, data } if type_name == "tiledesc" && data.len() == 9 => {
+            let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
+            let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            let mode = data[8];
+            // ONE_LEVEL = low nibble 0; ROUND_DOWN = high nibble 0.
+            if mode != 0x00 {
+                return Err(ExrError::unsupported(format!(
+                    "deep tiled tiledesc mode=0x{mode:02x} (only 0x00 = ONE_LEVEL + \
+                     ROUND_DOWN supported in this round — MIPMAP/RIPMAP deep is a followup)"
+                )));
+            }
+            if xs == 0 || ys == 0 {
+                return Err(ExrError::invalid(format!(
+                    "deep tiled tiledesc tile size {xs}×{ys} must both be > 0"
+                )));
+            }
+            (xs, ys)
+        }
+        _ => {
+            return Err(ExrError::invalid(format!(
+                "deep tiled tiles attribute has unexpected shape: {:?}",
+                tile_attr.value
+            )));
+        }
+    };
+
+    let width = data_window.width();
+    let height = data_window.height();
+    if width == 0 || height == 0 {
+        return Err(ExrError::invalid(format!(
+            "deep tiled dataWindow {width}×{height} must be > 0"
+        )));
+    }
+    let tx_count = width.div_ceil(tile_x);
+    let ty_count = height.div_ceil(tile_y);
+    let expected_chunks = (tx_count * ty_count) as usize;
+    if chunk_count != expected_chunks {
+        return Err(ExrError::invalid(format!(
+            "deep tiled chunkCount={chunk_count} disagrees with tile-grid math ({expected_chunks})"
+        )));
+    }
+
+    // Offset table.
+    let mut pos = header.end_offset;
+    if pos + chunk_count * 8 > bytes.len() {
+        return Err(ExrError::invalid(
+            "deep tiled offset table runs past EOF".to_string(),
+        ));
+    }
+    let mut offsets = Vec::with_capacity(chunk_count);
+    for _ in 0..chunk_count {
+        let off = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
+        offsets.push(off);
+        pos += 8;
+    }
+
+    // Per-tile materialisation: first decode every tile into a sparse
+    // per-pixel samples_per_pixel grid, then assemble flat per-channel
+    // sample vectors in pixel-scan order from the per-tile sample slabs
+    // (we cannot push directly into channel_samples in tile-arrival
+    // order because the on-disk order is tile-major, not pixel-major).
+    let pixels = (width as usize) * (height as usize);
+    let mut samples_per_pixel: Vec<u32> = vec![0; pixels];
+    // Per-tile decoded sample buffers, indexed by (tx + ty * tx_count).
+    struct TileDecoded {
+        // tx, ty, tw, th and one Vec<f32> per channel of length
+        // tile_total_samples (channel-major within the tile).
+        tx: u32,
+        ty: u32,
+        tw: u32,
+        th: u32,
+        channel_samples: Vec<Vec<f32>>,
+    }
+    let mut tile_decoded: Vec<Option<TileDecoded>> = (0..expected_chunks).map(|_| None).collect();
+
+    let block_bpp: usize = sorted_channels
+        .iter()
+        .map(|c| c.pixel_type.bytes_per_sample())
+        .sum();
+
+    for (chunk_idx, &block_off) in offsets.iter().enumerate() {
+        // Chunk header: 4 i32 + 3 u64 = 40 bytes.
+        if block_off + 40 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "deep tile chunk {chunk_idx} header past EOF"
+            )));
+        }
+        let tx = i32::from_le_bytes(bytes[block_off..block_off + 4].try_into().unwrap());
+        let ty = i32::from_le_bytes(bytes[block_off + 4..block_off + 8].try_into().unwrap());
+        let lvlx = i32::from_le_bytes(bytes[block_off + 8..block_off + 12].try_into().unwrap());
+        let lvly = i32::from_le_bytes(bytes[block_off + 12..block_off + 16].try_into().unwrap());
+        if lvlx != 0 || lvly != 0 {
+            return Err(ExrError::unsupported(format!(
+                "deep tiled chunk {chunk_idx} has lvlx={lvlx} lvly={lvly} \
+                 (only ONE_LEVEL supported — non-zero level is a followup)"
+            )));
+        }
+        let packed_table =
+            u64::from_le_bytes(bytes[block_off + 16..block_off + 24].try_into().unwrap()) as usize;
+        let packed_data =
+            u64::from_le_bytes(bytes[block_off + 24..block_off + 32].try_into().unwrap()) as usize;
+        let unpacked_data =
+            u64::from_le_bytes(bytes[block_off + 32..block_off + 40].try_into().unwrap()) as usize;
+
+        if tx < 0 || ty < 0 || (tx as u32) >= tx_count || (ty as u32) >= ty_count {
+            return Err(ExrError::invalid(format!(
+                "deep tile chunk {chunk_idx}: tx={tx} ty={ty} outside grid {tx_count}×{ty_count}"
+            )));
+        }
+        let tx_u = tx as u32;
+        let ty_u = ty as u32;
+        let x0 = tx_u * tile_x;
+        let y0 = ty_u * tile_y;
+        let x1 = (x0 + tile_x).min(width);
+        let y1 = (y0 + tile_y).min(height);
+        let tw = x1 - x0;
+        let th = y1 - y0;
+        let full_tw = tile_x as usize;
+        let full_th = tile_y as usize;
+        // The per-tile pixel-offset table is `tw * th * 4` bytes for
+        // ZIPS/RLE compression (the canonical encoded size). The
+        // openexr.com reference's NONE-compression path happens to
+        // round up to `tile_x * tile_y * 4` bytes on disk because its
+        // in-memory buffer is full-tile-sized; accept both sizes so we
+        // can round-trip files produced by `exrmetrics --convert -z
+        // none` as well as our own. Padding rows/columns repeat the
+        // last valid cumulative so trimming to (tw, th) recovers the
+        // valid pixel data either way.
+        let entries = (tw * th) as usize;
+        let full_entries = full_tw * full_th;
+        let row_stride;
+        let unpacked_table_size;
+        if compression == Compression::None && packed_table == full_entries * 4 {
+            unpacked_table_size = full_entries * 4;
+            row_stride = full_tw;
+        } else {
+            unpacked_table_size = entries * 4;
+            row_stride = tw as usize;
+        }
+
+        let table_start = block_off + 40;
+        let table_end = table_start + packed_table;
+        let data_start = table_end;
+        let data_end = data_start + packed_data;
+        if data_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "deep tile chunk {chunk_idx}: payload runs past EOF"
+            )));
+        }
+
+        let table_bytes = decompress_buffer(
+            &bytes[table_start..table_end],
+            unpacked_table_size,
+            compression,
+        )?;
+        let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
+        for ch in table_bytes.chunks_exact(4) {
+            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        }
+        if cumulative_flat.len() != unpacked_table_size / 4 {
+            return Err(ExrError::invalid(format!(
+                "deep tile chunk {chunk_idx}: offset-table size mismatch ({} != {})",
+                cumulative_flat.len(),
+                unpacked_table_size / 4
+            )));
+        }
+
+        // Per-row of the tile, derive per-pixel sample counts. When the
+        // table is padded (NONE compression + full-tile size), trim to
+        // the first `tw` columns and first `th` rows.
+        let mut tile_total_samples: u64 = 0;
+        for r in 0..th as usize {
+            let row_base = r * row_stride;
+            let row_slice = &cumulative_flat[row_base..row_base + tw as usize];
+            let per_pixel = per_pixel_from_cumulative(row_slice)?;
+            let dst_y = y0 as usize + r;
+            let dst_base = dst_y * width as usize + x0 as usize;
+            for (i, &n) in per_pixel.iter().enumerate() {
+                samples_per_pixel[dst_base + i] = n;
+                tile_total_samples += n as u64;
+            }
+        }
+
+        let expected_unpacked = tile_total_samples as usize * block_bpp;
+        if expected_unpacked != unpacked_data {
+            return Err(ExrError::invalid(format!(
+                "deep tile chunk {chunk_idx}: derived unpacked_data={expected_unpacked} \
+                 disagrees with header unpacked_data={unpacked_data}"
+            )));
+        }
+        let sample_bytes =
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?;
+
+        // Decode each channel's slice of the tile into a Vec<f32> in
+        // pixel-scan order within the tile (row-major). We store this
+        // per-tile rather than scattering directly so we can re-emit
+        // pixel-major channel samples in the second pass.
+        let mut p = 0usize;
+        let mut per_channel: Vec<Vec<f32>> =
+            (0..sorted_channels.len()).map(|_| Vec::new()).collect();
+        for (ch_idx, ch) in sorted_channels.iter().enumerate() {
+            let bps = ch.pixel_type.bytes_per_sample();
+            let need = tile_total_samples as usize * bps;
+            if p + need > sample_bytes.len() {
+                return Err(ExrError::invalid(format!(
+                    "deep tile chunk {chunk_idx}: channel {} bytes past payload end",
+                    ch.name
+                )));
+            }
+            for s in 0..(tile_total_samples as usize) {
+                let off = p + s * bps;
+                let v = match ch.pixel_type {
+                    PixelType::Half => crate::half::half_to_f32(u16::from_le_bytes(
+                        sample_bytes[off..off + 2].try_into().unwrap(),
+                    )),
+                    PixelType::Float => {
+                        f32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap())
+                    }
+                    PixelType::Uint => {
+                        let bits =
+                            u32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap());
+                        bits as f32
+                    }
+                };
+                per_channel[ch_idx].push(v);
+            }
+            p += need;
+        }
+        if p != sample_bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "deep tile chunk {chunk_idx}: consumed {p} of {} payload bytes",
+                sample_bytes.len()
+            )));
+        }
+
+        let tile_grid_idx = (ty_u * tx_count + tx_u) as usize;
+        if tile_decoded[tile_grid_idx].is_some() {
+            return Err(ExrError::invalid(format!(
+                "deep tile ({tx_u},{ty_u}) appears more than once in the offset table"
+            )));
+        }
+        tile_decoded[tile_grid_idx] = Some(TileDecoded {
+            tx: tx_u,
+            ty: ty_u,
+            tw,
+            th,
+            channel_samples: per_channel,
+        });
+    }
+
+    // ---- Second pass: re-emit channel samples in pixel-scan (row-major)
+    // order across the whole image. For each pixel, walk the tile it
+    // belongs to and copy the per-tile channel slab's slice for that
+    // pixel into the global per-channel vector. ----
+    let total_samples: u64 = samples_per_pixel.iter().map(|&n| n as u64).sum();
+    let mut channel_samples: Vec<Vec<f32>> = (0..sorted_channels.len())
+        .map(|_| Vec::with_capacity(total_samples as usize))
+        .collect();
+
+    // For each tile, precompute per-pixel-within-tile cumulative starts
+    // (so we can slice each channel's per-tile vector for any pixel in
+    // the tile).
+    struct TileStarts {
+        pixel_starts: Vec<u64>, // length tw*th + 1, cumulative-exclusive
+    }
+    let mut tile_starts: Vec<TileStarts> = Vec::with_capacity(expected_chunks);
+    for td_opt in &tile_decoded {
+        let td = td_opt.as_ref().ok_or_else(|| {
+            ExrError::invalid("deep tile grid missing one or more tiles".to_string())
+        })?;
+        let entries = (td.tw * td.th) as usize;
+        let mut starts = Vec::with_capacity(entries + 1);
+        starts.push(0u64);
+        let x0 = td.tx * tile_x;
+        let y0 = td.ty * tile_y;
+        let mut acc: u64 = 0;
+        for r in 0..td.th as usize {
+            for c in 0..td.tw as usize {
+                let dst_y = y0 as usize + r;
+                let dst_x = x0 as usize + c;
+                acc += samples_per_pixel[dst_y * width as usize + dst_x] as u64;
+                starts.push(acc);
+            }
+        }
+        tile_starts.push(TileStarts {
+            pixel_starts: starts,
+        });
+    }
+
+    for y in 0..height as usize {
+        let ty = (y / tile_y as usize) as u32;
+        let y_in_tile = y - (ty as usize) * tile_y as usize;
+        for x in 0..width as usize {
+            let tx = (x / tile_x as usize) as u32;
+            let x_in_tile = x - (tx as usize) * tile_x as usize;
+            let tile_grid_idx = (ty * tx_count + tx) as usize;
+            let td = tile_decoded[tile_grid_idx].as_ref().unwrap();
+            let pixel_within_tile = y_in_tile * td.tw as usize + x_in_tile;
+            let s_start = tile_starts[tile_grid_idx].pixel_starts[pixel_within_tile] as usize;
+            let s_end = tile_starts[tile_grid_idx].pixel_starts[pixel_within_tile + 1] as usize;
+            for (ch_idx, dst) in channel_samples
+                .iter_mut()
+                .enumerate()
+                .take(sorted_channels.len())
+            {
+                dst.extend_from_slice(&td.channel_samples[ch_idx][s_start..s_end]);
+            }
+        }
+    }
+
+    Ok(DeepTiledImage {
+        data_window,
+        display_window,
+        line_order,
+        compression,
+        tile_x,
+        tile_y,
+        channels: sorted_channels,
+        samples_per_pixel,
+        channel_samples,
+        attributes: header.attributes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2022,5 +2851,207 @@ mod tests {
         for c in &got[0].channel_samples {
             assert!(c.is_empty());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Round 130: deep tiled (single-part, ONE_LEVEL) WRITE + READ.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn deep_tiled_roundtrip_none_8x8_in_16x16() {
+        let (spp, planes) = synthetic_deep(16, 16);
+        let input = DeepTiledInput {
+            width: 16,
+            height: 16,
+            tile_x: 8,
+            tile_y: 8,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::None,
+        };
+        let bytes = encode_exr_deep_tiled(&input).unwrap();
+        let img = parse_exr_deep_tiled(&bytes).unwrap();
+        assert_eq!(img.width(), 16);
+        assert_eq!(img.height(), 16);
+        assert_eq!(img.tile_x, 8);
+        assert_eq!(img.tile_y, 8);
+        assert_eq!(img.samples_per_pixel, spp);
+        for (got, want) in img.channel_samples.iter().zip(planes.iter()) {
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn deep_tiled_roundtrip_zips_8x4_in_24x12() {
+        // 24×12 with 8×4 tiles → 3 cols × 3 rows = 9 chunks; no edge tiles.
+        let (spp, planes) = synthetic_deep(24, 12);
+        let input = DeepTiledInput {
+            width: 24,
+            height: 12,
+            tile_x: 8,
+            tile_y: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zips,
+        };
+        let bytes = encode_exr_deep_tiled(&input).unwrap();
+        let img = parse_exr_deep_tiled(&bytes).unwrap();
+        assert_eq!(img.samples_per_pixel, spp);
+        for (got, want) in img.channel_samples.iter().zip(planes.iter()) {
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn deep_tiled_roundtrip_rle_edge_tiles_13x9_in_4x4() {
+        // 13×9 with 4×4 tiles → 4 cols × 3 rows = 12 chunks; right column
+        // (tx=3) holds 1px-wide tiles, bottom row (ty=2) holds 1px-tall
+        // tiles — exercises the edge-tile clipping in both axes.
+        let (spp, planes) = synthetic_deep(13, 9);
+        let input = DeepTiledInput {
+            width: 13,
+            height: 9,
+            tile_x: 4,
+            tile_y: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Rle,
+        };
+        let bytes = encode_exr_deep_tiled(&input).unwrap();
+        let img = parse_exr_deep_tiled(&bytes).unwrap();
+        assert_eq!(img.width(), 13);
+        assert_eq!(img.height(), 9);
+        assert_eq!(img.samples_per_pixel, spp);
+        for (got, want) in img.channel_samples.iter().zip(planes.iter()) {
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn deep_tiled_rejects_zip_compression() {
+        // ZIP rejected by the reference exrinfo for deep data — mirror.
+        let (spp, planes) = synthetic_deep(4, 4);
+        let input = DeepTiledInput {
+            width: 4,
+            height: 4,
+            tile_x: 4,
+            tile_y: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zip,
+        };
+        let r = encode_exr_deep_tiled(&input);
+        assert!(r.is_err(), "deep tiled encoder must reject ZIP compression");
+    }
+
+    #[test]
+    fn deep_tiled_rejects_zero_tile_size() {
+        let spp = vec![0u32; 16];
+        let empty: Vec<f32> = Vec::new();
+        let input = DeepTiledInput {
+            width: 4,
+            height: 4,
+            tile_x: 0,
+            tile_y: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&empty, &empty, &empty, &empty],
+            compression: Compression::None,
+        };
+        assert!(encode_exr_deep_tiled(&input).is_err());
+    }
+
+    #[test]
+    fn deep_tiled_rejects_subsampled_channels() {
+        // Tiled deep files must be 1×1 sampled per the spec — match the
+        // restriction the flat tiled encoder already enforces.
+        let chs = vec![Channel {
+            name: "Y".to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 2,
+            y_sampling: 2,
+        }];
+        let spp = vec![0u32; 16];
+        let empty: Vec<f32> = Vec::new();
+        let input = DeepTiledInput {
+            width: 4,
+            height: 4,
+            tile_x: 4,
+            tile_y: 4,
+            channels: chs,
+            samples_per_pixel: &spp,
+            channel_samples: vec![&empty],
+            compression: Compression::None,
+        };
+        assert!(encode_exr_deep_tiled(&input).is_err());
+    }
+
+    #[test]
+    fn deep_tiled_all_zero_samples_8x8_in_4x4() {
+        // Degenerate but spec-legal: every pixel carries 0 samples.
+        let w = 8u32;
+        let h = 8u32;
+        let spp = vec![0u32; (w * h) as usize];
+        let empty: Vec<f32> = Vec::new();
+        let input = DeepTiledInput {
+            width: w,
+            height: h,
+            tile_x: 4,
+            tile_y: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&empty, &empty, &empty, &empty],
+            compression: Compression::Zips,
+        };
+        let bytes = encode_exr_deep_tiled(&input).unwrap();
+        let img = parse_exr_deep_tiled(&bytes).unwrap();
+        assert_eq!(img.samples_per_pixel, spp);
+        for c in &img.channel_samples {
+            assert!(c.is_empty());
+        }
+        // Header sanity: version-field carries non_image (0x800) ONLY —
+        // single-part deep-tiled files must NOT set single_tile (0x200);
+        // the openexr.com reference `exrheader` rejects files with both
+        // bits set. The tile-ness signal lives in the `tiles[tiledesc]`
+        // attribute + the `type="deeptile"` string attribute.
+        let v = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(v & 0x800, 0x800, "non_image bit must be set");
+        assert_eq!(v & 0x200, 0, "single_tile bit must NOT be set");
+        assert_eq!(v & 0x1000, 0, "multipart bit must NOT be set");
+    }
+
+    #[test]
+    fn deep_tiled_parse_rejects_flat_file() {
+        // Hand-build a flat (non-deep) tiled-looking header and ensure
+        // the deep tiled parser refuses (non_image bit not set).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&EXR_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&(2u32 | 0x200).to_le_bytes()); // single_tile only
+        bytes.push(0); // empty header terminator
+        let r = parse_exr_deep_tiled(&bytes);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn deep_tiled_parse_rejects_scanline_deep() {
+        // Deep scanline (non_image bit set, single_tile NOT set) must be
+        // rejected by parse_exr_deep_tiled — it's the wrong parser.
+        let (spp, planes) = synthetic_deep(8, 4);
+        let input = DeepScanlineInput {
+            width: 8,
+            height: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::None,
+        };
+        let bytes = encode_exr_deep_scanline(&input).unwrap();
+        let r = parse_exr_deep_tiled(&bytes);
+        assert!(r.is_err());
     }
 }
