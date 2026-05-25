@@ -29,6 +29,7 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse + write (validated against `exrmetrics --convert`) |
 | Deep scanline (`deepscanline`)      | parse + write — NONE/RLE/ZIPS (validated against `exrheader` + `exrmetrics --convert -z none`) |
 | Multi-part deep scanline (read)     | parse — NONE/RLE/ZIPS, per-part `Vec<DeepScanlinePart>` (validated against `exrmultipart -combine`) |
+| Multi-part deep scanline (write)    | encode — NONE/RLE/ZIPS, per-part `MultipartDeepScanlinePart` (validated against `exrheader` + `exrmultipart -separate` round-trip back through `parse_exr_deep_scanline`) |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
 | Spec predictor + interleave         | bit-exact against `exrmetrics`-produced files    |
@@ -54,9 +55,9 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 * Tiled-output encode now covers `ONE_LEVEL`, `MIPMAP_LEVELS` (full
   pyramid) and `RIPMAP_LEVELS` (full 2-D reduction grid) — all ROUND_DOWN,
   NONE / ZIP / ZIPS / RLE.
-* Multipart-output encode covers scanline parts only; tiled or deep
-  parts not yet emitted (multi-part deep READ is supported via
-  `parse_exr_deep_multipart`).
+* Multipart-output encode covers scanline parts and deep-scanline parts
+  (`encode_exr_multipart` + `encode_exr_multipart_deep_scanline`); tiled
+  parts and deep-tiled parts are not yet emitted.
 * Deep-tiled files (`type = "deeptile"`).
 * HDR pixel-format integration with `oxideav-core` (the
   `Decoder`/`Encoder` shims clamp to `Rgba` 8-bit pending an

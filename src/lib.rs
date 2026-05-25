@@ -116,10 +116,24 @@
 //!   gives a default separable 2× box-filter grid; callers needing custom
 //!   filtering supply their own [`RipmapPyramid`].
 //!
+//! Round-127 surface (this crate, this round):
+//! * Multi-part deep scanline WRITE
+//!   ([`encode_exr_multipart_deep_scanline`] + [`MultipartDeepScanlinePart`]).
+//!   Emits files with version-field bits 0x1800 (multipart + non_image)
+//!   set, per-part `type = "deepscanline"` + `name` + `chunkCount` +
+//!   `version=1` + `maxSamplesPerPixel`, concatenated per-part offset
+//!   tables, then chunks each prefixed with `i32 part_number` followed by
+//!   the standard deep chunk body `i32 Y, u64 packed_table, u64
+//!   packed_data, u64 unpacked_data, table_bytes, data_bytes`. Self
+//!   round-trips through [`parse_exr_deep_multipart`]; cross-validated
+//!   against `exrheader` + the `exrmultipart -separate` reference flow.
+//!   NONE / RLE / ZIPS compression. Deep-tiled WRITE (`type =
+//!   "deeptile"`) still a followup.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); multi-part WRITE for deep + tiled parts; deep-tile data
+//! public spec); multi-part WRITE for tiled parts + deep-tile data
 //! (`type = "deeptile"`); HDR pixel-format integration with
 //! `oxideav-core`.
 
@@ -144,8 +158,9 @@ pub const CODEC_ID_STR: &str = "openexr";
 
 pub use decoder::{mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart};
 pub use deep::{
-    encode_exr_deep_scanline, parse_exr_deep_multipart, parse_exr_deep_scanline, DeepExrImage,
-    DeepScanlineInput, DeepScanlinePart,
+    encode_exr_deep_scanline, encode_exr_multipart_deep_scanline, parse_exr_deep_multipart,
+    parse_exr_deep_scanline, DeepExrImage, DeepScanlineInput, DeepScanlinePart,
+    MultipartDeepScanlinePart,
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,

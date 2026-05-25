@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-127 multi-part deep scanline WRITE. New public API:
+  `encode_exr_multipart_deep_scanline`, `MultipartDeepScanlinePart`.
+  Emits files with version-field bits 0x1800 (multipart + non_image) set,
+  per-part `type = "deepscanline"` + `name` + `chunkCount` + `version=1`
+  + `maxSamplesPerPixel`, concatenated per-part offset tables (one
+  `u64` per chunk, populated with real chunk offsets), then chunks each
+  prefixed with `i32 part_number` followed by the standard deep chunk
+  record `i32 Y, u64 packed_table, u64 packed_data, u64 unpacked_data,
+  table_bytes, data_bytes`. Compression NONE / RLE / ZIPS (deep ZIP
+  continues to be rejected — matches `exrinfo`). Self round-trips
+  through `parse_exr_deep_multipart`; cross-validated against
+  `exrheader` (file accepted, each part dump mentions its name +
+  `deepscanline`) and against `exrmultipart -separate`, which splits
+  our file into per-part single-part deep .exrs each readable by
+  `parse_exr_deep_scanline` with bit-exact channel data. Tests in
+  `src/deep.rs` (7 unit tests) + `tests/deep_validation.rs` (4 cross-
+  validation tests). Deep-tiled WRITE (`type = "deeptile"`) remains a
+  followup.
 - Round-124 `RIPMAP_LEVELS` tiled-output encoder. New public API:
   `encode_exr_tiled_rgba_float_ripmap_box_filter`,
   `encode_exr_tiled_ripmap`, `build_box_filter_ripmap`,

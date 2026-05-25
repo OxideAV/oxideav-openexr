@@ -23,8 +23,9 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_deep_scanline, parse_exr_deep_multipart, parse_exr_deep_scanline, Channel,
-    Compression, DeepScanlineInput, PixelType,
+    encode_exr_deep_scanline, encode_exr_multipart_deep_scanline, parse_exr_deep_multipart,
+    parse_exr_deep_scanline, Channel, Compression, DeepScanlineInput, MultipartDeepScanlinePart,
+    PixelType,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -525,4 +526,278 @@ fn parse_exr_multipart_rejects_deep_multipart() {
     let _ = std::fs::remove_file(&b_path);
     let _ = std::fs::remove_file(&combined_path);
     let _ = std::fs::remove_dir(&dir);
+}
+
+// ----------------------------------------------------------------------
+// Round-127 multi-part deep WRITE validation.
+//
+// Strategy: build a multi-part deep file directly with our new
+// `encode_exr_multipart_deep_scanline`, then validate:
+//
+//   1. `exrheader` accepts the file and reports each part's
+//      `type = "deepscanline"` + `name`.
+//   2. `exrmultipart -separate -i <our> -o <prefix>` splits the file into
+//      one .exr per part; each per-part output is a valid single-part
+//      deep scanline file readable by our own
+//      `parse_exr_deep_scanline` with bit-exact pixel data.
+//
+// That demonstrates the bytes we emit are spec-compliant in both the
+// multi-part chain layout AND in each part's deep-chunk body, since
+// exrmultipart -separate would otherwise fail to extract the per-part
+// chunks.
+// ----------------------------------------------------------------------
+
+#[test]
+fn exrheader_accepts_our_multipart_deep_file() {
+    if !exrheader_available() {
+        eprintln!("exrheader not available, skipping");
+        return;
+    }
+    let (spp_a, planes_a) = build_synthetic_seeded(8, 4, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(8, 4, 0.5);
+    let ch = channels_rgba_float();
+    let parts = vec![
+        MultipartDeepScanlinePart {
+            name: "partA".to_string(),
+            width: 8,
+            height: 4,
+            channels: ch.clone(),
+            samples_per_pixel: &spp_a,
+            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            compression: Compression::Zips,
+        },
+        MultipartDeepScanlinePart {
+            name: "partB".to_string(),
+            width: 8,
+            height: 4,
+            channels: ch,
+            samples_per_pixel: &spp_b,
+            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            compression: Compression::None,
+        },
+    ];
+    let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+    let dir = tempdir();
+    let path = format!("{dir}/multipart_deep.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("exrheader").arg(&path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "exrheader rejected our multipart deep file:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("deepscanline"),
+        "exrheader output didn't mention 'deepscanline':\n{stdout}"
+    );
+    // Each part name should appear in the header dump.
+    assert!(
+        stdout.contains("partA"),
+        "exrheader output didn't mention 'partA':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("partB"),
+        "exrheader output didn't mention 'partB':\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn exrmultipart_separate_splits_our_multipart_deep_two_parts() {
+    if !tool_available("exrmultipart") {
+        eprintln!("exrmultipart not available, skipping");
+        return;
+    }
+    let (spp_a, planes_a) = build_synthetic_seeded(8, 4, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(8, 4, 0.5);
+    let ch = channels_rgba_float();
+    let parts = vec![
+        MultipartDeepScanlinePart {
+            name: "partA".to_string(),
+            width: 8,
+            height: 4,
+            channels: ch.clone(),
+            samples_per_pixel: &spp_a,
+            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            compression: Compression::Zips,
+        },
+        MultipartDeepScanlinePart {
+            name: "partB".to_string(),
+            width: 8,
+            height: 4,
+            channels: ch,
+            samples_per_pixel: &spp_b,
+            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            compression: Compression::None,
+        },
+    ];
+    let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+    let dir = tempdir();
+    let in_path = format!("{dir}/in.exr");
+    let out_prefix = format!("{dir}/sep");
+    std::fs::write(&in_path, &bytes).unwrap();
+
+    // exrmultipart -separate emits `<prefix>.<N>.exr` per part.
+    let out = Command::new("exrmultipart")
+        .arg("-separate")
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_prefix)
+        .output()
+        .expect("exrmultipart spawn");
+    assert!(
+        out.status.success(),
+        "exrmultipart -separate failed:\n stdout: {}\n stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Read each per-part single-part deep file back through our parser.
+    let p0 = format!("{out_prefix}.1.exr");
+    let p1 = format!("{out_prefix}.2.exr");
+    let img_a = parse_exr_deep_scanline(&std::fs::read(&p0).unwrap()).unwrap();
+    let img_b = parse_exr_deep_scanline(&std::fs::read(&p1).unwrap()).unwrap();
+    assert_eq!(img_a.samples_per_pixel, spp_a);
+    for (g, w) in img_a.channel_samples.iter().zip(planes_a.iter()) {
+        assert_eq!(g, w, "partA channel mismatch after -separate");
+    }
+    assert_eq!(img_b.samples_per_pixel, spp_b);
+    for (g, w) in img_b.channel_samples.iter().zip(planes_b.iter()) {
+        assert_eq!(g, w, "partB channel mismatch after -separate");
+    }
+
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&p0);
+    let _ = std::fs::remove_file(&p1);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn exrmultipart_separate_splits_our_multipart_deep_three_parts() {
+    if !tool_available("exrmultipart") {
+        eprintln!("exrmultipart not available, skipping");
+        return;
+    }
+    let (spp_a, planes_a) = build_synthetic_seeded(6, 3, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(6, 3, 0.5);
+    let (spp_c, planes_c) = build_synthetic_seeded(6, 3, 1.0);
+    let ch = channels_rgba_float();
+    let parts = vec![
+        MultipartDeepScanlinePart {
+            name: "alpha".to_string(),
+            width: 6,
+            height: 3,
+            channels: ch.clone(),
+            samples_per_pixel: &spp_a,
+            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            compression: Compression::Zips,
+        },
+        MultipartDeepScanlinePart {
+            name: "beta".to_string(),
+            width: 6,
+            height: 3,
+            channels: ch.clone(),
+            samples_per_pixel: &spp_b,
+            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            compression: Compression::None,
+        },
+        MultipartDeepScanlinePart {
+            name: "gamma".to_string(),
+            width: 6,
+            height: 3,
+            channels: ch,
+            samples_per_pixel: &spp_c,
+            channel_samples: vec![&planes_c[0], &planes_c[1], &planes_c[2], &planes_c[3]],
+            compression: Compression::Rle,
+        },
+    ];
+    let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+    let dir = tempdir();
+    let in_path = format!("{dir}/in.exr");
+    let out_prefix = format!("{dir}/sep");
+    std::fs::write(&in_path, &bytes).unwrap();
+    let out = Command::new("exrmultipart")
+        .arg("-separate")
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(&out_prefix)
+        .output()
+        .expect("exrmultipart spawn");
+    assert!(
+        out.status.success(),
+        "exrmultipart -separate failed:\n stdout: {}\n stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let p0 = format!("{out_prefix}.1.exr");
+    let p1 = format!("{out_prefix}.2.exr");
+    let p2 = format!("{out_prefix}.3.exr");
+    let img_a = parse_exr_deep_scanline(&std::fs::read(&p0).unwrap()).unwrap();
+    let img_b = parse_exr_deep_scanline(&std::fs::read(&p1).unwrap()).unwrap();
+    let img_c = parse_exr_deep_scanline(&std::fs::read(&p2).unwrap()).unwrap();
+    assert_eq!(img_a.samples_per_pixel, spp_a);
+    assert_eq!(img_b.samples_per_pixel, spp_b);
+    assert_eq!(img_c.samples_per_pixel, spp_c);
+    for (g, w) in img_a.channel_samples.iter().zip(planes_a.iter()) {
+        assert_eq!(g, w, "alpha mismatch");
+    }
+    for (g, w) in img_b.channel_samples.iter().zip(planes_b.iter()) {
+        assert_eq!(g, w, "beta mismatch");
+    }
+    for (g, w) in img_c.channel_samples.iter().zip(planes_c.iter()) {
+        assert_eq!(g, w, "gamma mismatch");
+    }
+    let _ = std::fs::remove_file(&in_path);
+    let _ = std::fs::remove_file(&p0);
+    let _ = std::fs::remove_file(&p1);
+    let _ = std::fs::remove_file(&p2);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn our_writer_and_reader_multipart_deep_full_roundtrip() {
+    // Pure-Rust round-trip: our writer → our reader, no external tools.
+    // Larger height with ZIPS to exercise many chunks per part.
+    let (spp_a, planes_a) = build_synthetic_seeded(10, 12, 0.0);
+    let (spp_b, planes_b) = build_synthetic_seeded(10, 12, 0.25);
+    let ch = channels_rgba_float();
+    let parts = vec![
+        MultipartDeepScanlinePart {
+            name: "left".to_string(),
+            width: 10,
+            height: 12,
+            channels: ch.clone(),
+            samples_per_pixel: &spp_a,
+            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            compression: Compression::Zips,
+        },
+        MultipartDeepScanlinePart {
+            name: "right".to_string(),
+            width: 10,
+            height: 12,
+            channels: ch,
+            samples_per_pixel: &spp_b,
+            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            compression: Compression::Rle,
+        },
+    ];
+    let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+    let got = parse_exr_deep_multipart(&bytes).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].name, "left");
+    assert_eq!(got[0].compression, Compression::Zips);
+    assert_eq!(got[0].samples_per_pixel, spp_a);
+    for (g, w) in got[0].channel_samples.iter().zip(planes_a.iter()) {
+        assert_eq!(g, w);
+    }
+    assert_eq!(got[1].name, "right");
+    assert_eq!(got[1].compression, Compression::Rle);
+    assert_eq!(got[1].samples_per_pixel, spp_b);
+    for (g, w) in got[1].channel_samples.iter().zip(planes_b.iter()) {
+        assert_eq!(g, w);
+    }
 }

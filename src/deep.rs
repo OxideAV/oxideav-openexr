@@ -1211,6 +1211,399 @@ pub fn encode_exr_deep_scanline(input: &DeepScanlineInput) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------
+// Multi-part deep scanline WRITE (round 127).
+//
+// On-disk layout (mirror of what `parse_exr_deep_multipart` consumes):
+//
+//   magic(4) | version(4 with bits 0x1800 set = multipart + non_image)
+//   per-part header_0 ... NUL | header_1 ... NUL | NUL  (double-NUL EOH)
+//   concatenated offset tables (per-part `chunkCount × u64`)
+//   chunks each prefixed with `i32 part_number`, then the standard deep
+//   chunk record:
+//     `i32 Y, u64 packed_table, u64 packed_data, u64 unpacked_data,
+//      table_bytes, data_bytes`
+//
+// Required per-part attributes (the reader's
+// `parse_exr_deep_multipart` enforces these):
+//   channels, chunkCount, compression, dataWindow, displayWindow,
+//   lineOrder, maxSamplesPerPixel, name, pixelAspectRatio,
+//   screenWindowCenter, screenWindowWidth, type = "deepscanline",
+//   version = 1.
+//
+// Compression: NONE / RLE / ZIPS (matching the single-part deep
+// encoder; deep ZIP rejected by the reference `exrinfo`).
+// ---------------------------------------------------------------------
+
+/// One part of an outgoing multi-part deep scanline file. Identical
+/// shape to [`DeepScanlineInput`] plus a unique `name` slot — the
+/// per-part `name` attribute is mandatory on every multi-part header
+/// per the openexr.com spec.
+pub struct MultipartDeepScanlinePart<'a> {
+    /// Part name (must be unique across all parts in the file).
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Channels in alphabetical order (sub-sampled channels not
+    /// supported on the deep path).
+    pub channels: Vec<Channel>,
+    /// One u32 per pixel (`width * height` long) — how many samples
+    /// this pixel carries.
+    pub samples_per_pixel: &'a [u32],
+    /// One f32 slice per channel, each `samples_per_pixel.iter().sum()`
+    /// long in pixel-scan order. UINT stored as the u32 bits (matching
+    /// the [`DeepExrImage`] convention).
+    pub channel_samples: Vec<&'a [f32]>,
+    pub compression: Compression,
+}
+
+/// Encode a multi-part deep scanline EXR (version-field bits 0x1800).
+///
+/// Each part is validated independently (alphabetical channel order,
+/// `samples_per_pixel` length, per-channel sample-count totals,
+/// compression in {NONE, RLE, ZIPS}, unique non-empty name, no
+/// sub-sampling). The header table mirrors the per-part required
+/// attribute set the reader expects.
+///
+/// Self-roundtrips through [`parse_exr_deep_multipart`]; intended also
+/// to be readable by the reference `exrmultipart -separate` /
+/// `exrheader` flow.
+pub fn encode_exr_multipart_deep_scanline(parts: &[MultipartDeepScanlinePart]) -> Result<Vec<u8>> {
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "encode_exr_multipart_deep_scanline: at least one part required".to_string(),
+        ));
+    }
+
+    // ---- Validate every part up front (mirrors single-part rules). ----
+    for (i, p) in parts.iter().enumerate() {
+        if p.name.is_empty() {
+            return Err(ExrError::invalid(format!("deep part {i}: empty name")));
+        }
+        for (j, other) in parts.iter().enumerate() {
+            if j != i && other.name == p.name {
+                return Err(ExrError::invalid(format!(
+                    "duplicate deep part name '{}' (parts {i} and {j})",
+                    p.name
+                )));
+            }
+        }
+        if !matches!(
+            p.compression,
+            Compression::None | Compression::Rle | Compression::Zips
+        ) {
+            return Err(ExrError::unsupported(format!(
+                "deep part '{}' compression {:?} (openexr.com reference accepts \
+                 only NONE/RLE/ZIPS for deep — ZIP is listed in the spec page \
+                 but exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
+                p.name, p.compression
+            )));
+        }
+        let pixels = (p.width as usize) * (p.height as usize);
+        if p.width == 0 || p.height == 0 {
+            return Err(ExrError::invalid(format!(
+                "deep part '{}': dataWindow {}x{} must be > 0",
+                p.name, p.width, p.height
+            )));
+        }
+        if p.samples_per_pixel.len() != pixels {
+            return Err(ExrError::invalid(format!(
+                "deep part '{}': samples_per_pixel len {} != width*height = {pixels}",
+                p.name,
+                p.samples_per_pixel.len()
+            )));
+        }
+        if p.channels.len() != p.channel_samples.len() {
+            return Err(ExrError::invalid(format!(
+                "deep part '{}': channels.len()={} != channel_samples.len()={}",
+                p.name,
+                p.channels.len(),
+                p.channel_samples.len()
+            )));
+        }
+        for win in p.channels.windows(2) {
+            if win[0].name >= win[1].name {
+                return Err(ExrError::invalid(format!(
+                    "deep part '{}': channels not alphabetical: '{}' >= '{}'",
+                    p.name, win[0].name, win[1].name
+                )));
+            }
+        }
+        let total_samples: u64 = p.samples_per_pixel.iter().map(|&n| n as u64).sum();
+        for (ch, slc) in p.channels.iter().zip(p.channel_samples.iter()) {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "deep part '{}': sub-sampled channel '{}' (deep path 1x1 only)",
+                    p.name, ch.name
+                )));
+            }
+            if slc.len() != total_samples as usize {
+                return Err(ExrError::invalid(format!(
+                    "deep part '{}': channel '{}' sample slice len {} != \
+                     total_samples {total_samples}",
+                    p.name,
+                    ch.name,
+                    slc.len()
+                )));
+            }
+        }
+    }
+
+    // ---- Per-part header byte blocks + chunk counts. ----
+    let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+
+    for p in parts {
+        let block_h = p.compression.scanlines_per_block();
+        let cc = p.height.div_ceil(block_h) as usize;
+        chunk_counts.push(cc);
+        let max_samples = p.samples_per_pixel.iter().copied().max().unwrap_or(0) as i32;
+        let attrs = build_deep_part_attrs(p, cc as i32, max_samples);
+        let mut hb = Vec::with_capacity(256);
+        for a in &attrs {
+            hb.extend_from_slice(a.name.as_bytes());
+            hb.push(0);
+            let (type_name, payload) = encode_attribute_value(&a.value);
+            hb.extend_from_slice(type_name.as_bytes());
+            hb.push(0);
+            hb.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+            hb.extend_from_slice(&payload);
+        }
+        header_byte_blocks.push(hb);
+    }
+
+    // ---- Stitch magic + version + headers + double-NUL terminator. ----
+    let version = VersionField::from_u32(2 | 0x800 | 0x1000); // non_image + multipart
+    let mut out: Vec<u8> = Vec::with_capacity(1024);
+    out.extend_from_slice(&EXR_MAGIC.to_le_bytes());
+    out.extend_from_slice(&version.to_u32().to_le_bytes());
+    for hb in &header_byte_blocks {
+        out.extend_from_slice(hb);
+        out.push(0); // per-part header terminator
+    }
+    out.push(0); // double-NUL = end-of-all-headers
+
+    // ---- Build per-chunk payloads (still raw, before assembly). ----
+    struct ChunkBlob {
+        part_idx: u32,
+        y: i32,
+        packed_table: Vec<u8>,
+        packed_data: Vec<u8>,
+        unpacked_data_len: u64,
+    }
+    let mut chunks_by_part: Vec<Vec<ChunkBlob>> = Vec::with_capacity(parts.len());
+
+    for (part_idx, p) in parts.iter().enumerate() {
+        let block_h = p.compression.scanlines_per_block();
+        let cc = chunk_counts[part_idx];
+
+        // Pre-compute per-row cumulative-EXCLUSIVE sample offsets so we
+        // can slice each channel's samples for a given row range.
+        let mut row_sample_starts: Vec<u64> = Vec::with_capacity(p.height as usize + 1);
+        row_sample_starts.push(0);
+        for r in 0..p.height as usize {
+            let row_base = r * p.width as usize;
+            let row_sum: u64 = p.samples_per_pixel[row_base..row_base + p.width as usize]
+                .iter()
+                .map(|&n| n as u64)
+                .sum();
+            let last = *row_sample_starts.last().unwrap();
+            row_sample_starts.push(last + row_sum);
+        }
+
+        let mut part_chunks: Vec<ChunkBlob> = Vec::with_capacity(cc);
+        for block_idx in 0..cc {
+            let row0 = (block_idx as u32) * block_h;
+            let rows_in_block = (p.height - row0).min(block_h) as usize;
+            let entries = rows_in_block * p.width as usize;
+
+            // Per-row cumulative-inclusive offset table.
+            let mut table_bytes = Vec::with_capacity(entries * 4);
+            for r in 0..rows_in_block {
+                let dst_row = row0 as usize + r;
+                let row_slice = &p.samples_per_pixel
+                    [dst_row * p.width as usize..(dst_row + 1) * p.width as usize];
+                let cumulative = cumulative_inclusive(row_slice);
+                for c in cumulative {
+                    table_bytes.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+
+            // Slice each channel's samples for this block — non-interleaved
+            // (ch0 all samples, then ch1, ...).
+            let block_sample_start = row_sample_starts[row0 as usize] as usize;
+            let block_sample_end = row_sample_starts[row0 as usize + rows_in_block] as usize;
+            let block_sample_count = block_sample_end - block_sample_start;
+            let bpp_total: usize = p
+                .channels
+                .iter()
+                .map(|c| c.pixel_type.bytes_per_sample())
+                .sum();
+            let mut sample_bytes: Vec<u8> = Vec::with_capacity(block_sample_count * bpp_total);
+            for (ch_idx, ch) in p.channels.iter().enumerate() {
+                let slc = &p.channel_samples[ch_idx][block_sample_start..block_sample_end];
+                for &v in slc {
+                    match ch.pixel_type {
+                        PixelType::Half => sample_bytes
+                            .extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes()),
+                        PixelType::Float => sample_bytes.extend_from_slice(&v.to_le_bytes()),
+                        PixelType::Uint => {
+                            let u = if v.is_nan() || v < 0.0 {
+                                0u32
+                            } else if v >= (u32::MAX as f32) {
+                                u32::MAX
+                            } else {
+                                (v + 0.5) as u32
+                            };
+                            sample_bytes.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+
+            let packed_table = compress_buffer(&table_bytes, p.compression)?;
+            let packed_data = compress_buffer(&sample_bytes, p.compression)?;
+            part_chunks.push(ChunkBlob {
+                part_idx: part_idx as u32,
+                y: row0 as i32,
+                packed_table,
+                packed_data,
+                unpacked_data_len: sample_bytes.len() as u64,
+            });
+        }
+        chunks_by_part.push(part_chunks);
+    }
+
+    // ---- Compute chunk offsets after offset tables, then emit. ----
+    let header_bytes_so_far = out.len();
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let offset_table_bytes = total_chunks * 8;
+    let chunks_start = header_bytes_so_far + offset_table_bytes;
+
+    // Walk chunks in part-order (part_0 chunks then part_1 chunks ...);
+    // record absolute offsets so we can fill per-part offset tables.
+    // Each deep multipart chunk on disk is:
+    //   i32 part_number (4) | i32 Y (4) | u64 packed_table (8)
+    //   | u64 packed_data (8) | u64 unpacked_data (8)
+    //   | packed_table_bytes | packed_sample_bytes
+    // → 4 + 4 + 24 = 32 bytes of header + the two byte blobs.
+    let mut per_part_table: Vec<Vec<u64>> = vec![Vec::new(); parts.len()];
+    let mut running = chunks_start;
+    for part_chunks in &chunks_by_part {
+        for c in part_chunks {
+            per_part_table[c.part_idx as usize].push(running as u64);
+            running += 32 + c.packed_table.len() + c.packed_data.len();
+        }
+    }
+
+    // Emit concatenated offset tables (part 0, part 1, ...).
+    for table in &per_part_table {
+        for &o in table {
+            out.extend_from_slice(&o.to_le_bytes());
+        }
+    }
+
+    // Emit chunks in the same part-order we accounted for above.
+    for part_chunks in &chunks_by_part {
+        for c in part_chunks {
+            out.extend_from_slice(&(c.part_idx as i32).to_le_bytes());
+            out.extend_from_slice(&c.y.to_le_bytes());
+            out.extend_from_slice(&(c.packed_table.len() as u64).to_le_bytes());
+            out.extend_from_slice(&(c.packed_data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&c.unpacked_data_len.to_le_bytes());
+            out.extend_from_slice(&c.packed_table);
+            out.extend_from_slice(&c.packed_data);
+        }
+    }
+
+    Ok(out)
+}
+
+/// Per-part attribute set for a deep scanline multipart part — strict
+/// superset of the flat-multipart required attrs (adds
+/// `maxSamplesPerPixel`, `type = "deepscanline"`, `version = 1`).
+fn build_deep_part_attrs(
+    part: &MultipartDeepScanlinePart,
+    chunk_count: i32,
+    max_samples: i32,
+) -> Vec<Attribute> {
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (part.width - 1) as i32,
+        y_max: (part.height - 1) as i32,
+    };
+    vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(part.channels.clone()),
+        },
+        Attribute {
+            name: "chunkCount".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: chunk_count.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(part.compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "maxSamplesPerPixel".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: max_samples.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "name".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: part.name.as_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "type".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"deepscanline".to_vec(),
+            },
+        },
+        Attribute {
+            name: "version".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: 1i32.to_le_bytes().to_vec(),
+            },
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1420,5 +1813,214 @@ mod tests {
             assert!(got.is_empty());
         }
         assert_eq!(img.total_samples(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Round-127 multi-part deep WRITE self-roundtrip tests.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn deep_multipart_two_parts_roundtrip_zips_none() {
+        let (spp_a, planes_a) = synthetic_deep(8, 4);
+        let (spp_b, planes_b) = synthetic_deep(8, 4);
+        let parts = vec![
+            MultipartDeepScanlinePart {
+                name: "partA".to_string(),
+                width: 8,
+                height: 4,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_a,
+                channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+                compression: Compression::Zips,
+            },
+            MultipartDeepScanlinePart {
+                name: "partB".to_string(),
+                width: 8,
+                height: 4,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_b,
+                channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+                compression: Compression::None,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+        let got = parse_exr_deep_multipart(&bytes).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "partA");
+        assert_eq!(got[0].compression, Compression::Zips);
+        assert_eq!(got[0].samples_per_pixel, spp_a);
+        for (c, w) in got[0].channel_samples.iter().zip(planes_a.iter()) {
+            assert_eq!(c, w);
+        }
+        assert_eq!(got[1].name, "partB");
+        assert_eq!(got[1].compression, Compression::None);
+        assert_eq!(got[1].samples_per_pixel, spp_b);
+        for (c, w) in got[1].channel_samples.iter().zip(planes_b.iter()) {
+            assert_eq!(c, w);
+        }
+    }
+
+    #[test]
+    fn deep_multipart_three_parts_roundtrip_mixed_compression() {
+        // ZIPS / NONE / RLE, all with FLOAT channels for bit-exact roundtrip.
+        let (spp_a, planes_a) = synthetic_deep(6, 3);
+        let (spp_b, planes_b) = synthetic_deep(6, 3);
+        let (spp_c, planes_c) = synthetic_deep(6, 3);
+        let parts = vec![
+            MultipartDeepScanlinePart {
+                name: "alpha".to_string(),
+                width: 6,
+                height: 3,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_a,
+                channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+                compression: Compression::Zips,
+            },
+            MultipartDeepScanlinePart {
+                name: "beta".to_string(),
+                width: 6,
+                height: 3,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_b,
+                channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+                compression: Compression::None,
+            },
+            MultipartDeepScanlinePart {
+                name: "gamma".to_string(),
+                width: 6,
+                height: 3,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_c,
+                channel_samples: vec![&planes_c[0], &planes_c[1], &planes_c[2], &planes_c[3]],
+                compression: Compression::Rle,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+        let got = parse_exr_deep_multipart(&bytes).unwrap();
+        assert_eq!(got.len(), 3);
+        let expected_names = ["alpha", "beta", "gamma"];
+        let expected_compressions = [Compression::Zips, Compression::None, Compression::Rle];
+        let expected_spp = [&spp_a, &spp_b, &spp_c];
+        let expected_planes = [&planes_a, &planes_b, &planes_c];
+        for (i, g) in got.iter().enumerate() {
+            assert_eq!(g.name, expected_names[i]);
+            assert_eq!(g.compression, expected_compressions[i]);
+            assert_eq!(g.samples_per_pixel, **expected_spp[i]);
+            for (gc, wc) in g.channel_samples.iter().zip(expected_planes[i].iter()) {
+                assert_eq!(gc, wc, "{} channel mismatch", expected_names[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn deep_multipart_multi_chunk_zips_roundtrip() {
+        // Height 12 with ZIPS (1-line blocks) → 12 chunks per part.
+        let (spp_a, planes_a) = synthetic_deep(10, 12);
+        let (spp_b, planes_b) = synthetic_deep(10, 12);
+        let parts = vec![
+            MultipartDeepScanlinePart {
+                name: "foo".to_string(),
+                width: 10,
+                height: 12,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_a,
+                channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+                compression: Compression::Zips,
+            },
+            MultipartDeepScanlinePart {
+                name: "bar".to_string(),
+                width: 10,
+                height: 12,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp_b,
+                channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+                compression: Compression::Zips,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+        let got = parse_exr_deep_multipart(&bytes).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].samples_per_pixel, spp_a);
+        assert_eq!(got[1].samples_per_pixel, spp_b);
+        for (g, want) in got[0].channel_samples.iter().zip(planes_a.iter()) {
+            assert_eq!(g, want);
+        }
+        for (g, want) in got[1].channel_samples.iter().zip(planes_b.iter()) {
+            assert_eq!(g, want);
+        }
+    }
+
+    #[test]
+    fn deep_multipart_rejects_empty_parts() {
+        let r = encode_exr_multipart_deep_scanline(&[]);
+        assert!(r.is_err(), "must reject zero-part input");
+    }
+
+    #[test]
+    fn deep_multipart_rejects_duplicate_names() {
+        let (spp, planes) = synthetic_deep(4, 2);
+        let parts = vec![
+            MultipartDeepScanlinePart {
+                name: "dup".to_string(),
+                width: 4,
+                height: 2,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                compression: Compression::None,
+            },
+            MultipartDeepScanlinePart {
+                name: "dup".to_string(),
+                width: 4,
+                height: 2,
+                channels: mk_channels_rgba_float(),
+                samples_per_pixel: &spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                compression: Compression::None,
+            },
+        ];
+        let r = encode_exr_multipart_deep_scanline(&parts);
+        assert!(r.is_err(), "must reject duplicate part names");
+    }
+
+    #[test]
+    fn deep_multipart_rejects_zip_compression() {
+        let (spp, planes) = synthetic_deep(4, 2);
+        let parts = vec![MultipartDeepScanlinePart {
+            name: "x".to_string(),
+            width: 4,
+            height: 2,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zip,
+        }];
+        let r = encode_exr_multipart_deep_scanline(&parts);
+        assert!(
+            r.is_err(),
+            "must reject ZIP compression on multipart deep (exrinfo rejects it)"
+        );
+    }
+
+    #[test]
+    fn deep_multipart_all_zero_samples() {
+        let spp = vec![0u32; 8];
+        let empty: Vec<f32> = Vec::new();
+        let parts = vec![MultipartDeepScanlinePart {
+            name: "z".to_string(),
+            width: 4,
+            height: 2,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&empty, &empty, &empty, &empty],
+            compression: Compression::Zips,
+        }];
+        let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+        let got = parse_exr_deep_multipart(&bytes).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].samples_per_pixel, spp);
+        for c in &got[0].channel_samples {
+            assert!(c.is_empty());
+        }
     }
 }
