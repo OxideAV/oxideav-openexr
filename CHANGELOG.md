@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-174 full-pyramid READ for tiled `MIPMAP_LEVELS` / `RIPMAP_LEVELS`
+  files. New public API: `parse_exr_tiled_multilevel`, `MultilevelTiledImage`,
+  `TiledLevel`. The existing `parse_exr` continues to return only the
+  full-resolution level (no behaviour change for callers that already
+  used it on a multi-level file). The new entry point decodes every
+  level: ONE_LEVEL files surface as a single-entry `levels` vector;
+  MIPMAP files surface levels `0..N-1` with `level_x == level_y`; RIPMAP
+  files surface the full 2-D grid in the spec's iteration order (`lvly`
+  outer, `lvlx` inner), with each cell sized to `mipmap_level_dim(w,
+  lvlx) × mipmap_level_dim(h, lvly)` and its own per-channel f32 plane.
+  Compression NONE / ZIP / ZIPS / RLE supported (others rejected with a
+  clear `Unsupported` error pointing at the same compression-rejection
+  set the rest of the crate uses). The existing `compute_total_tiles`
+  helper drives offset-table sizing; per-tile chunk lookup is by
+  `(lvlx, lvly)` not by index, so a malformed offset table that carries
+  an unknown level produces an actionable error. Pure-Rust round-trip
+  tests in `tests/multilevel_read_validation.rs` encode pyramids via
+  the existing `encode_exr_tiled_mipmap` / `encode_exr_tiled_ripmap`
+  writers (6-level MIPMAP at 32×32, 5×4 = 20 cell RIPMAP at 16×8, plus
+  a non-power-of-two MIPMAP at 16×12) and confirm every sample of every
+  level matches the input bit-exactly. Backward-compat test pins
+  `parse_exr` level-0 against `parse_exr_tiled_multilevel` level
+  `(0, 0)`. The encoder side keeps its existing `exrmetrics --convert`
+  + `exrmaketiled -r` cross-validation in
+  `tests/{mipmap,ripmap}_encoder_validation.rs`.
 - Round-130 single-part deep TILED WRITE + READ. New public API:
   `encode_exr_deep_tiled`, `parse_exr_deep_tiled`, `DeepTiledInput`,
   `DeepTiledImage`. Emits / consumes single-part deep-tiled files with

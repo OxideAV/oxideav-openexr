@@ -21,9 +21,9 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
 | Single-part scanline                | parse + write                                    |
 | Single-part tiled (`ONE_LEVEL`)     | parse + write (validated against `exrmetrics`)   |
-| Tiled `MIPMAP_LEVELS` (read)        | parse-only — full-res level decoded, reductions skipped |
+| Tiled `MIPMAP_LEVELS` (read)        | full pyramid via `parse_exr_tiled_multilevel` (level-0..N-1) — round-trips encoder bit-exactly; `parse_exr` still returns level-0 only |
 | Tiled `MIPMAP_LEVELS` (write)       | full pyramid encode (NONE / ZIP / ZIPS / RLE) — validated against `exrmetrics --convert` and `exrheader` |
-| Tiled `RIPMAP_LEVELS` (read)        | parse-only — full-res level decoded, reductions skipped |
+| Tiled `RIPMAP_LEVELS` (read)        | full 2-D grid via `parse_exr_tiled_multilevel` (every `(lvlx, lvly)` cell) — round-trips encoder bit-exactly |
 | Tiled `RIPMAP_LEVELS` (write)       | full 2-D reduction grid encode (NONE / ZIP / ZIPS / RLE) — validated against `exrmetrics --convert` + `exrheader`, decoder pinned vs `exrmaketiled -r` |
 | Multi-part EXR (scanline parts)     | parse + write (validated against `exrmultipart -separate`) |
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse + write (validated against `exrmetrics --convert`) |

@@ -151,6 +151,16 @@
 //!   against `exrheader` (header dump + tiledesc + type=deeptile).
 //!   MIPMAP/RIPMAP deep tiled + multi-part deep tiled are followups.
 //!
+//! Round-174 surface (this crate, this round): full-pyramid READ for
+//! tiled `MIPMAP_LEVELS` / `RIPMAP_LEVELS` files via
+//! [`parse_exr_tiled_multilevel`] + [`MultilevelTiledImage`] +
+//! [`TiledLevel`]. Returns every decoded level (ONE_LEVEL: single entry;
+//! MIPMAP: `0..N-1` with `level_x == level_y`; RIPMAP: full 2-D grid in
+//! `lvly` outer, `lvlx` inner order). The existing [`parse_exr`] entry
+//! point is unchanged. Validated by encoding pyramids through
+//! [`encode_exr_tiled_mipmap`] / [`encode_exr_tiled_ripmap`] and
+//! confirming every sample of every level matches the input.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
@@ -177,7 +187,10 @@ pub mod types;
 /// Codec id for OpenEXR image frames.
 pub const CODEC_ID_STR: &str = "openexr";
 
-pub use decoder::{mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart};
+pub use decoder::{
+    mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart,
+    parse_exr_tiled_multilevel, MultilevelTiledImage, TiledLevel,
+};
 pub use deep::{
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_multipart_deep_scanline,
     parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled, DeepExrImage,

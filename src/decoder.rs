@@ -787,6 +787,309 @@ fn compute_total_tiles(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-level tiled READ (full MIPMAP / RIPMAP pyramid)
+// ---------------------------------------------------------------------------
+
+/// One decoded pyramid level of a tiled EXR file. Carries the per-level
+/// width / height (which may be smaller than the file's full-resolution
+/// dataWindow for any level beyond `(0, 0)`) plus one `f32` plane per
+/// channel sized to that level's dimensions.
+///
+/// For MIPMAP files `level_x == level_y` for every entry; for RIPMAP
+/// files the two axes are independent (see [`MultilevelTiledImage`] for
+/// the per-axis level count).
+///
+/// Sample layout matches [`ExrImage::planes`]: row-major, alphabetical
+/// channel order, length `width * height` per channel.
+#[derive(Debug, Clone)]
+pub struct TiledLevel {
+    /// Mipmap x-level index (0 = full resolution).
+    pub level_x: u32,
+    /// Mipmap y-level index (0 = full resolution). Equal to `level_x`
+    /// for MIPMAP_LEVELS files.
+    pub level_y: u32,
+    /// Width of this level (per the spec's level-dim formula).
+    pub width: u32,
+    /// Height of this level.
+    pub height: u32,
+    /// Per-channel f32 sample plane (`width * height` long), in the
+    /// same alphabetical channel order as `channels`.
+    pub planes: Vec<ExrPlane>,
+}
+
+/// Result of [`parse_exr_tiled_multilevel`]. Carries header-level
+/// metadata once plus every decoded pyramid level.
+#[derive(Debug, Clone)]
+pub struct MultilevelTiledImage {
+    /// `0 = ONE_LEVEL`, `1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS`.
+    pub level_mode: u8,
+    /// `0 = ROUND_DOWN`, `1 = ROUND_UP`.
+    pub round_mode: u8,
+    /// Tile width in pixels (from the `tiles` attribute).
+    pub tile_x: u32,
+    /// Tile height in pixels.
+    pub tile_y: u32,
+    /// Full-resolution data window (level 0,0).
+    pub data_window: Box2i,
+    /// Full-resolution display window.
+    pub display_window: Box2i,
+    /// Channel list (alphabetical-sorted, matching each level's plane order).
+    pub channels: Vec<Channel>,
+    /// Compression mode declared by the file (already applied to each
+    /// `levels[*].planes` payload — callers see decoded f32 samples).
+    pub compression: Compression,
+    /// Decoded pyramid levels in the spec's iteration order:
+    /// * ONE_LEVEL: a single entry at `(0, 0)`.
+    /// * MIPMAP_LEVELS: levels `0..N-1`, `level_x == level_y == n`.
+    /// * RIPMAP_LEVELS: `level_y` outer, `level_x` inner — i.e.
+    ///   `(0,0), (1,0), ..., (Nx-1, 0), (0, 1), (1, 1), ...`.
+    pub levels: Vec<TiledLevel>,
+}
+
+/// Parse a tiled single-part EXR file and return every decoded mipmap /
+/// ripmap level. Companion to [`parse_exr`], which is unchanged and
+/// continues to return only the full-resolution level.
+///
+/// Supports ONE_LEVEL, MIPMAP_LEVELS, and RIPMAP_LEVELS files at
+/// compression NONE / ZIP / ZIPS / RLE. Channels must be at 1×1
+/// sampling (spec requirement for tiled files).
+///
+/// Round-trips bit-exactly against [`crate::encode_exr_tiled_mipmap`]
+/// and [`crate::encode_exr_tiled_ripmap`]: the per-level pyramid
+/// supplied to the encoder is recovered sample-for-sample by this
+/// function.
+pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> {
+    let header = parse_header(bytes)?;
+    if header.version.multipart {
+        return Err(ExrError::unsupported(
+            "multi-part EXR: parse_exr_tiled_multilevel is single-part only".to_string(),
+        ));
+    }
+    if !header.version.single_tile {
+        return Err(ExrError::invalid(
+            "parse_exr_tiled_multilevel: file is not tiled (single_tile bit not set)".to_string(),
+        ));
+    }
+    let req = extract_required(&header.attributes)?;
+
+    let mut sorted_channels = req.channels.clone();
+    sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+    for ch in &sorted_channels {
+        if ch.x_sampling != 1 || ch.y_sampling != 1 {
+            return Err(ExrError::unsupported(format!(
+                "tiled multilevel: channel '{}' sampling {}×{} (spec requires 1×1 for tiled files)",
+                ch.name, ch.x_sampling, ch.y_sampling
+            )));
+        }
+    }
+    if !matches!(
+        req.compression,
+        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+    ) {
+        return Err(ExrError::unsupported(format!(
+            "tiled multilevel: compression {:?} not yet implemented",
+            req.compression
+        )));
+    }
+
+    let tdesc_attr = header
+        .attributes
+        .iter()
+        .find(|a| a.name == "tiles")
+        .ok_or_else(|| {
+            ExrError::invalid("tiled file missing required `tiles` attribute".to_string())
+        })?;
+    let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
+    if tdesc.level_mode > 2 {
+        return Err(ExrError::invalid(format!(
+            "tiledesc level_mode {} unknown (expected 0/1/2)",
+            tdesc.level_mode
+        )));
+    }
+    if tdesc.x_size == 0 || tdesc.y_size == 0 {
+        return Err(ExrError::invalid(format!(
+            "tiledesc x_size={} y_size={} — both must be > 0",
+            tdesc.x_size, tdesc.y_size
+        )));
+    }
+
+    let width = req.data_window.width();
+    let height = req.data_window.height();
+    if width == 0 || height == 0 {
+        return Err(ExrError::invalid(format!(
+            "tiled multilevel: dataWindow {width}×{height} must be > 0"
+        )));
+    }
+    let round_up = tdesc.round_mode != 0;
+
+    // Enumerate the levels we expect (and their per-level dims) in the
+    // spec's iteration order. This drives both the per-level plane
+    // allocation and the dispatch table for incoming tile chunks.
+    let mut levels: Vec<TiledLevel> = match tdesc.level_mode {
+        0 => vec![TiledLevel {
+            level_x: 0,
+            level_y: 0,
+            width,
+            height,
+            planes: alloc_planes(&sorted_channels, width, height),
+        }],
+        1 => {
+            let n = mipmap_level_count(width.max(height), round_up);
+            (0..n)
+                .map(|l| {
+                    let lw = mipmap_level_dim(width, l, round_up);
+                    let lh = mipmap_level_dim(height, l, round_up);
+                    TiledLevel {
+                        level_x: l,
+                        level_y: l,
+                        width: lw,
+                        height: lh,
+                        planes: alloc_planes(&sorted_channels, lw, lh),
+                    }
+                })
+                .collect()
+        }
+        2 => {
+            let nx = mipmap_level_count(width, round_up);
+            let ny = mipmap_level_count(height, round_up);
+            let mut v = Vec::with_capacity((nx * ny) as usize);
+            for ly in 0..ny {
+                let lh = mipmap_level_dim(height, ly, round_up);
+                for lx in 0..nx {
+                    let lw = mipmap_level_dim(width, lx, round_up);
+                    v.push(TiledLevel {
+                        level_x: lx,
+                        level_y: ly,
+                        width: lw,
+                        height: lh,
+                        planes: alloc_planes(&sorted_channels, lw, lh),
+                    });
+                }
+            }
+            v
+        }
+        _ => unreachable!("checked above"),
+    };
+
+    // Walk the tile offset table (one u64 per chunk; total_tiles == sum
+    // over levels of tiles_x*tiles_y).
+    let total_tiles = compute_total_tiles(
+        tdesc.level_mode,
+        width,
+        height,
+        tdesc.x_size,
+        tdesc.y_size,
+        round_up,
+    );
+    let mut pos = header.end_offset;
+    if pos + total_tiles * 8 > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "tile offset table runs past EOF (need {} bytes at {pos}, file size {})",
+            total_tiles * 8,
+            bytes.len()
+        )));
+    }
+    let mut offsets: Vec<usize> = Vec::with_capacity(total_tiles);
+    for _ in 0..total_tiles {
+        offsets.push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize);
+        pos += 8;
+    }
+
+    // For each tile chunk: read (tx, ty, lvlx, lvly, size, payload),
+    // locate the matching level slot by (lvlx, lvly), then scatter into
+    // that level's planes using the level's dims as the row stride.
+    for (tile_idx, &tile_off) in offsets.iter().enumerate() {
+        if tile_off + 20 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "tile {tile_idx} offset {tile_off} past EOF"
+            )));
+        }
+        let tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
+        let ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
+        let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
+        let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
+        let payload_size =
+            i32::from_le_bytes(bytes[tile_off + 16..tile_off + 20].try_into().unwrap());
+        if payload_size < 0 || tx < 0 || ty < 0 || lvl_x < 0 || lvl_y < 0 {
+            return Err(ExrError::invalid(format!(
+                "tile {tile_idx} bad header: tx={tx} ty={ty} lvlx={lvl_x} lvly={lvl_y} size={payload_size}"
+            )));
+        }
+        let pl_start = tile_off + 20;
+        let pl_end = pl_start + payload_size as usize;
+        if pl_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "tile {tile_idx} payload runs past EOF"
+            )));
+        }
+        let payload = &bytes[pl_start..pl_end];
+
+        // Find the level slot by (lvlx, lvly). For ONE_LEVEL there's
+        // only one entry and lvl_x/lvl_y must both be 0; for MIPMAP
+        // lvl_x == lvl_y; for RIPMAP they're independent.
+        let level = levels
+            .iter_mut()
+            .find(|l| l.level_x as i32 == lvl_x && l.level_y as i32 == lvl_y)
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "tile {tile_idx} carries unknown level ({lvl_x}, {lvl_y})"
+                ))
+            })?;
+
+        let x0 = (tx as u32) * tdesc.x_size;
+        let y0 = (ty as u32) * tdesc.y_size;
+        if x0 >= level.width || y0 >= level.height {
+            return Err(ExrError::invalid(format!(
+                "tile {tile_idx} at ({tx},{ty}) outside level ({lvl_x},{lvl_y}) dims {}×{}",
+                level.width, level.height
+            )));
+        }
+        let x1 = (x0 + tdesc.x_size).min(level.width);
+        let y1 = (y0 + tdesc.y_size).min(level.height);
+        let tw = (x1 - x0) as usize;
+        let th = (y1 - y0) as usize;
+
+        scatter_tile_into_planes(
+            payload,
+            &sorted_channels,
+            &mut level.planes,
+            level.width,
+            x0,
+            y0,
+            tw,
+            th,
+            req.compression,
+            tile_idx,
+        )?;
+    }
+
+    Ok(MultilevelTiledImage {
+        level_mode: tdesc.level_mode,
+        round_mode: tdesc.round_mode,
+        tile_x: tdesc.x_size,
+        tile_y: tdesc.y_size,
+        data_window: req.data_window,
+        display_window: req.display_window,
+        channels: sorted_channels,
+        compression: req.compression,
+        levels,
+    })
+}
+
+/// Allocate one zero-initialised `f32` plane per channel at the given
+/// dimensions. Used by [`parse_exr_tiled_multilevel`] to size per-level
+/// pixel storage.
+fn alloc_planes(channels: &[Channel], width: u32, height: u32) -> Vec<ExrPlane> {
+    channels
+        .iter()
+        .map(|c| ExrPlane {
+            name: c.name.clone(),
+            samples: vec![0.0; (width as usize) * (height as usize)],
+        })
+        .collect()
+}
+
 /// Parse a multi-part EXR file and return one `ExrImage` per part.
 ///
 /// Multi-part files are identified by version-field bit 12 being set.
