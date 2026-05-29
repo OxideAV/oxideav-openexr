@@ -2043,7 +2043,7 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
     let header = parse_header_allow_deep(bytes)?;
     if header.version.multipart {
         return Err(ExrError::unsupported(
-            "multi-part deep tiled EXR (single-part parser called on multipart file)".to_string(),
+            "multi-part deep tiled EXR (use parse_exr_multipart_deep_tiled)".to_string(),
         ));
     }
     if !header.version.non_image {
