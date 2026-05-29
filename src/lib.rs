@@ -161,12 +161,27 @@
 //! [`encode_exr_tiled_mipmap`] / [`encode_exr_tiled_ripmap`] and
 //! confirming every sample of every level matches the input.
 //!
+//! Round-181 surface (this crate, this round): multi-part deep TILED
+//! WRITE + READ ([`encode_exr_multipart_deep_tiled`] /
+//! [`parse_exr_multipart_deep_tiled`] + [`MultipartDeepTiledPart`] +
+//! [`DeepTiledPart`]). Composes the round-127 multipart deep-scanline
+//! envelope (version-field bits 0x1800, concatenated per-part headers +
+//! offset tables) with the round-130 single-part deep-tiled chunk shape
+//! (`tx, ty, lvlx, lvly, packed_table, packed_data, unpacked_data` +
+//! payload), prefixed by `i32 part_number` per chunk. Per-part attrs
+//! mirror the single-part `type="deeptile"` writer plus the mandatory
+//! `name` attribute. Linear-scan reader for robustness against
+//! zero-filled offset tables. ONE_LEVEL + ROUND_DOWN; NONE / RLE / ZIPS
+//! compression (deep ZIP rejected, matching the single-part deep-tiled
+//! discipline and the openexr.com `exrinfo` reference). Self-roundtrips
+//! at every supported compression on multi-part 2- and 3-part layouts.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); multi-part WRITE for tiled parts + deep-tile multipart;
-//! multi-level deep tiled (MIPMAP/RIPMAP); HDR pixel-format integration
-//! with `oxideav-core`.
+//! public spec); multi-part WRITE for tiled parts (flat); multi-level
+//! deep tiled (MIPMAP/RIPMAP, single-part and multi-part); HDR
+//! pixel-format integration with `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -193,8 +208,10 @@ pub use decoder::{
 };
 pub use deep::{
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_multipart_deep_scanline,
-    parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled, DeepExrImage,
-    DeepScanlineInput, DeepScanlinePart, DeepTiledImage, DeepTiledInput, MultipartDeepScanlinePart,
+    encode_exr_multipart_deep_tiled, parse_exr_deep_multipart, parse_exr_deep_scanline,
+    parse_exr_deep_tiled, parse_exr_multipart_deep_tiled, DeepExrImage, DeepScanlineInput,
+    DeepScanlinePart, DeepTiledImage, DeepTiledInput, DeepTiledPart, MultipartDeepScanlinePart,
+    MultipartDeepTiledPart,
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,

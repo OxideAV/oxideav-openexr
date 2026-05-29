@@ -2433,6 +2433,993 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
     })
 }
 
+// ---------------------------------------------------------------------
+// Multi-part deep TILED WRITE + READ (round 181).
+//
+// Composition of the round-127 multi-part deep-scanline writer + the
+// round-130 single-part deep-tiled chunk layout. Each part is a
+// `type="deeptile"` ONE_LEVEL deep-tiled image; chunks are concatenated
+// across all parts with an `i32 part_number` prefix (matching the
+// `parse_exr_multipart` / `parse_exr_deep_multipart` linear-scan
+// convention since `exrmultipart -combine`-built files emit zero-filled
+// offset tables for parts beyond the first, so a robust reader cannot
+// rely on the per-part offset tables).
+//
+// Per-chunk on-disk shape (per part):
+//   i32 part_number
+//   i32 tile_x         (column in tile grid)
+//   i32 tile_y         (row in tile grid)
+//   i32 lvlx           (always 0 — ONE_LEVEL only)
+//   i32 lvly           (always 0 — ONE_LEVEL only)
+//   u64 packed_pixel_offset_table_size
+//   u64 packed_sample_data_size
+//   u64 unpacked_sample_data_size
+//   packed_pixel_offset_table_bytes
+//   packed_sample_data_bytes
+//
+// → 4 + (4 + 4 + 4 + 4) + 24 = 44 bytes of header per tile chunk.
+//
+// Version field: `multipart | non_image = 0x1800` only. As with the
+// single-part deep-tiled writer, the `single_tile` (0x200) bit is NOT
+// set: the per-part `tiles[tiledesc]` attribute + `type="deeptile"`
+// string attribute are the tile-ness discriminators.
+//
+// Per-tile pixel-offset table holds `tile_h * tile_w` cumulative-
+// inclusive i32 entries, row-major within each tile's valid pixel
+// rectangle (edge tiles trim to their valid extent). For NONE-
+// compression the reader also accepts files that pad to the full
+// `tile_x * tile_y * 4` bytes (matching the openexr.com reference's
+// behaviour, mirrored from the single-part deep-tiled reader).
+//
+// Sample data is non-interleaved (channel-major within each tile).
+// Compression NONE / RLE / ZIPS (deep ZIP rejected to match the
+// openexr.com reference's `exrinfo`).
+//
+// MIPMAP/RIPMAP-level multi-part deep-tiled is a followup; this round
+// only emits + accepts ONE_LEVEL (`tiledesc.mode == 0x00`).
+// ---------------------------------------------------------------------
+
+/// One part of a multi-part deep-tiled file, for input to
+/// [`encode_exr_multipart_deep_tiled`].
+///
+/// `name` is mandatory and must be unique across all parts.
+pub struct MultipartDeepTiledPart<'a> {
+    /// Part name (must be unique across all parts in the file).
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Tile pixel dimensions. Both must be > 0; edge tiles store only
+    /// their valid pixel rectangle.
+    pub tile_x: u32,
+    pub tile_y: u32,
+    /// Channels in alphabetical order (sub-sampled channels not
+    /// supported on the deep path).
+    pub channels: Vec<Channel>,
+    /// One u32 per pixel (`width * height` long) — how many samples
+    /// this pixel carries.
+    pub samples_per_pixel: &'a [u32],
+    /// One f32 slice per channel, each `samples_per_pixel.iter().sum()`
+    /// long, in pixel-scan order. UINT stored as the u32 bits cast to
+    /// f32 (matching the [`DeepExrImage`] convention).
+    pub channel_samples: Vec<&'a [f32]>,
+    pub compression: Compression,
+}
+
+/// One part of a multi-part deep-tiled file, returned from
+/// [`parse_exr_multipart_deep_tiled`].
+///
+/// Pixel data is materialised into the flat layout used by
+/// [`DeepTiledImage`]: `samples_per_pixel` is `width * height` long;
+/// each `channel_samples[ch]` is `samples_per_pixel.iter().sum()` long
+/// in pixel-scan order. The tile-grid structure is fully reassembled
+/// into row-major pixel coordinates before return — callers don't have
+/// to know the part was tiled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeepTiledPart {
+    pub name: String,
+    pub data_window: Box2i,
+    pub display_window: Box2i,
+    pub line_order: LineOrder,
+    pub compression: Compression,
+    pub tile_x: u32,
+    pub tile_y: u32,
+    pub channels: Vec<Channel>,
+    pub samples_per_pixel: Vec<u32>,
+    pub channel_samples: Vec<Vec<f32>>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl DeepTiledPart {
+    pub fn width(&self) -> u32 {
+        self.data_window.width()
+    }
+    pub fn height(&self) -> u32 {
+        self.data_window.height()
+    }
+    pub fn total_samples(&self) -> u64 {
+        self.samples_per_pixel.iter().map(|&n| n as u64).sum()
+    }
+}
+
+/// Encode a multi-part deep-tiled EXR (version-field bits 0x1800).
+///
+/// Each part is validated independently (alphabetical channel order,
+/// `samples_per_pixel` length, per-channel sample-count totals,
+/// compression in {NONE, RLE, ZIPS}, unique non-empty name, no
+/// sub-sampling, tile dimensions > 0). Tile chunks are emitted ty-outer
+/// tx-inner within each part (matching the single-part deep-tiled
+/// writer); part chunks are concatenated in part-order.
+///
+/// Self-roundtrips through [`parse_exr_multipart_deep_tiled`].
+pub fn encode_exr_multipart_deep_tiled(parts: &[MultipartDeepTiledPart]) -> Result<Vec<u8>> {
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "encode_exr_multipart_deep_tiled: at least one part required".to_string(),
+        ));
+    }
+
+    // ---- Validate every part up front (mirrors deep-tiled rules). ----
+    for (i, p) in parts.iter().enumerate() {
+        if p.name.is_empty() {
+            return Err(ExrError::invalid(format!(
+                "deep tiled part {i}: empty name"
+            )));
+        }
+        for (j, other) in parts.iter().enumerate() {
+            if j != i && other.name == p.name {
+                return Err(ExrError::invalid(format!(
+                    "duplicate deep tiled part name '{}' (parts {i} and {j})",
+                    p.name
+                )));
+            }
+        }
+        if !matches!(
+            p.compression,
+            Compression::None | Compression::Rle | Compression::Zips
+        ) {
+            return Err(ExrError::unsupported(format!(
+                "deep tiled part '{}' compression {:?} (openexr.com reference accepts \
+                 only NONE/RLE/ZIPS for deep — ZIP is listed in the spec page but \
+                 exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
+                p.name, p.compression
+            )));
+        }
+        if p.width == 0 || p.height == 0 {
+            return Err(ExrError::invalid(format!(
+                "deep tiled part '{}': dataWindow {}x{} must be > 0",
+                p.name, p.width, p.height
+            )));
+        }
+        if p.tile_x == 0 || p.tile_y == 0 {
+            return Err(ExrError::invalid(format!(
+                "deep tiled part '{}': tile size {}×{} must both be > 0",
+                p.name, p.tile_x, p.tile_y
+            )));
+        }
+        let pixels = (p.width as usize) * (p.height as usize);
+        if p.samples_per_pixel.len() != pixels {
+            return Err(ExrError::invalid(format!(
+                "deep tiled part '{}': samples_per_pixel len {} != width*height = {pixels}",
+                p.name,
+                p.samples_per_pixel.len()
+            )));
+        }
+        if p.channels.len() != p.channel_samples.len() {
+            return Err(ExrError::invalid(format!(
+                "deep tiled part '{}': channels.len()={} != channel_samples.len()={}",
+                p.name,
+                p.channels.len(),
+                p.channel_samples.len()
+            )));
+        }
+        for win in p.channels.windows(2) {
+            if win[0].name >= win[1].name {
+                return Err(ExrError::invalid(format!(
+                    "deep tiled part '{}': channels not alphabetical: '{}' >= '{}'",
+                    p.name, win[0].name, win[1].name
+                )));
+            }
+        }
+        let total_samples: u64 = p.samples_per_pixel.iter().map(|&n| n as u64).sum();
+        for (ch, slc) in p.channels.iter().zip(p.channel_samples.iter()) {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "deep tiled part '{}': sub-sampled channel '{}' (deep tiled path \
+                     requires 1×1 sampling)",
+                    p.name, ch.name
+                )));
+            }
+            if slc.len() != total_samples as usize {
+                return Err(ExrError::invalid(format!(
+                    "deep tiled part '{}': channel '{}' sample slice len {} != \
+                     total_samples {total_samples}",
+                    p.name,
+                    ch.name,
+                    slc.len()
+                )));
+            }
+        }
+    }
+
+    // ---- Per-part chunk counts + max-sample stats. ----
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+    let mut tx_counts: Vec<u32> = Vec::with_capacity(parts.len());
+    let mut ty_counts: Vec<u32> = Vec::with_capacity(parts.len());
+    for p in parts {
+        let tx_count = p.width.div_ceil(p.tile_x);
+        let ty_count = p.height.div_ceil(p.tile_y);
+        chunk_counts.push((tx_count * ty_count) as usize);
+        tx_counts.push(tx_count);
+        ty_counts.push(ty_count);
+    }
+
+    // ---- Per-part header byte blocks. ----
+    let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
+    for (i, p) in parts.iter().enumerate() {
+        let max_samples = p.samples_per_pixel.iter().copied().max().unwrap_or(0) as i32;
+        let attrs = build_deep_tiled_part_attrs(p, chunk_counts[i] as i32, max_samples);
+        let mut hb = Vec::with_capacity(256);
+        for a in &attrs {
+            hb.extend_from_slice(a.name.as_bytes());
+            hb.push(0);
+            let (type_name, payload) = encode_attribute_value(&a.value);
+            hb.extend_from_slice(type_name.as_bytes());
+            hb.push(0);
+            hb.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+            hb.extend_from_slice(&payload);
+        }
+        header_byte_blocks.push(hb);
+    }
+
+    // ---- Stitch magic + version + headers + double-NUL terminator. ----
+    // Single-part deep-tiled used 0x800 only; multi-part adds 0x1000.
+    // We deliberately do NOT set single_tile (0x200) — the per-part
+    // `tiles[tiledesc]` attribute + `type="deeptile"` carry the
+    // tile-ness signal (mirrors the single-part deep-tiled discipline).
+    let version = VersionField::from_u32(2 | 0x800 | 0x1000);
+    let mut out: Vec<u8> = Vec::with_capacity(2048);
+    out.extend_from_slice(&EXR_MAGIC.to_le_bytes());
+    out.extend_from_slice(&version.to_u32().to_le_bytes());
+    for hb in &header_byte_blocks {
+        out.extend_from_slice(hb);
+        out.push(0); // per-part header terminator
+    }
+    out.push(0); // double-NUL = end-of-all-headers
+
+    // ---- Build per-tile payloads. ----
+    struct TileBlob {
+        part_idx: u32,
+        tx: u32,
+        ty: u32,
+        packed_table: Vec<u8>,
+        packed_data: Vec<u8>,
+        unpacked_data_len: u64,
+    }
+    let mut tiles_by_part: Vec<Vec<TileBlob>> = Vec::with_capacity(parts.len());
+
+    for (part_idx, p) in parts.iter().enumerate() {
+        let tx_count = tx_counts[part_idx];
+        let ty_count = ty_counts[part_idx];
+        let w = p.width as usize;
+        let pixels = (p.width as usize) * (p.height as usize);
+
+        let bpp_total: usize = p
+            .channels
+            .iter()
+            .map(|c| c.pixel_type.bytes_per_sample())
+            .sum();
+
+        // Pre-compute cumulative-EXCLUSIVE per-pixel sample offsets so we
+        // can slice each channel's samples by pixel index.
+        let pixel_sample_starts: Vec<u64> = {
+            let mut v = Vec::with_capacity(pixels + 1);
+            v.push(0u64);
+            let mut acc: u64 = 0;
+            for &n in p.samples_per_pixel {
+                acc += n as u64;
+                v.push(acc);
+            }
+            v
+        };
+
+        let mut part_tiles: Vec<TileBlob> = Vec::with_capacity(chunk_counts[part_idx]);
+        for ty in 0..ty_count {
+            for tx in 0..tx_count {
+                let x0 = tx * p.tile_x;
+                let y0 = ty * p.tile_y;
+                let x1 = (x0 + p.tile_x).min(p.width);
+                let y1 = (y0 + p.tile_y).min(p.height);
+                let tw = (x1 - x0) as usize;
+                let th = (y1 - y0) as usize;
+                let entries = tw * th;
+
+                let mut table_bytes = Vec::with_capacity(entries * 4);
+                let mut tile_spp: Vec<u32> = Vec::with_capacity(entries);
+                for r in 0..th {
+                    let dst_y = y0 as usize + r;
+                    let mut row_acc: i32 = 0;
+                    for c in 0..tw {
+                        let dst_x = x0 as usize + c;
+                        let n = p.samples_per_pixel[dst_y * w + dst_x];
+                        tile_spp.push(n);
+                        row_acc = row_acc.checked_add(n as i32).ok_or_else(|| {
+                            ExrError::invalid(format!(
+                                "deep tiled part '{}' tile ({tx},{ty}) row {r}: \
+                                 cumulative offset overflows i32",
+                                p.name
+                            ))
+                        })?;
+                        table_bytes.extend_from_slice(&row_acc.to_le_bytes());
+                    }
+                }
+
+                let tile_total_samples: u64 = tile_spp.iter().map(|&n| n as u64).sum();
+                let mut sample_bytes: Vec<u8> =
+                    Vec::with_capacity(tile_total_samples as usize * bpp_total);
+                for (ch_idx, ch) in p.channels.iter().enumerate() {
+                    let plane = p.channel_samples[ch_idx];
+                    for r in 0..th {
+                        let dst_y = y0 as usize + r;
+                        for c in 0..tw {
+                            let dst_x = x0 as usize + c;
+                            let pi = dst_y * w + dst_x;
+                            let s_start = pixel_sample_starts[pi] as usize;
+                            let s_end = pixel_sample_starts[pi + 1] as usize;
+                            for &v in &plane[s_start..s_end] {
+                                match ch.pixel_type {
+                                    PixelType::Half => sample_bytes.extend_from_slice(
+                                        &crate::half::f32_to_half(v).to_le_bytes(),
+                                    ),
+                                    PixelType::Float => {
+                                        sample_bytes.extend_from_slice(&v.to_le_bytes())
+                                    }
+                                    PixelType::Uint => {
+                                        let u = if v.is_nan() || v < 0.0 {
+                                            0u32
+                                        } else if v >= (u32::MAX as f32) {
+                                            u32::MAX
+                                        } else {
+                                            (v + 0.5) as u32
+                                        };
+                                        sample_bytes.extend_from_slice(&u.to_le_bytes());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let packed_table = compress_buffer(&table_bytes, p.compression)?;
+                let packed_data = compress_buffer(&sample_bytes, p.compression)?;
+                part_tiles.push(TileBlob {
+                    part_idx: part_idx as u32,
+                    tx,
+                    ty,
+                    packed_table,
+                    packed_data,
+                    unpacked_data_len: sample_bytes.len() as u64,
+                });
+            }
+        }
+        tiles_by_part.push(part_tiles);
+    }
+
+    // ---- Compute absolute offsets after concatenated offset tables. ----
+    // Per-tile-chunk header on disk:
+    //   i32 part_number + i32 tx + i32 ty + i32 lvlx + i32 lvly
+    //   + u64 packed_table + u64 packed_data + u64 unpacked_data
+    // = 4*5 + 24 = 44 bytes
+    let header_bytes_so_far = out.len();
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let offset_table_bytes = total_chunks * 8;
+    let chunks_start = header_bytes_so_far + offset_table_bytes;
+
+    let mut per_part_table: Vec<Vec<u64>> = vec![Vec::new(); parts.len()];
+    let mut running = chunks_start;
+    for part_tiles in &tiles_by_part {
+        for c in part_tiles {
+            per_part_table[c.part_idx as usize].push(running as u64);
+            running += 44 + c.packed_table.len() + c.packed_data.len();
+        }
+    }
+
+    // Emit concatenated offset tables (part 0, part 1, ...).
+    for table in &per_part_table {
+        for &o in table {
+            out.extend_from_slice(&o.to_le_bytes());
+        }
+    }
+
+    // Emit chunks in the same part-order.
+    for part_tiles in &tiles_by_part {
+        for c in part_tiles {
+            out.extend_from_slice(&(c.part_idx as i32).to_le_bytes());
+            out.extend_from_slice(&(c.tx as i32).to_le_bytes());
+            out.extend_from_slice(&(c.ty as i32).to_le_bytes());
+            out.extend_from_slice(&0i32.to_le_bytes()); // lvlx
+            out.extend_from_slice(&0i32.to_le_bytes()); // lvly
+            out.extend_from_slice(&(c.packed_table.len() as u64).to_le_bytes());
+            out.extend_from_slice(&(c.packed_data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&c.unpacked_data_len.to_le_bytes());
+            out.extend_from_slice(&c.packed_table);
+            out.extend_from_slice(&c.packed_data);
+        }
+    }
+
+    Ok(out)
+}
+
+/// Per-part attribute set for a deep tiled multipart part — strict
+/// superset of the single-part deep-tiled required attrs (adds `name`,
+/// matching the multi-part deep-scanline writer's `build_deep_part_attrs`).
+fn build_deep_tiled_part_attrs(
+    part: &MultipartDeepTiledPart,
+    chunk_count: i32,
+    max_samples: i32,
+) -> Vec<Attribute> {
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (part.width - 1) as i32,
+        y_max: (part.height - 1) as i32,
+    };
+    let mut tiledesc = Vec::with_capacity(9);
+    tiledesc.extend_from_slice(&part.tile_x.to_le_bytes());
+    tiledesc.extend_from_slice(&part.tile_y.to_le_bytes());
+    tiledesc.push(0x00); // ONE_LEVEL + ROUND_DOWN
+    vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(part.channels.clone()),
+        },
+        Attribute {
+            name: "chunkCount".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: chunk_count.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(part.compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "maxSamplesPerPixel".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: max_samples.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "name".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: part.name.as_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "tiles".to_string(),
+            value: AttributeValue::Other {
+                type_name: "tiledesc".to_string(),
+                data: tiledesc,
+            },
+        },
+        Attribute {
+            name: "type".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"deeptile".to_vec(),
+            },
+        },
+        Attribute {
+            name: "version".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: 1i32.to_le_bytes().to_vec(),
+            },
+        },
+    ]
+}
+
+/// Parse a multi-part deep-tiled EXR (version-field bits 0x1800).
+///
+/// Every part must carry `type = "deeptile"` plus the standard per-part
+/// required attributes (`name`, `chunkCount`, `dataWindow`,
+/// `displayWindow`, `channels`, `compression`, `lineOrder`,
+/// `pixelAspectRatio`, `screenWindowCenter`, `screenWindowWidth`,
+/// `tiles[tiledesc]` ONE_LEVEL) plus the deep-specific `version=1` +
+/// `maxSamplesPerPixel`.
+///
+/// On-disk layout mirrors the single-part deep-tiled writer per part,
+/// with the chunk record prefixed by an `i32 part_number` (the
+/// multi-part shape used elsewhere in this crate).
+///
+/// Compression: NONE / RLE / ZIPS only.
+pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>> {
+    let parts = parse_multipart_headers_allow_deep(bytes)?;
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "multi-part deep tiled file has no parts".to_string(),
+        ));
+    }
+    for (i, part) in parts.iter().enumerate() {
+        let part_type = find_string_attr(&part.attributes, "type").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled: part {i} missing required 'type' attribute"
+            ))
+        })?;
+        if part_type != "deeptile" {
+            return Err(ExrError::unsupported(format!(
+                "multi-part deep tiled: part {i} type='{part_type}' \
+                 (only 'deeptile' supported — 'deepscanline' routes through \
+                 parse_exr_deep_multipart)"
+            )));
+        }
+    }
+    if !parts[0].version.non_image {
+        return Err(ExrError::invalid(
+            "parse_exr_multipart_deep_tiled called on a multi-part file without the \
+             non_image (deep) version bit set"
+                .to_string(),
+        ));
+    }
+    if !parts[0].version.multipart {
+        return Err(ExrError::invalid(
+            "parse_exr_multipart_deep_tiled called on a non-multipart EXR".to_string(),
+        ));
+    }
+
+    /// Per-tile decoded channel samples (tile-extent `tw`, `th` + one
+    /// `Vec<f32>` per channel, channel-major within the tile in
+    /// pixel-scan order).
+    struct TileDecoded {
+        tw: u32,
+        th: u32,
+        channel_samples: Vec<Vec<f32>>,
+    }
+    struct PartState {
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        channels: Vec<Channel>,
+        attributes: Vec<Attribute>,
+        chunk_count: usize,
+        tile_x: u32,
+        tile_y: u32,
+        width: u32,
+        height: u32,
+        tx_count: u32,
+        ty_count: u32,
+        samples_per_pixel: Vec<u32>,
+        /// Indexed by `ty * tx_count + tx`.
+        tile_decoded: Vec<Option<TileDecoded>>,
+    }
+
+    let mut state: Vec<PartState> = Vec::with_capacity(parts.len());
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+
+    for (i, part) in parts.iter().enumerate() {
+        let name = find_string_attr(&part.attributes, "name").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled part {i} missing required 'name' attribute"
+            ))
+        })?;
+        let chunk_count = crate::decoder::find_chunk_count(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}') missing required 'chunkCount' attribute"
+            ))
+        })?;
+        let data_window = find_box2i(&part.attributes, "dataWindow").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}') missing required 'dataWindow' attribute"
+            ))
+        })?;
+        let display_window = find_box2i(&part.attributes, "displayWindow").unwrap_or(data_window);
+        let line_order =
+            find_line_order(&part.attributes, "lineOrder").unwrap_or(LineOrder::IncreasingY);
+        let compression = find_compression(&part.attributes, "compression").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}') missing required 'compression' attribute"
+            ))
+        })?;
+        if !matches!(
+            compression,
+            Compression::None | Compression::Rle | Compression::Zips
+        ) {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}') uses compression \
+                 {compression:?} (openexr.com reference accepts only NONE/RLE/ZIPS for deep)"
+            )));
+        }
+        let channels = find_channels(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}') missing required 'channels' attribute"
+            ))
+        })?;
+        let mut sorted_channels = channels.clone();
+        sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+        for ch in &sorted_channels {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part deep tiled part {i} ('{name}'): sub-sampled channel '{}' \
+                     (tiled files require 1×1 sampling)",
+                    ch.name
+                )));
+            }
+        }
+        // tiles[tiledesc] payload: u32 xSize | u32 ySize | u8 mode.
+        let tile_attr = part
+            .attributes
+            .iter()
+            .find(|a| a.name == "tiles")
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "multi-part deep tiled part {i} ('{name}') missing required 'tiles' attribute"
+                ))
+            })?;
+        let (tile_x, tile_y) = match &tile_attr.value {
+            AttributeValue::Other { type_name, data }
+                if type_name == "tiledesc" && data.len() == 9 =>
+            {
+                let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
+                let mode = data[8];
+                if mode != 0x00 {
+                    return Err(ExrError::unsupported(format!(
+                        "multi-part deep tiled part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                         (only 0x00 = ONE_LEVEL + ROUND_DOWN supported — multi-level deep is a followup)"
+                    )));
+                }
+                if xs == 0 || ys == 0 {
+                    return Err(ExrError::invalid(format!(
+                        "multi-part deep tiled part {i} ('{name}'): tile size {xs}×{ys} must both be > 0"
+                    )));
+                }
+                (xs, ys)
+            }
+            _ => {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep tiled part {i} ('{name}'): tiles attribute has unexpected shape: {:?}",
+                    tile_attr.value
+                )));
+            }
+        };
+        let width = data_window.width();
+        let height = data_window.height();
+        if width == 0 || height == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}'): dataWindow {width}×{height} must be > 0"
+            )));
+        }
+        let tx_count = width.div_ceil(tile_x);
+        let ty_count = height.div_ceil(tile_y);
+        let expected_chunks = (tx_count * ty_count) as usize;
+        if chunk_count != expected_chunks {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}'): chunkCount={chunk_count} \
+                 disagrees with tile-grid math ({expected_chunks})"
+            )));
+        }
+        chunk_counts.push(chunk_count);
+        let pixels = (width as usize) * (height as usize);
+        state.push(PartState {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            channels: sorted_channels,
+            attributes: part.attributes.clone(),
+            chunk_count,
+            tile_x,
+            tile_y,
+            width,
+            height,
+            tx_count,
+            ty_count,
+            samples_per_pixel: vec![0u32; pixels],
+            tile_decoded: (0..expected_chunks).map(|_| None).collect(),
+        });
+    }
+
+    // Skip past the concatenated offset tables (may be zero-filled).
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let tables_start = parts.last().unwrap().end_offset;
+    let chunk_scan_start = tables_start + total_chunks * 8;
+    if chunk_scan_start > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "multi-part deep tiled offset tables run past EOF (need {chunk_scan_start}, have {})",
+            bytes.len()
+        )));
+    }
+
+    // Linear scan: each tile chunk has the part-number-prefixed layout
+    // described in the encoder comment above.
+    let mut scan_pos = chunk_scan_start;
+    for _ in 0..total_chunks {
+        // 5 i32 + 3 u64 = 44 bytes of chunk header.
+        if scan_pos + 44 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled: unexpected EOF at chunk scan position {scan_pos}"
+            )));
+        }
+        let part_num = i32::from_le_bytes(bytes[scan_pos..scan_pos + 4].try_into().unwrap());
+        let tx = i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+        let ty = i32::from_le_bytes(bytes[scan_pos + 8..scan_pos + 12].try_into().unwrap());
+        let lvlx = i32::from_le_bytes(bytes[scan_pos + 12..scan_pos + 16].try_into().unwrap());
+        let lvly = i32::from_le_bytes(bytes[scan_pos + 16..scan_pos + 20].try_into().unwrap());
+        let packed_table =
+            u64::from_le_bytes(bytes[scan_pos + 20..scan_pos + 28].try_into().unwrap()) as usize;
+        let packed_data =
+            u64::from_le_bytes(bytes[scan_pos + 28..scan_pos + 36].try_into().unwrap()) as usize;
+        let unpacked_data =
+            u64::from_le_bytes(bytes[scan_pos + 36..scan_pos + 44].try_into().unwrap()) as usize;
+        if part_num < 0 || part_num as usize >= state.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled chunk at {scan_pos}: part_number={part_num} out of range 0..{}",
+                state.len()
+            )));
+        }
+        let part_idx = part_num as usize;
+        let ps = &mut state[part_idx];
+        if lvlx != 0 || lvly != 0 {
+            return Err(ExrError::unsupported(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): chunk lvlx={lvlx} lvly={lvly} \
+                 (only ONE_LEVEL supported in this round)",
+                ps.name
+            )));
+        }
+        if tx < 0 || ty < 0 || (tx as u32) >= ps.tx_count || (ty as u32) >= ps.ty_count {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): tx={tx} ty={ty} outside grid {}×{}",
+                ps.name, ps.tx_count, ps.ty_count
+            )));
+        }
+        let tx_u = tx as u32;
+        let ty_u = ty as u32;
+        let x0 = tx_u * ps.tile_x;
+        let y0 = ty_u * ps.tile_y;
+        let x1 = (x0 + ps.tile_x).min(ps.width);
+        let y1 = (y0 + ps.tile_y).min(ps.height);
+        let tw = x1 - x0;
+        let th = y1 - y0;
+        let full_tw = ps.tile_x as usize;
+        let full_th = ps.tile_y as usize;
+        // Same NONE-padding accommodation as the single-part reader.
+        let entries = (tw * th) as usize;
+        let full_entries = full_tw * full_th;
+        let row_stride;
+        let unpacked_table_size;
+        if ps.compression == Compression::None && packed_table == full_entries * 4 {
+            unpacked_table_size = full_entries * 4;
+            row_stride = full_tw;
+        } else {
+            unpacked_table_size = entries * 4;
+            row_stride = tw as usize;
+        }
+
+        let table_start = scan_pos + 44;
+        let table_end = table_start + packed_table;
+        let data_start = table_end;
+        let data_end = data_start + packed_data;
+        if data_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): chunk payload runs past EOF",
+                ps.name
+            )));
+        }
+
+        let table_bytes = decompress_buffer(
+            &bytes[table_start..table_end],
+            unpacked_table_size,
+            ps.compression,
+        )?;
+        let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
+        for ch in table_bytes.chunks_exact(4) {
+            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        }
+        if cumulative_flat.len() != unpacked_table_size / 4 {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): offset-table size mismatch ({} != {})",
+                ps.name,
+                cumulative_flat.len(),
+                unpacked_table_size / 4
+            )));
+        }
+
+        let mut tile_total_samples: u64 = 0;
+        let width = ps.width;
+        for r in 0..th as usize {
+            let row_base = r * row_stride;
+            let row_slice = &cumulative_flat[row_base..row_base + tw as usize];
+            let per_pixel = per_pixel_from_cumulative(row_slice)?;
+            let dst_y = y0 as usize + r;
+            let dst_base = dst_y * width as usize + x0 as usize;
+            for (i, &n) in per_pixel.iter().enumerate() {
+                ps.samples_per_pixel[dst_base + i] = n;
+                tile_total_samples += n as u64;
+            }
+        }
+
+        let block_bpp: usize = ps
+            .channels
+            .iter()
+            .map(|c| c.pixel_type.bytes_per_sample())
+            .sum();
+        let expected_unpacked = tile_total_samples as usize * block_bpp;
+        if expected_unpacked != unpacked_data {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): derived unpacked_data={expected_unpacked} \
+                 disagrees with header unpacked_data={unpacked_data}",
+                ps.name
+            )));
+        }
+        let sample_bytes =
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?;
+
+        // Channel-major per-tile decode (matching single-part reader).
+        let mut p = 0usize;
+        let channel_types: Vec<(PixelType, String)> = ps
+            .channels
+            .iter()
+            .map(|c| (c.pixel_type, c.name.clone()))
+            .collect();
+        let mut per_channel: Vec<Vec<f32>> = (0..channel_types.len()).map(|_| Vec::new()).collect();
+        for (ch_idx, (pixel_type, ch_name)) in channel_types.iter().enumerate() {
+            let bps = pixel_type.bytes_per_sample();
+            let need = tile_total_samples as usize * bps;
+            if p + need > sample_bytes.len() {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep tiled part {part_idx} ('{}'): channel '{ch_name}' bytes past payload end",
+                    ps.name
+                )));
+            }
+            for s in 0..(tile_total_samples as usize) {
+                let off = p + s * bps;
+                let v = match pixel_type {
+                    PixelType::Half => crate::half::half_to_f32(u16::from_le_bytes(
+                        sample_bytes[off..off + 2].try_into().unwrap(),
+                    )),
+                    PixelType::Float => {
+                        f32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap())
+                    }
+                    PixelType::Uint => {
+                        let bits =
+                            u32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap());
+                        bits as f32
+                    }
+                };
+                per_channel[ch_idx].push(v);
+            }
+            p += need;
+        }
+        if p != sample_bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): consumed {p} of {} payload bytes",
+                ps.name,
+                sample_bytes.len()
+            )));
+        }
+
+        let tile_grid_idx = (ty_u * ps.tx_count + tx_u) as usize;
+        if ps.tile_decoded[tile_grid_idx].is_some() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {part_idx} ('{}'): tile ({tx_u},{ty_u}) appears more than once",
+                ps.name
+            )));
+        }
+        ps.tile_decoded[tile_grid_idx] = Some(TileDecoded {
+            tw,
+            th,
+            channel_samples: per_channel,
+        });
+
+        scan_pos = data_end;
+        let _ = ps.chunk_count; // reserved for future bounds checks
+    }
+
+    // Second pass: per part, re-emit channel samples in pixel-scan order.
+    let mut out_parts: Vec<DeepTiledPart> = Vec::with_capacity(state.len());
+    for ps in state {
+        let pixels = (ps.width as usize) * (ps.height as usize);
+        for (idx, slot) in ps.tile_decoded.iter().enumerate() {
+            if slot.is_none() {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep tiled part '{}': tile grid missing entry {idx}",
+                    ps.name
+                )));
+            }
+        }
+        let total_samples: u64 = ps.samples_per_pixel.iter().map(|&n| n as u64).sum();
+        let mut channel_samples: Vec<Vec<f32>> = (0..ps.channels.len())
+            .map(|_| Vec::with_capacity(total_samples as usize))
+            .collect();
+
+        // Per-tile pixel-start tables, for slicing per-tile channel slabs.
+        let mut tile_pixel_starts: Vec<Vec<u64>> = Vec::with_capacity(ps.tile_decoded.len());
+        for slot in &ps.tile_decoded {
+            let td = slot.as_ref().unwrap();
+            let x0 = ((tile_pixel_starts.len() as u32) % ps.tx_count) * ps.tile_x;
+            let y0 = ((tile_pixel_starts.len() as u32) / ps.tx_count) * ps.tile_y;
+            let mut starts = Vec::with_capacity((td.tw * td.th) as usize + 1);
+            starts.push(0u64);
+            let mut acc: u64 = 0;
+            for r in 0..td.th as usize {
+                for c in 0..td.tw as usize {
+                    let dst_y = y0 as usize + r;
+                    let dst_x = x0 as usize + c;
+                    acc += ps.samples_per_pixel[dst_y * ps.width as usize + dst_x] as u64;
+                    starts.push(acc);
+                }
+            }
+            tile_pixel_starts.push(starts);
+        }
+
+        for y in 0..ps.height as usize {
+            let ty = (y / ps.tile_y as usize) as u32;
+            let y_in_tile = y - (ty as usize) * ps.tile_y as usize;
+            for x in 0..ps.width as usize {
+                let tx = (x / ps.tile_x as usize) as u32;
+                let x_in_tile = x - (tx as usize) * ps.tile_x as usize;
+                let tile_grid_idx = (ty * ps.tx_count + tx) as usize;
+                let td = ps.tile_decoded[tile_grid_idx].as_ref().unwrap();
+                let pixel_within_tile = y_in_tile * td.tw as usize + x_in_tile;
+                let s_start = tile_pixel_starts[tile_grid_idx][pixel_within_tile] as usize;
+                let s_end = tile_pixel_starts[tile_grid_idx][pixel_within_tile + 1] as usize;
+                for (ch_idx, dst) in channel_samples
+                    .iter_mut()
+                    .enumerate()
+                    .take(ps.channels.len())
+                {
+                    dst.extend_from_slice(&td.channel_samples[ch_idx][s_start..s_end]);
+                }
+            }
+        }
+        let _ = pixels;
+
+        out_parts.push(DeepTiledPart {
+            name: ps.name,
+            data_window: ps.data_window,
+            display_window: ps.display_window,
+            line_order: ps.line_order,
+            compression: ps.compression,
+            tile_x: ps.tile_x,
+            tile_y: ps.tile_y,
+            channels: ps.channels,
+            samples_per_pixel: ps.samples_per_pixel,
+            channel_samples,
+            attributes: ps.attributes,
+        });
+    }
+    Ok(out_parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3053,5 +4040,306 @@ mod tests {
         let bytes = encode_exr_deep_scanline(&input).unwrap();
         let r = parse_exr_deep_tiled(&bytes);
         assert!(r.is_err());
+    }
+
+    // ----- Round 181: multi-part deep TILED WRITE + READ ------------------
+
+    fn assert_mp_deep_tiled_part_roundtrip(
+        part: &DeepTiledPart,
+        spp: &[u32],
+        planes: &[Vec<f32>; 4],
+    ) {
+        assert_eq!(part.samples_per_pixel, spp);
+        for (ch_idx, plane) in planes.iter().enumerate() {
+            let got = &part.channel_samples[ch_idx];
+            assert_eq!(
+                got.len(),
+                plane.len(),
+                "channel {ch_idx} sample-count mismatch"
+            );
+            for (i, (g, e)) in got.iter().zip(plane.iter()).enumerate() {
+                assert_eq!(
+                    g, e,
+                    "channel {ch_idx} sample {i} mismatch: got {g} expected {e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mp_deep_tiled_two_parts_zips_roundtrip() {
+        let (w, h, tx, ty) = (8u32, 6u32, 4u32, 3u32);
+        let (spp0, planes0) = synthetic_deep(w, h);
+        let (spp1, planes1) = synthetic_deep(w, h);
+        let channels = mk_channels_rgba_float();
+        let parts = vec![
+            MultipartDeepTiledPart {
+                name: "left".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &spp0,
+                channel_samples: vec![&planes0[0], &planes0[1], &planes0[2], &planes0[3]],
+                compression: Compression::Zips,
+            },
+            MultipartDeepTiledPart {
+                name: "right".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &spp1,
+                channel_samples: vec![&planes1[0], &planes1[1], &planes1[2], &planes1[3]],
+                compression: Compression::Zips,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_tiled(&parts).unwrap();
+
+        // Version field carries multipart (0x1000) + non_image (0x800).
+        // Must NOT carry single_tile (0x200), matching the single-part
+        // deep-tiled discipline.
+        let v = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(v & 0x1000, 0x1000, "multipart bit must be set");
+        assert_eq!(v & 0x800, 0x800, "non_image bit must be set");
+        assert_eq!(v & 0x200, 0, "single_tile bit must NOT be set");
+
+        let read = parse_exr_multipart_deep_tiled(&bytes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].name, "left");
+        assert_eq!(read[1].name, "right");
+        assert_eq!(read[0].tile_x, tx);
+        assert_eq!(read[0].tile_y, ty);
+        assert_mp_deep_tiled_part_roundtrip(&read[0], &spp0, &planes0);
+        assert_mp_deep_tiled_part_roundtrip(&read[1], &spp1, &planes1);
+    }
+
+    #[test]
+    fn mp_deep_tiled_three_parts_mixed_compression_roundtrip() {
+        let (w, h, tx, ty) = (12u32, 8u32, 4u32, 4u32);
+        let (spp0, planes0) = synthetic_deep(w, h);
+        let (spp1, planes1) = synthetic_deep(w, h);
+        let (spp2, planes2) = synthetic_deep(w, h);
+        let channels = mk_channels_rgba_float();
+        let parts = vec![
+            MultipartDeepTiledPart {
+                name: "alpha".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &spp0,
+                channel_samples: vec![&planes0[0], &planes0[1], &planes0[2], &planes0[3]],
+                compression: Compression::None,
+            },
+            MultipartDeepTiledPart {
+                name: "beta".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &spp1,
+                channel_samples: vec![&planes1[0], &planes1[1], &planes1[2], &planes1[3]],
+                compression: Compression::Rle,
+            },
+            MultipartDeepTiledPart {
+                name: "gamma".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &spp2,
+                channel_samples: vec![&planes2[0], &planes2[1], &planes2[2], &planes2[3]],
+                compression: Compression::Zips,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_tiled(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled(&bytes).unwrap();
+        assert_eq!(read.len(), 3);
+        assert_eq!(read[0].compression, Compression::None);
+        assert_eq!(read[1].compression, Compression::Rle);
+        assert_eq!(read[2].compression, Compression::Zips);
+        assert_mp_deep_tiled_part_roundtrip(&read[0], &spp0, &planes0);
+        assert_mp_deep_tiled_part_roundtrip(&read[1], &spp1, &planes1);
+        assert_mp_deep_tiled_part_roundtrip(&read[2], &spp2, &planes2);
+    }
+
+    #[test]
+    fn mp_deep_tiled_edge_tiles_roundtrip() {
+        // 13x9 image / 4x3 tiles forces 4x3 grid where the right column
+        // (width 1) and bottom row (height 0) tiles are partial — exercises
+        // the edge-trimming path in both encoder and reader.
+        let (w, h, tx, ty) = (13u32, 9u32, 4u32, 3u32);
+        let (spp0, planes0) = synthetic_deep(w, h);
+        let (spp1, planes1) = synthetic_deep(w, h);
+        let channels = mk_channels_rgba_float();
+        let parts = vec![
+            MultipartDeepTiledPart {
+                name: "edge0".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &spp0,
+                channel_samples: vec![&planes0[0], &planes0[1], &planes0[2], &planes0[3]],
+                compression: Compression::Zips,
+            },
+            MultipartDeepTiledPart {
+                name: "edge1".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels,
+                samples_per_pixel: &spp1,
+                channel_samples: vec![&planes1[0], &planes1[1], &planes1[2], &planes1[3]],
+                compression: Compression::Rle,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_tiled(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled(&bytes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_mp_deep_tiled_part_roundtrip(&read[0], &spp0, &planes0);
+        assert_mp_deep_tiled_part_roundtrip(&read[1], &spp1, &planes1);
+    }
+
+    #[test]
+    fn mp_deep_tiled_rejects_empty_parts() {
+        let r = encode_exr_multipart_deep_tiled(&[]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn mp_deep_tiled_rejects_duplicate_names() {
+        let (spp, planes) = synthetic_deep(4, 4);
+        let channels = mk_channels_rgba_float();
+        let parts = vec![
+            MultipartDeepTiledPart {
+                name: "dupe".to_string(),
+                width: 4,
+                height: 4,
+                tile_x: 2,
+                tile_y: 2,
+                channels: channels.clone(),
+                samples_per_pixel: &spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                compression: Compression::Zips,
+            },
+            MultipartDeepTiledPart {
+                name: "dupe".to_string(),
+                width: 4,
+                height: 4,
+                tile_x: 2,
+                tile_y: 2,
+                channels,
+                samples_per_pixel: &spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                compression: Compression::Zips,
+            },
+        ];
+        assert!(encode_exr_multipart_deep_tiled(&parts).is_err());
+    }
+
+    #[test]
+    fn mp_deep_tiled_rejects_deep_zip() {
+        let (spp, planes) = synthetic_deep(4, 4);
+        let parts = vec![MultipartDeepTiledPart {
+            name: "zip".to_string(),
+            width: 4,
+            height: 4,
+            tile_x: 2,
+            tile_y: 2,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zip,
+        }];
+        assert!(encode_exr_multipart_deep_tiled(&parts).is_err());
+    }
+
+    #[test]
+    fn mp_deep_tiled_rejects_single_part_file() {
+        // Single-part deep-tiled bytes must not parse through the multi-part
+        // entry (the wrong parser).
+        let (spp, planes) = synthetic_deep(8, 4);
+        let input = DeepTiledInput {
+            width: 8,
+            height: 4,
+            tile_x: 4,
+            tile_y: 2,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zips,
+        };
+        let bytes = encode_exr_deep_tiled(&input).unwrap();
+        assert!(parse_exr_multipart_deep_tiled(&bytes).is_err());
+    }
+
+    #[test]
+    fn mp_deep_tiled_rejects_deep_scanline_multipart() {
+        // Multi-part deep-scanline bytes must not parse through the deep-
+        // tiled multi-part entry.
+        let (spp, planes) = synthetic_deep(6, 4);
+        let scan_parts = vec![MultipartDeepScanlinePart {
+            name: "scan".to_string(),
+            width: 6,
+            height: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::Zips,
+        }];
+        let bytes = encode_exr_multipart_deep_scanline(&scan_parts).unwrap();
+        assert!(parse_exr_multipart_deep_tiled(&bytes).is_err());
+    }
+
+    #[test]
+    fn mp_deep_tiled_all_zero_samples_roundtrip() {
+        // Edge case: every pixel has 0 samples in one part (total_samples=0
+        // → empty channel buffers). Exercises the zero-payload tile path.
+        let (w, h, tx, ty) = (6u32, 6u32, 3u32, 3u32);
+        let zero_spp: Vec<u32> = vec![0; (w * h) as usize];
+        let empty: Vec<f32> = Vec::new();
+        let (spp1, planes1) = synthetic_deep(w, h);
+        let channels = mk_channels_rgba_float();
+        let parts = vec![
+            MultipartDeepTiledPart {
+                name: "zero".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels: channels.clone(),
+                samples_per_pixel: &zero_spp,
+                channel_samples: vec![&empty, &empty, &empty, &empty],
+                compression: Compression::Zips,
+            },
+            MultipartDeepTiledPart {
+                name: "nonzero".to_string(),
+                width: w,
+                height: h,
+                tile_x: tx,
+                tile_y: ty,
+                channels,
+                samples_per_pixel: &spp1,
+                channel_samples: vec![&planes1[0], &planes1[1], &planes1[2], &planes1[3]],
+                compression: Compression::Rle,
+            },
+        ];
+        let bytes = encode_exr_multipart_deep_tiled(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled(&bytes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].samples_per_pixel, zero_spp);
+        for c in &read[0].channel_samples {
+            assert!(c.is_empty());
+        }
+        assert_mp_deep_tiled_part_roundtrip(&read[1], &spp1, &planes1);
     }
 }

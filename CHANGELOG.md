@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-181 multi-part deep TILED WRITE + READ. New public API:
+  `encode_exr_multipart_deep_tiled`, `parse_exr_multipart_deep_tiled`,
+  `MultipartDeepTiledPart`, `DeepTiledPart`. Composes the round-127
+  multi-part deep-scanline envelope (version-field bits 0x1800 =
+  multipart + non_image; concatenated per-part headers terminated by a
+  double NUL; concatenated per-part offset tables) with the round-130
+  single-part deep-tiled chunk shape, prefixed per chunk by
+  `i32 part_number`. Each tile chunk on disk is
+  `i32 part_number, i32 tx, i32 ty, i32 lvlx, i32 lvly, u64 packed_table,
+  u64 packed_data, u64 unpacked_data, packed_table_bytes,
+  packed_sample_bytes` (44 bytes of header + the two byte blobs).
+  Per-part attributes mirror the single-part deep-tiled writer plus the
+  mandatory `name` attribute: `channels`, `chunkCount[int]`,
+  `compression`, `dataWindow`, `displayWindow`, `lineOrder`,
+  `maxSamplesPerPixel[int]`, `name[string]`, `pixelAspectRatio`,
+  `screenWindowCenter`, `screenWindowWidth`, `tiles[tiledesc]` (ONE_LEVEL
+  + ROUND_DOWN), `type[string="deeptile"]`, `version[int=1]`. The reader
+  uses the same linear-scan strategy as `parse_exr_multipart` and
+  `parse_exr_deep_multipart` to remain robust against zero-filled
+  offset tables. Compression NONE / RLE / ZIPS (deep ZIP rejected to
+  match the openexr.com `exrinfo` reference and the single-part
+  deep-tiled discipline). NONE-compressed pixel-offset tables accept
+  both the canonical `tw * th * 4`-byte size and the `tile_x * tile_y *
+  4`-byte padded size emitted by the openexr.com reference (mirrors
+  the single-part deep-tiled reader). Edge tiles are trimmed to their
+  valid pixel rectangle in both encoder and decoder. 8 new unit tests
+  in `src/deep.rs` cover: 2-part ZIPS roundtrip + version-field bit
+  invariants (multipart=0x1000, non_image=0x800, single_tile MUST NOT
+  be set), 3-part NONE/RLE/ZIPS mixed-compression roundtrip, 13×9-in-
+  4×3 edge-tile roundtrip, rejection of empty parts list, duplicate
+  names, deep ZIP, single-part deep-tiled bytes, and multi-part deep-
+  scanline bytes — plus an all-zero-samples-in-one-part edge case. The
+  remaining followups in this codepath (multi-level deep tiled
+  MIPMAP/RIPMAP, single- and multi-part) are tracked in
+  `lib.rs`.
 - Round-174 full-pyramid READ for tiled `MIPMAP_LEVELS` / `RIPMAP_LEVELS`
   files. New public API: `parse_exr_tiled_multilevel`, `MultilevelTiledImage`,
   `TiledLevel`. The existing `parse_exr` continues to return only the

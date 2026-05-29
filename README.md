@@ -31,6 +31,7 @@ Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
 | Multi-part deep scanline (read)     | parse — NONE/RLE/ZIPS, per-part `Vec<DeepScanlinePart>` (validated against `exrmultipart -combine`) |
 | Multi-part deep scanline (write)    | encode — NONE/RLE/ZIPS, per-part `MultipartDeepScanlinePart` (validated against `exrheader` + `exrmultipart -separate` round-trip back through `parse_exr_deep_scanline`) |
 | Single-part deep tiled (`deeptile`) | parse + encode — ONE_LEVEL, NONE/RLE/ZIPS, edge-tile aware (validated against `exrheader` + `exrmetrics --convert` round-trip back through `parse_exr_deep_tiled`) |
+| Multi-part deep tiled (`deeptile`)  | parse + encode — ONE_LEVEL per part, NONE/RLE/ZIPS, edge-tile aware (self-roundtrip on 2- and 3-part mixed-compression layouts) |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
 | Spec predictor + interleave         | bit-exact against `exrmetrics`-produced files    |
@@ -56,11 +57,13 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 * Tiled-output encode now covers `ONE_LEVEL`, `MIPMAP_LEVELS` (full
   pyramid) and `RIPMAP_LEVELS` (full 2-D reduction grid) — all ROUND_DOWN,
   NONE / ZIP / ZIPS / RLE.
-* Multipart-output encode covers scanline parts and deep-scanline parts
-  (`encode_exr_multipart` + `encode_exr_multipart_deep_scanline`); tiled
-  parts and multi-part deep-tiled parts are not yet emitted.
-* Deep-tiled support is **single-part ONE_LEVEL only** —
-  MIPMAP/RIPMAP-level deep tiled + multi-part deep tiled are followups.
+* Multipart-output encode covers scanline parts, deep-scanline parts,
+  and deep-tiled parts (`encode_exr_multipart`,
+  `encode_exr_multipart_deep_scanline`,
+  `encode_exr_multipart_deep_tiled`); flat tiled parts are not yet
+  emitted in multipart form.
+* Deep-tiled support is **ONE_LEVEL only** (single-part *and*
+  multi-part) — MIPMAP/RIPMAP-level deep tiled is a followup.
 * HDR pixel-format integration with `oxideav-core` (the
   `Decoder`/`Encoder` shims clamp to `Rgba` 8-bit pending an
   `Rgba128Float`-style pixel format addition to core).
