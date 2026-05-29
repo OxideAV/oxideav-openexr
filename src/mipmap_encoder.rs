@@ -17,7 +17,7 @@
 //!   payload[size]) — for MIPMAP, lvlx == lvly == level.
 //! ```
 //!
-//! Per the openexr.com Technical Introduction (§Tile offset table
+//! Per the OpenEXR Technical Introduction (§Tile offset table
 //! ordering for INCREASING_Y line order), MIPMAP_LEVELS visits the
 //! diagonal of (lvlx,lvly) pairs only: levels 0..N-1 in ascending order,
 //! and within each level tiles are laid out row-major INCREASING_Y

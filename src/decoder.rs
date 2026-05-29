@@ -17,7 +17,7 @@
 //! rejected with a clear unsupported message.
 //!
 //! ZIP-family compression pre-applies two reversible transforms
-//! documented at openexr.com:
+//! documented in the OpenEXR file-format spec:
 //!   1. interleave: low-byte half / high-byte half are concatenated so
 //!      similar magnitudes in adjacent samples sit next to each other.
 //!   2. predictor: each byte adds the previous one (mod 256), so most
@@ -31,7 +31,7 @@
 //! supported in read mode: the full-resolution level (lvlx=0, lvly=0)
 //! is decoded into `ExrImage`; higher-resolution levels are skipped.
 //! Level-dimension formulas (ROUND_DOWN / ROUND_UP) follow the
-//! openexr.com spec §2.2.
+//! OpenEXR spec §2.2.
 
 use crate::error::{ExrError, Result};
 use crate::header::{parse_header, parse_multipart_headers};
@@ -40,7 +40,7 @@ use crate::rle::rle_decompress;
 use crate::tiled::tiledesc_from_attribute;
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 
-/// Inverse of the ZIP predictor pass per the openexr.com spec.
+/// Inverse of the ZIP predictor pass per the OpenEXR spec.
 ///
 /// Spec encoder formula: `out[i] = (raw[i] - prev_raw + 128 + 256) & 0xFF`
 /// (the `+128` recenters the typical-small delta on byte 0x80, which
@@ -290,8 +290,8 @@ fn scatter_block_into_planes(
                         // recovery up to 2^24; beyond that the f32
                         // mantissa starts rounding. UINT producers are
                         // typically integer ID/depth maps that fit in
-                        // 24 bits, so this matches the openexr.com
-                        // reference's "as float" behaviour.
+                        // 24 bits, so this matches the reference
+                        // encoder's "as float" behaviour.
                         let bits = u32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap());
                         bits as f32
                     }

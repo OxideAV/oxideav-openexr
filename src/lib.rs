@@ -1,4 +1,4 @@
-//! Pure-Rust OpenEXR reader/writer (clean-room from the openexr.com file
+//! Pure-Rust OpenEXR reader/writer (clean-room from the OpenEXR file
 //! format spec).
 //!
 //! Round 1 surface — single-part scanline files only:
@@ -57,7 +57,7 @@
 //! Round-73 surface (this crate, this round):
 //! * Sub-sampled channel ENCODE — [`encode_exr_scanline`] (and the
 //!   multipart variant) now honour `xSampling != 1` / `ySampling != 1`
-//!   per the openexr.com spec, matching the decoder's existing sub-
+//!   per the OpenEXR spec, matching the decoder's existing sub-
 //!   sampled scatter layout. The earlier "round-3 followup" guard is
 //!   gone; round-trip + `exrmetrics --convert` cross-checked.
 //! * Deep scanline READ + WRITE scaffold (single-part) —
@@ -65,8 +65,8 @@
 //!   [`DeepExrImage`] / [`DeepScanlineInput`]. NONE / RLE / ZIPS only
 //!   (the spec page lists ZIP too but `exrinfo` rejects deep ZIP with
 //!   EXR_ERR_INVALID_ATTR, so we follow the reference). Pixel offset
-//!   table + non-interleaved sample data layout per the openexr.com
-//!   File Layout page; cross-validated against `exrheader`, `exrinfo`,
+//!   table + non-interleaved sample data layout per the OpenEXR
+//!   File Layout spec; cross-validated against `exrheader`, `exrinfo`,
 //!   and `exrmetrics --convert -z none`. Multi-part deep + deep-tiled
 //!   are followups.
 //!
@@ -77,7 +77,7 @@
 //!   ROUND_DOWN mipmap pyramid (`tiledesc.level_mode = 1`). Tile chunks
 //!   emit in spec iteration order (levels 0..N-1, INCREASING_Y row-major
 //!   within each level, `lvlx == lvly == level` for the MIPMAP diagonal
-//!   convention from the openexr.com Technical Introduction). NONE / ZIP
+//!   convention from the OpenEXR Technical Introduction). NONE / ZIP
 //!   / ZIPS / RLE compression. Cross-validated against
 //!   `exrmetrics --convert` (which decodes our pyramid back to a
 //!   scanline file pixel-exactly at level 0) and `exrheader`.
@@ -173,7 +173,7 @@
 //! `name` attribute. Linear-scan reader for robustness against
 //! zero-filled offset tables. ONE_LEVEL + ROUND_DOWN; NONE / RLE / ZIPS
 //! compression (deep ZIP rejected, matching the single-part deep-tiled
-//! discipline and the openexr.com `exrinfo` reference). Self-roundtrips
+//! discipline and the reference `exrinfo` validator). Self-roundtrips
 //! at every supported compression on multi-part 2- and 3-part layouts.
 //!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24

@@ -2,11 +2,11 @@
 
 Pure-Rust OpenEXR (HDR scanline + tiled image) reader/writer for [`oxideav`].
 
-Clean-room from the OpenEXR file format spec at
-<https://openexr.com/en/latest/OpenEXRFileLayout.html>. No ILM/Academy
-source, no `exr` / `openexr-rs` Rust crates, and no Imath consulted.
-Empirical validation against the `exrheader` / `exrinfo` / `exrmetrics`
-/ `exrmaketiled` binaries (used as opaque oracles only).
+Clean-room from the OpenEXR file format spec — public format
+documentation only, no project-shipped reference source or Rust crate
+mirror consulted. Empirical validation against the `exrheader` /
+`exrinfo` / `exrmetrics` / `exrmaketiled` binaries (used as opaque
+oracles only).
 
 ## Capability matrix
 
@@ -47,13 +47,13 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 * Compression types: `PIZ`, `PXR24`, `B44`, `B44A`, `DWAA`, `DWAB`.
   Recognised in the type enum but rejected on parse. PIZ requires a
   wavelet + Huffman coder for which we don't yet have a clean-room
-  trace doc; the openexr.com public spec page gives only a one-line
+  trace doc; the public format-spec page gives only a one-line
   summary. B44/Pxr24 are mentioned in the Technical Introduction at a
   high level only — exact 14-byte block layout is left to the
   reference source, which we don't consult.
-* `ZIP_COMPRESSION` is rejected for deep data (matching the openexr.com
-  reference `exrinfo`, which returns `EXR_ERR_INVALID_ATTR` on deep ZIP
-  files even though the spec page text lists ZIP as permitted).
+* `ZIP_COMPRESSION` is rejected for deep data (matching the reference
+  `exrinfo` validator, which returns `EXR_ERR_INVALID_ATTR` on deep
+  ZIP files even though the spec page text lists ZIP as permitted).
 * Tiled-output encode now covers `ONE_LEVEL`, `MIPMAP_LEVELS` (full
   pyramid) and `RIPMAP_LEVELS` (full 2-D reduction grid) — all ROUND_DOWN,
   NONE / ZIP / ZIPS / RLE.

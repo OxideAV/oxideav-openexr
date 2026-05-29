@@ -771,7 +771,7 @@ fn exrmultipart_separate_splits_our_multipart_deep_three_parts() {
 //      `parse_exr_deep_tiled` and confirm every sample round-trips
 //      bit-exactly.
 //
-// Per the openexr.com empirical convention, single-part deep-tiled
+// Per the empirical convention from the reference encoder, single-part deep-tiled
 // files set the non_image (0x800) version-field bit ONLY; the
 // `tiles[tiledesc]` attribute + `type="deeptile"` string-attribute are
 // what discriminate this file format from deep scanline. `exrheader`

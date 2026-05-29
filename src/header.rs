@@ -1,6 +1,6 @@
 //! Magic + version field + attribute table parser.
 //!
-//! Layout per the openexr.com spec:
+//! Layout per the OpenEXR spec:
 //! * bytes 0..4   = magic `0x76 0x2F 0x31 0x01` (little-endian `0x0131_2F76`)
 //! * bytes 4..8   = version field (u32 LE):
 //!     - low byte = format version (currently 2)
@@ -204,7 +204,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
 /// or the stream is truncated.
 ///
 /// The `non_image` (deep) bit is accepted — multi-part deep files set
-/// `version` to `0x1800` (bits 11 + 12) per the openexr.com spec.
+/// `version` to `0x1800` (bits 11 + 12) per the OpenEXR spec.
 /// Per-part `type` discrimination ("scanlineimage" vs "deepscanline"
 /// vs "tiledimage" vs "deeptile") is left to the caller.
 pub fn parse_multipart_headers(bytes: &[u8]) -> Result<Vec<ParsedHeader>> {

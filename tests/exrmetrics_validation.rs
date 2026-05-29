@@ -5,7 +5,7 @@
 //! bit-exactly.
 //!
 //! This catches the failure mode where our encoder's predictor /
-//! interleave / RLE pipeline drifts from the openexr.com reference —
+//! interleave / RLE pipeline drifts from the reference encoder —
 //! the self-roundtrip stays green but the bytes are not actually
 //! spec-compliant. Auto-skips when `exrmetrics` is missing.
 

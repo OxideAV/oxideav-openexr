@@ -1,11 +1,11 @@
 //! Deep-data scanline EXR reader (and self-roundtrip writer).
 //!
-//! Round-73 scaffold for the "deep" branch of the openexr.com spec. A
+//! Round-73 scaffold for the "deep" branch of the OpenEXR spec. A
 //! deep image stores an arbitrary number of samples at every pixel
 //! position (typical use: list of (z, opacity, RGBA) per pixel for
 //! Z-compositing of semi-transparent volumetric layers).
 //!
-//! On-disk layout, derived directly from the openexr.com File Layout
+//! On-disk layout, derived directly from the OpenEXR File Layout
 //! page §Deep scanline part:
 //!
 //! ```text
@@ -35,7 +35,7 @@
 //! sample data is laid out non-interleaved: all of channel 0's samples
 //! first (in pixel scan order), then channel 1's, and so on.
 //!
-//! Compression: the openexr.com spec page lists NONE / RLE / ZIPS / ZIP
+//! Compression: the OpenEXR spec page lists NONE / RLE / ZIPS / ZIP
 //! as the permitted set for deep data, but empirical testing against
 //! the reference `exrinfo` binary shows it rejects ZIP_COMPRESSION
 //! (16-scanline blocks) with `EXR_ERR_INVALID_ATTR: Invalid compression
@@ -46,7 +46,7 @@
 //! The deep payload paths reuse the existing
 //! [`crate::decoder::apply_zip_unpredictor`] /
 //! [`crate::decoder::apply_zip_uninterleave`] pipeline because the
-//! openexr.com spec applies the same byte-level predictor/interleave
+//! OpenEXR spec applies the same byte-level predictor/interleave
 //! transforms to deep ZIP/ZIPS/RLE as to flat ZIP/ZIPS/RLE. The
 //! pixel-offset-table chunk is compressed independently using the same
 //! algorithm.
@@ -108,7 +108,7 @@ impl DeepExrImage {
 
 /// Helper: cumulative-prefix-sum of a samples-per-pixel slice. Output
 /// length == input length; entry `i` is the running sum *through pixel i*
-/// (NOT exclusive — matches the openexr.com offset-table convention).
+/// (NOT exclusive — matches the OpenEXR offset-table convention).
 fn cumulative_inclusive(spp: &[u32]) -> Vec<i32> {
     let mut out = Vec::with_capacity(spp.len());
     let mut acc: i64 = 0;
@@ -167,7 +167,7 @@ fn compress_buffer(raw: &[u8], compression: Compression) -> Result<Vec<u8>> {
         _ => {
             return Err(ExrError::unsupported(format!(
                 "compression {compression:?} not permitted for deep data \
-                 (openexr.com reference accepts only NONE/RLE/ZIPS — even \
+                 (reference encoder accepts only NONE/RLE/ZIPS — even \
                  though the spec page also lists ZIP, exrinfo rejects \
                  ZIP-compressed deep files with EXR_ERR_INVALID_ATTR)"
             )))
@@ -192,7 +192,7 @@ fn decompress_buffer(
         return Ok(payload.to_vec());
     }
     // Stored-uncompressed escape: if packed_size == unpacked_size the
-    // encoder kept the bytes raw (per the openexr.com "store whichever
+    // encoder kept the bytes raw (per the OpenEXR "store whichever
     // is smaller" rule).
     if payload.len() == unpacked_size {
         return Ok(payload.to_vec());
@@ -226,7 +226,7 @@ fn decompress_buffer(
 
 /// One part of a multi-part deep file. Same shape as [`DeepExrImage`]
 /// plus a `name` slot identifying the part (the `name` attribute is
-/// mandatory on every multi-part header per the openexr.com spec).
+/// mandatory on every multi-part header per the OpenEXR spec).
 ///
 /// Returned by [`parse_exr_deep_multipart`].
 #[derive(Debug, Clone, PartialEq)]
@@ -367,7 +367,7 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
         ) {
             return Err(ExrError::invalid(format!(
                 "multi-part deep part {i} ('{name}') uses compression \
-                 {compression:?} (openexr.com reference accepts only \
+                 {compression:?} (reference encoder accepts only \
                  NONE/RLE/ZIPS for deep)"
             )));
         }
@@ -643,7 +643,7 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
         Compression::None | Compression::Rle | Compression::Zips
     ) {
         return Err(ExrError::invalid(format!(
-            "deep file uses compression {compression:?} (openexr.com reference \
+            "deep file uses compression {compression:?} (reference encoder \
              accepts only NONE/RLE/ZIPS for deep — ZIP is listed in the spec \
              page but exrinfo rejects it)"
         )));
@@ -960,7 +960,7 @@ pub fn encode_exr_deep_scanline(input: &DeepScanlineInput) -> Result<Vec<u8>> {
         Compression::None | Compression::Rle | Compression::Zips
     ) {
         return Err(ExrError::unsupported(format!(
-            "deep encode compression {:?} (openexr.com reference accepts only \
+            "deep encode compression {:?} (reference encoder accepts only \
              NONE/RLE/ZIPS for deep — ZIP is listed in the spec page but \
              exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
             input.compression
@@ -1238,7 +1238,7 @@ pub fn encode_exr_deep_scanline(input: &DeepScanlineInput) -> Result<Vec<u8>> {
 /// One part of an outgoing multi-part deep scanline file. Identical
 /// shape to [`DeepScanlineInput`] plus a unique `name` slot — the
 /// per-part `name` attribute is mandatory on every multi-part header
-/// per the openexr.com spec.
+/// per the OpenEXR spec.
 pub struct MultipartDeepScanlinePart<'a> {
     /// Part name (must be unique across all parts in the file).
     pub name: String,
@@ -1293,7 +1293,7 @@ pub fn encode_exr_multipart_deep_scanline(parts: &[MultipartDeepScanlinePart]) -
             Compression::None | Compression::Rle | Compression::Zips
         ) {
             return Err(ExrError::unsupported(format!(
-                "deep part '{}' compression {:?} (openexr.com reference accepts \
+                "deep part '{}' compression {:?} (reference encoder accepts \
                  only NONE/RLE/ZIPS for deep — ZIP is listed in the spec page \
                  but exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
                 p.name, p.compression
@@ -1615,7 +1615,7 @@ fn build_deep_part_attrs(
 // `single_tile` (0x200) bit. The `tiles[tiledesc]` attribute + the
 // `type = "deeptile"` string-attribute are the discriminators; setting
 // the `single_tile` bit alongside `non_image` causes `exrheader` to
-// reject the file ("Unable to open"). Matches the openexr.com File
+// reject the file ("Unable to open"). Matches the OpenEXR File
 // Layout convention for deep files: deep formats use the non_image bit
 // alone for single-part, and add `multipart` (0x1000) for multi-part.
 //   header attrs (channels, chunkCount[int], compression, dataWindow,
@@ -1647,7 +1647,7 @@ fn build_deep_part_attrs(
 //
 // ONE_LEVEL only. Multi-level deep tiled (MIPMAP/RIPMAP) is a followup.
 // Compression NONE / RLE / ZIPS (matching the deep scanline encoder;
-// deep ZIP rejected by the openexr.com reference `exrinfo`).
+// deep ZIP rejected by the reference `exrinfo` validator).
 // ---------------------------------------------------------------------
 
 /// Input descriptor for [`encode_exr_deep_tiled`].
@@ -1720,7 +1720,7 @@ pub fn encode_exr_deep_tiled(input: &DeepTiledInput) -> Result<Vec<u8>> {
         Compression::None | Compression::Rle | Compression::Zips
     ) {
         return Err(ExrError::unsupported(format!(
-            "deep tiled encode compression {:?} (openexr.com reference accepts \
+            "deep tiled encode compression {:?} (reference encoder accepts \
              only NONE/RLE/ZIPS for deep — ZIP is listed in the spec page but \
              exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
             input.compression
@@ -1865,7 +1865,7 @@ pub fn encode_exr_deep_tiled(input: &DeepTiledInput) -> Result<Vec<u8>> {
     ];
 
     // Single-part deep-tiled files use the non_image bit (0x800) ONLY —
-    // the openexr.com reference rejects files that also set single_tile
+    // the reference encoder rejects files that also set single_tile
     // (0x200) here. The `tiles` attribute + `type="deeptile"` string
     // attribute carry the tile-ness signal instead.
     let version = VersionField::from_u32(2 | 0x800);
@@ -2033,7 +2033,7 @@ pub fn encode_exr_deep_tiled(input: &DeepTiledInput) -> Result<Vec<u8>> {
 /// into a [`DeepTiledImage`].
 ///
 /// Compression: NONE / RLE / ZIPS (matching the encoder; deep ZIP
-/// rejected by the openexr.com reference). Sub-sampled channels are not
+/// rejected by the reference encoder). Sub-sampled channels are not
 /// permitted in tiled files (per the EXR file format), so we reject any
 /// channel with `xSampling != 1 || ySampling != 1`.
 ///
@@ -2082,7 +2082,7 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
         Compression::None | Compression::Rle | Compression::Zips
     ) {
         return Err(ExrError::invalid(format!(
-            "deep tiled file uses compression {compression:?} (openexr.com reference \
+            "deep tiled file uses compression {compression:?} (reference encoder \
              accepts only NONE/RLE/ZIPS for deep)"
         )));
     }
@@ -2230,7 +2230,7 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
         let full_th = tile_y as usize;
         // The per-tile pixel-offset table is `tw * th * 4` bytes for
         // ZIPS/RLE compression (the canonical encoded size). The
-        // openexr.com reference's NONE-compression path happens to
+        // reference encoder's NONE-compression path happens to
         // round up to `tile_x * tile_y * 4` bytes on disk because its
         // in-memory buffer is full-tile-sized; accept both sizes so we
         // can round-trip files produced by `exrmetrics --convert -z
@@ -2468,12 +2468,12 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
 // inclusive i32 entries, row-major within each tile's valid pixel
 // rectangle (edge tiles trim to their valid extent). For NONE-
 // compression the reader also accepts files that pad to the full
-// `tile_x * tile_y * 4` bytes (matching the openexr.com reference's
+// `tile_x * tile_y * 4` bytes (matching the reference encoder's
 // behaviour, mirrored from the single-part deep-tiled reader).
 //
 // Sample data is non-interleaved (channel-major within each tile).
 // Compression NONE / RLE / ZIPS (deep ZIP rejected to match the
-// openexr.com reference's `exrinfo`).
+// reference `exrinfo` validator).
 //
 // MIPMAP/RIPMAP-level multi-part deep-tiled is a followup; this round
 // only emits + accepts ONE_LEVEL (`tiledesc.mode == 0x00`).
@@ -2578,7 +2578,7 @@ pub fn encode_exr_multipart_deep_tiled(parts: &[MultipartDeepTiledPart]) -> Resu
             Compression::None | Compression::Rle | Compression::Zips
         ) {
             return Err(ExrError::unsupported(format!(
-                "deep tiled part '{}' compression {:?} (openexr.com reference accepts \
+                "deep tiled part '{}' compression {:?} (reference encoder accepts \
                  only NONE/RLE/ZIPS for deep — ZIP is listed in the spec page but \
                  exrinfo rejects it with EXR_ERR_INVALID_ATTR)",
                 p.name, p.compression
@@ -3054,7 +3054,7 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
         ) {
             return Err(ExrError::invalid(format!(
                 "multi-part deep tiled part {i} ('{name}') uses compression \
-                 {compression:?} (openexr.com reference accepts only NONE/RLE/ZIPS for deep)"
+                 {compression:?} (reference encoder accepts only NONE/RLE/ZIPS for deep)"
             )));
         }
         let channels = find_channels(&part.attributes).ok_or_else(|| {
@@ -3544,7 +3544,7 @@ mod tests {
 
     #[test]
     fn deep_scanline_rejects_zip_compression() {
-        // ZIP (16-line block) is rejected by the openexr.com reference
+        // ZIP (16-line block) is rejected by the reference encoder
         // for deep data even though the spec page lists it as permitted
         // — match that behaviour so we never write a file exrinfo will
         // refuse with EXR_ERR_INVALID_ATTR.
@@ -4003,7 +4003,7 @@ mod tests {
         }
         // Header sanity: version-field carries non_image (0x800) ONLY —
         // single-part deep-tiled files must NOT set single_tile (0x200);
-        // the openexr.com reference `exrheader` rejects files with both
+        // the reference encoder `exrheader` rejects files with both
         // bits set. The tile-ness signal lives in the `tiles[tiledesc]`
         // attribute + the `type="deeptile"` string attribute.
         let v = u32::from_le_bytes(bytes[4..8].try_into().unwrap());

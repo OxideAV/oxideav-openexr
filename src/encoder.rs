@@ -22,7 +22,7 @@
 //!
 //! Sub-sampled channels (`xSampling != 1` or `ySampling != 1`): for each
 //! image scanline `y`, only channels with `y % ySampling == 0`
-//! contribute samples to the block payload (per the openexr.com spec),
+//! contribute samples to the block payload (per the OpenEXR spec),
 //! and each contributing channel writes `subsampled_dim(width, xSampling)`
 //! samples. The per-channel plane the caller supplies must already be
 //! sized to its sub-sampled dimensions (matches the decoder's `ExrPlane`

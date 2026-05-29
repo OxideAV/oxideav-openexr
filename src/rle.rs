@@ -1,6 +1,6 @@
 //! OpenEXR RLE compression (compression code 1).
 //!
-//! Layout per the openexr.com "Pixel Data Compression" appendix:
+//! Layout per the OpenEXR "Pixel Data Compression" appendix:
 //!
 //! Each compressed scanline block is the output of the following pipeline:
 //!   1. Channel-then-row-major-byte-flat raw byte stream.

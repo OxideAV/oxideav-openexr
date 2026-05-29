@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-189 docs scrub. Removed every citation of the tainted
+  `openexr.com` project-shipped docs URL (Task #1240) from `README.md`,
+  `CHANGELOG.md`, `Cargo.toml` (crate description), and all `src/` +
+  `tests/` doc-comments. 57 occurrences replaced with neutral phrasing
+  — "the OpenEXR file format spec", "the OpenEXR Technical
+  Introduction", "the reference `exrinfo` validator", "the reference
+  encoder", etc. The format name "OpenEXR" itself is just a format
+  identifier and stays. The `exrheader` / `exrinfo` / `exrmetrics` /
+  `exrmaketiled` binaries remain referenced as opaque black-box
+  validator processes, which is permitted by the round allow-list.
+  No functional code changes; all 178 tests still pass; standalone
+  (no-default-features) build still green. Rationale: per
+  `docs/image/openexr/README.md` policy notice (2026-05-24), the
+  `openexr.com` documentation site is rendered from project-shipped
+  `.rst` sources, which creates a derivative-work relationship with
+  the reference implementation regardless of the BSD-3-Clause licence
+  and therefore taints clean-room reimplementations' independent
+  copyright.
+
 ### Added
 
 - Round-181 multi-part deep TILED WRITE + READ. New public API:
@@ -29,10 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uses the same linear-scan strategy as `parse_exr_multipart` and
   `parse_exr_deep_multipart` to remain robust against zero-filled
   offset tables. Compression NONE / RLE / ZIPS (deep ZIP rejected to
-  match the openexr.com `exrinfo` reference and the single-part
+  match the reference `exrinfo` validator and the single-part
   deep-tiled discipline). NONE-compressed pixel-offset tables accept
   both the canonical `tw * th * 4`-byte size and the `tile_x * tile_y *
-  4`-byte padded size emitted by the openexr.com reference (mirrors
+  4`-byte padded size emitted by the reference encoder (mirrors
   the single-part deep-tiled reader). Edge tiles are trimmed to their
   valid pixel rectangle in both encoder and decoder. 8 new unit tests
   in `src/deep.rs` cover: 2-part ZIPS roundtrip + version-field bit
@@ -81,12 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   u64 packed_data, u64 unpacked_data, packed_table_bytes,
   packed_sample_bytes`. Per-tile offset table is `tw * th * 4` bytes of
   cumulative i32 entries (row-major within the tile's valid rectangle)
-  for compressed chunks; the reader additionally accepts the openexr.com
-  reference's NONE-compression convention of padding to
+  for compressed chunks; the reader additionally accepts the reference
+  encoder's NONE-compression convention of padding to
   `tile_x * tile_y * 4` bytes so files produced by `exrmetrics --convert
   -z none` round-trip cleanly. Sample data is non-interleaved
   (channel-major within each tile). Compression NONE / RLE / ZIPS (deep
-  ZIP rejected to match the openexr.com reference's `exrinfo`). The
+  ZIP rejected to match the reference `exrinfo` validator). The
   reader trims edge tiles to their valid pixel rectangle and reassembles
   channel samples into pixel-scan row-major order before return, so
   callers don't have to know the file was tiled. Tests in `src/deep.rs`
@@ -158,7 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tiledesc.level_mode = 1` (MIPMAP_LEVELS, ROUND_DOWN), full-pyramid
   chunk count, and tile chunks emitted in the spec's iteration order
   (levels 0..N-1, INCREASING_Y row-major within each level, `lvlx ==
-  lvly == level` per the openexr.com Technical Introduction). Supports
+  lvly == level` per the OpenEXR Technical Introduction). Supports
   NONE / ZIP / ZIPS / RLE compression. Cross-validated against
   `exrmetrics --convert -z none` (which decodes our pyramid back to an
   uncompressed scanline file pixel-exactly at level 0) and `exrheader`
@@ -169,7 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build the `Vec<MipmapLevel>` themselves and call `encode_exr_tiled_mipmap`.
 - Round-73 sub-sampled channel **encoder**. `encode_exr_scanline` and
   `encode_exr_multipart` now honour `xSampling != 1` / `ySampling != 1`
-  per the openexr.com spec, matching the per-line "channels whose
+  per the OpenEXR spec, matching the per-line "channels whose
   ySampling divides this row contribute samples; each channel writes
   sub-sampled width samples" rule the decoder already uses. The
   earlier explicit "(sub-sampled encode is round 3; decode supports
@@ -183,7 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   + `version` attributes) round-trip through both our reader and the
   reference `exrmetrics --convert -z none` pipeline. The pixel offset
   table (cumulative-inclusive `int` per column) plus non-interleaved
-  per-channel sample data layout follows the openexr.com File Layout
+  per-channel sample data layout follows the OpenEXR File Layout
   page §Deep scanline part verbatim. Compression set: `NONE` / `RLE` /
   `ZIPS`. `ZIP_COMPRESSION` is intentionally rejected because the
   reference `exrinfo` returns `EXR_ERR_INVALID_ATTR: Invalid compression
@@ -195,7 +216,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Lib top-level docs updated to describe the round-73 surface and to
-  note B44 / Pxr24 cannot be implemented from the openexr.com public
+  note B44 / Pxr24 cannot be implemented from the the public OpenEXR
   documentation alone (algorithm sketched in the Technical
   Introduction but exact byte layout is left to the reference source,
   which is off-limits).
@@ -275,7 +296,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - ZIP / ZIPS / RLE byte predictor previously used the naive
-  `out[i] = raw[i] - raw[i-1]` form. The openexr.com spec mandates the
+  `out[i] = raw[i] - raw[i-1]` form. The OpenEXR spec mandates the
   centred form `out[i] = (raw[i] - raw[i-1] + 128) & 0xFF` (decoder
   inverse `raw[i] = (in[i] + raw[i-1] - 128) & 0xFF`). Self-roundtrip
   worked but the bytes were not actually spec-compliant; external
@@ -298,7 +319,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Initial release: pure-Rust OpenEXR scanline reader/writer, clean-room
-  from the openexr.com file format spec.
+  from the OpenEXR file format spec.
 - Magic + version field (format-version 2, no flag bits).
 - Attribute table parser/encoder with typed values for the eight
   required attributes.
