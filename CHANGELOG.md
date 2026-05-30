@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.2...v0.0.3) - 2026-05-30
+
+### Other
+
+- round 192: multi-part flat tiled WRITE + READ (type="tiledimage")
+- scrub openexr.com citations to neutral phrasing (Task #1240)
+- point parse_exr_deep_tiled multipart-rejection at the new entry
+- round 181: multi-part deep TILED WRITE + READ (type="deeptile")
+- round 174: full-pyramid READ for tiled MIPMAP_LEVELS / RIPMAP_LEVELS
+- round 130: single-part deep tiled WRITE + READ (type="deeptile")
+- round 127: multi-part deep scanline WRITE
+- round 124: RIPMAP_LEVELS tiled-output encoder
+- round 92: multi-part deep scanline READ
+- round 78: MIPMAP_LEVELS tiled-output encoder
+- round 73: sub-sampled channel encoder + deep scanline read/write scaffold
+
 ### Added
 
 - Round-192 multi-part flat (non-deep) TILED WRITE + READ. New public
