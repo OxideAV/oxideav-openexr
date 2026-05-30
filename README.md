@@ -26,6 +26,7 @@ oracles only).
 | Tiled `RIPMAP_LEVELS` (read)        | full 2-D grid via `parse_exr_tiled_multilevel` (every `(lvlx, lvly)` cell) — round-trips encoder bit-exactly |
 | Tiled `RIPMAP_LEVELS` (write)       | full 2-D reduction grid encode (NONE / ZIP / ZIPS / RLE) — validated against `exrmetrics --convert` + `exrheader`, decoder pinned vs `exrmaketiled -r` |
 | Multi-part EXR (scanline parts)     | parse + write (validated against `exrmultipart -separate`) |
+| Multi-part EXR (flat tiled parts)   | parse + write — ONE_LEVEL, NONE/ZIP/ZIPS/RLE, edge-tile aware (validated against `exrheader` + `exrmultipart -separate` round-trip back through `parse_exr`) |
 | Sub-sampled channels (`xSampling`/`ySampling != 1`) | parse + write (validated against `exrmetrics --convert`) |
 | Deep scanline (`deepscanline`)      | parse + write — NONE/RLE/ZIPS (validated against `exrheader` + `exrmetrics --convert -z none`) |
 | Multi-part deep scanline (read)     | parse — NONE/RLE/ZIPS, per-part `Vec<DeepScanlinePart>` (validated against `exrmultipart -combine`) |
@@ -57,11 +58,11 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 * Tiled-output encode now covers `ONE_LEVEL`, `MIPMAP_LEVELS` (full
   pyramid) and `RIPMAP_LEVELS` (full 2-D reduction grid) — all ROUND_DOWN,
   NONE / ZIP / ZIPS / RLE.
-* Multipart-output encode covers scanline parts, deep-scanline parts,
-  and deep-tiled parts (`encode_exr_multipart`,
-  `encode_exr_multipart_deep_scanline`,
-  `encode_exr_multipart_deep_tiled`); flat tiled parts are not yet
-  emitted in multipart form.
+* Multipart-output encode covers scanline parts, flat tiled parts,
+  deep-scanline parts, and deep-tiled parts (`encode_exr_multipart`,
+  `encode_exr_multipart_tiled`, `encode_exr_multipart_deep_scanline`,
+  `encode_exr_multipart_deep_tiled`). Multi-level (MIPMAP/RIPMAP) flat
+  tiled parts in multipart form are not yet emitted.
 * Deep-tiled support is **ONE_LEVEL only** (single-part *and*
   multi-part) — MIPMAP/RIPMAP-level deep tiled is a followup.
 * HDR pixel-format integration with `oxideav-core` (the

@@ -176,12 +176,27 @@
 //! discipline and the reference `exrinfo` validator). Self-roundtrips
 //! at every supported compression on multi-part 2- and 3-part layouts.
 //!
+//! Round-192 surface (this crate, this round): multi-part flat (non-deep)
+//! TILED WRITE + READ ([`encode_exr_multipart_tiled`] /
+//! [`parse_exr_multipart_tiled`] + [`MultipartTiledPart`]). Composes the
+//! round-40 multi-part scanline envelope (version-field bit 0x1000 only,
+//! concatenated per-part headers terminated by double NUL, concatenated
+//! per-part offset tables) with the round-40 single-part tiled chunk
+//! shape (`tx, ty, lvlx, lvly, size, payload`), prefixed by `i32
+//! part_number` per chunk. Per-part attributes mirror the single-part
+//! tiled writer plus the mandatory `name` attribute and
+//! `type="tiledimage"`. ONE_LEVEL + ROUND_DOWN; NONE / ZIP / ZIPS / RLE.
+//! The reader uses the same linear-scan strategy as
+//! [`parse_exr_multipart`] for robustness against zero-filled offset
+//! tables. [`parse_exr_multipart`] now points `tiledimage` parts at
+//! the new entry instead of mis-parsing them as scanline chunks.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); multi-part WRITE for tiled parts (flat); multi-level
-//! deep tiled (MIPMAP/RIPMAP, single-part and multi-part); HDR
-//! pixel-format integration with `oxideav-core`.
+//! public spec); multi-level deep tiled (MIPMAP/RIPMAP, single-part and
+//! multi-part); multi-level flat tiled multi-part; HDR pixel-format
+//! integration with `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -192,6 +207,7 @@ pub mod header;
 pub mod image;
 pub mod mipmap_encoder;
 pub mod multipart_encoder;
+pub mod multipart_tiled_encoder;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod rle;
@@ -204,7 +220,7 @@ pub const CODEC_ID_STR: &str = "openexr";
 
 pub use decoder::{
     mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart,
-    parse_exr_tiled_multilevel, MultilevelTiledImage, TiledLevel,
+    parse_exr_multipart_tiled, parse_exr_tiled_multilevel, MultilevelTiledImage, TiledLevel,
 };
 pub use deep::{
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_multipart_deep_scanline,
@@ -230,6 +246,7 @@ pub use mipmap_encoder::{
 pub use multipart_encoder::{
     encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,
 };
+pub use multipart_tiled_encoder::{encode_exr_multipart_tiled, MultipartTiledPart};
 pub use tile_encoder::{encode_exr_tiled, encode_exr_tiled_rgba_float_with};
 pub use types::{
     Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,

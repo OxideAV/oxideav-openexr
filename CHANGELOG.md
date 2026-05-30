@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-192 multi-part flat (non-deep) TILED WRITE + READ. New public
+  API: `encode_exr_multipart_tiled`, `parse_exr_multipart_tiled`,
+  `MultipartTiledPart`. Each part is `type="tiledimage"` ONE_LEVEL +
+  ROUND_DOWN tiled with NONE/ZIP/ZIPS/RLE compression. File envelope
+  mirrors the round-40 multi-part scanline writer (version-field bit
+  0x1000 only — the `single_tile` 0x200 bit is NOT set; per-part
+  `tiles[tiledesc]` + `type="tiledimage"` carry the tile-ness signal,
+  matching the round-181 multi-part deep-tiled discipline). On disk
+  each tile chunk is `i32 part_number, i32 tx, i32 ty, i32 lvlx,
+  i32 lvly, i32 size, payload[size]` (24 bytes of chunk header + the
+  compressed/raw payload). Per-tile payload layout — row-major within
+  the tile, channels in alphabetical order, edge tiles trimmed to
+  their valid pixel rectangle — is byte-identical to the single-part
+  tiled writer, so each split-out part is a normal flat tiled file
+  the existing `parse_exr` reader handles unchanged. Reader uses a
+  linear chunk scan (same robustness pattern as `parse_exr_multipart`
+  and `parse_exr_multipart_deep_tiled`) so zero-filled offset tables
+  still decode correctly. Per-part attribute set: standard required
+  attributes + the mandatory `name` + `tiles[tiledesc]` (ONE_LEVEL +
+  ROUND_DOWN) + `type[string="tiledimage"]` + `chunkCount`.
+  `parse_exr_multipart` now points `tiledimage` parts at the new
+  entry rather than mis-parsing them as scanline chunks. 7 new
+  unit tests in `src/multipart_tiled_encoder.rs` cover 2-part NONE
+  + 3-part NONE/ZIPS/RLE mixed-compression round-trip, 13×9-in-4×3
+  ZIP edge-tile round-trip, rejection of empty parts list / duplicate
+  names / sub-sampled channels, and the routing assertion that
+  `parse_exr_multipart` redirects `tiledimage` parts to
+  `parse_exr_multipart_tiled`. 3 new integration tests in
+  `tests/multipart_tiled_validation.rs`: `exrheader` accepts the
+  multi-part tiled file (validates `type="tiledimage"` + part-name
+  output), `exrmultipart -separate` splits it into per-part tiled
+  files that round-trip pixel-exact through `parse_exr`, and a pure
+  self-roundtrip on a 3-part mixed-compression 24×16-in-8×8 layout
+  exercising the public-API import path.
+
 ### Changed
 
 - Round-189 docs scrub. Removed every citation of the tainted

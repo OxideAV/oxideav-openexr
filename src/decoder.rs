@@ -136,18 +136,18 @@ fn find_attribute<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attribut
 }
 
 /// Pull every required attribute out of the parsed header.
-struct RequiredAttrs {
-    channels: Vec<Channel>,
-    compression: Compression,
-    data_window: Box2i,
-    display_window: Box2i,
-    line_order: LineOrder,
-    pixel_aspect_ratio: f32,
-    screen_window_center: (f32, f32),
-    screen_window_width: f32,
+pub(crate) struct RequiredAttrs {
+    pub(crate) channels: Vec<Channel>,
+    pub(crate) compression: Compression,
+    pub(crate) data_window: Box2i,
+    pub(crate) display_window: Box2i,
+    pub(crate) line_order: LineOrder,
+    pub(crate) pixel_aspect_ratio: f32,
+    pub(crate) screen_window_center: (f32, f32),
+    pub(crate) screen_window_width: f32,
 }
 
-fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
+pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
     let channels = match find_attribute(attrs, "channels") {
         Some(AttributeValue::Channels(c)) => c.clone(),
         _ => {
@@ -514,7 +514,7 @@ pub fn mipmap_level_dim(full_dim: u32, level: u32, round_up: bool) -> u32 {
 /// full-resolution image (level 0,0). `tw,th` are the valid pixel
 /// dimensions of this tile (may be smaller than tdesc tile size at edges).
 #[allow(clippy::too_many_arguments)]
-fn scatter_tile_into_planes(
+pub(crate) fn scatter_tile_into_planes(
     payload: &[u8],
     sorted_channels: &[Channel],
     planes: &mut [ExrPlane],
@@ -1132,6 +1132,12 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
                      parse_exr_deep_multipart() for deep multi-part files"
                 )));
             }
+            if t == "tiledimage" {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part part {i} has type='tiledimage' — call \
+                     parse_exr_multipart_tiled() for multi-part flat tiled files"
+                )));
+            }
         }
     }
 
@@ -1315,6 +1321,287 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
         });
     }
 
+    Ok(images)
+}
+
+/// Parse a multi-part flat (non-deep) tiled EXR file. Every part must
+/// carry `type = "tiledimage"` plus the standard tiled per-part required
+/// attributes (`name`, `chunkCount`, `dataWindow`, `displayWindow`,
+/// `channels`, `compression`, `lineOrder`, `pixelAspectRatio`,
+/// `screenWindowCenter`, `screenWindowWidth`, `tiles[tiledesc]` ONE_LEVEL).
+///
+/// Layout (multi-part flat tiled, version-field bit 0x1000 set; the
+/// `single_tile` 0x200 bit is NOT set — per-part `type="tiledimage"` +
+/// the `tiles[tiledesc]` attribute are the tile-ness discriminators,
+/// mirroring the multi-part deep-tiled discipline):
+///
+/// ```text
+/// magic(4) | version(4 with multipart=0x1000)
+/// | header_0 ... NUL | header_1 ... NUL | NUL          (extra NUL = end-of-headers)
+/// | offset_table_0(chunkCount_0×u64) | offset_table_1(...) | ...
+/// | chunks: each starts with i32 part_number,
+///           then i32 tx | i32 ty | i32 lvlx | i32 lvly | i32 size | payload[size].
+/// ```
+///
+/// Per-tile payload layout is identical to single-part flat tiled:
+/// row-major within the tile, channels in alphabetical order, edge
+/// tiles store only the valid pixel rectangle. ONE_LEVEL only.
+/// Compression NONE / ZIP / ZIPS / RLE supported.
+///
+/// **Offset table robustness**: like the scanline multi-part reader,
+/// we decode chunks by linear scan rather than index lookup so that
+/// zero-filled offset tables (some reference flows emit them) still
+/// decode correctly.
+///
+/// Companion to [`crate::encode_exr_multipart_tiled`].
+pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
+    let parts = parse_multipart_headers(bytes)?;
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "multi-part tiled file has no parts".to_string(),
+        ));
+    }
+    // Every part must carry `type = "tiledimage"`. (Deep tiled / deep
+    // scanline / flat scanline have their own entry points.)
+    for (i, part) in parts.iter().enumerate() {
+        let part_type = find_part_type(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part tiled: part {i} missing required 'type' attribute"
+            ))
+        })?;
+        if part_type != "tiledimage" {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled: part {i} type='{part_type}' \
+                 (only 'tiledimage' supported — 'scanlineimage' routes through \
+                 parse_exr_multipart, deep types route through parse_exr_deep_multipart \
+                 / parse_exr_multipart_deep_tiled)"
+            )));
+        }
+    }
+    if parts[0].version.non_image {
+        return Err(ExrError::invalid(
+            "parse_exr_multipart_tiled called on a deep (non_image bit set) file \
+             — use parse_exr_multipart_deep_tiled() instead"
+                .to_string(),
+        ));
+    }
+
+    // Collect chunkCount per part (mandatory in multi-part files).
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let cc = find_chunk_count(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part tiled part {i} missing required chunkCount attribute"
+            ))
+        })?;
+        chunk_counts.push(cc);
+    }
+
+    // Per-part state: required attrs, tile geometry, sorted channels, planes.
+    struct PartState {
+        req: RequiredAttrs,
+        sorted_channels: Vec<Channel>,
+        tile_x: u32,
+        tile_y: u32,
+        tx_count: u32,
+        #[allow(dead_code)]
+        ty_count: u32,
+        planes: Vec<ExrPlane>,
+    }
+
+    let mut state: Vec<PartState> = Vec::with_capacity(parts.len());
+    for (part_idx, part) in parts.iter().enumerate() {
+        let req = extract_required(&part.attributes)?;
+        if !matches!(
+            req.compression,
+            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        ) {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled part {part_idx}: compression {:?} not yet implemented",
+                req.compression
+            )));
+        }
+        let width = req.data_window.width();
+        let height = req.data_window.height();
+        if width == 0 || height == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled part {part_idx}: dataWindow {width}×{height} must be > 0"
+            )));
+        }
+        let mut sorted_channels = req.channels.clone();
+        sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+        for ch in &sorted_channels {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part tiled part {part_idx}: sub-sampled channel '{}' \
+                     (tiled files require 1×1 sampling)",
+                    ch.name
+                )));
+            }
+        }
+        let tdesc_attr = part
+            .attributes
+            .iter()
+            .find(|a| a.name == "tiles")
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "multi-part tiled part {part_idx} missing required 'tiles' attribute"
+                ))
+            })?;
+        let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
+        if tdesc.level_mode != 0 {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled part {part_idx}: tiledesc level_mode={} \
+                 (only ONE_LEVEL supported — MIPMAP/RIPMAP multi-part is a followup)",
+                tdesc.level_mode
+            )));
+        }
+        if tdesc.x_size == 0 || tdesc.y_size == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled part {part_idx}: tile size {}×{} must both be > 0",
+                tdesc.x_size, tdesc.y_size
+            )));
+        }
+        let tx_count = width.div_ceil(tdesc.x_size);
+        let ty_count = height.div_ceil(tdesc.y_size);
+        let expected = (tx_count as usize) * (ty_count as usize);
+        if chunk_counts[part_idx] != expected {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled part {part_idx}: chunkCount={} but tile grid \
+                 {tx_count}×{ty_count} expects {expected}",
+                chunk_counts[part_idx]
+            )));
+        }
+
+        let planes: Vec<ExrPlane> = sorted_channels
+            .iter()
+            .map(|c| ExrPlane {
+                name: c.name.clone(),
+                samples: vec![0.0; (width as usize) * (height as usize)],
+            })
+            .collect();
+        state.push(PartState {
+            req,
+            sorted_channels,
+            tile_x: tdesc.x_size,
+            tile_y: tdesc.y_size,
+            tx_count,
+            ty_count,
+            planes,
+        });
+    }
+
+    // Skip past all concatenated offset tables.
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let tables_start = parts.last().unwrap().end_offset;
+    let chunk_scan_start = tables_start + total_chunks * 8;
+    if chunk_scan_start > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "multi-part tiled offset tables run past EOF (need {}, have {})",
+            chunk_scan_start,
+            bytes.len()
+        )));
+    }
+
+    // Linear chunk scan: each chunk starts with i32 part_number, then
+    // i32 tx, i32 ty, i32 lvlx, i32 lvly, i32 size, payload[size].
+    let mut scan_pos = chunk_scan_start;
+    for _chunk_global_idx in 0..total_chunks {
+        if scan_pos + 24 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled: unexpected EOF at chunk scan position {scan_pos}"
+            )));
+        }
+        let part_num = i32::from_le_bytes(bytes[scan_pos..scan_pos + 4].try_into().unwrap());
+        let h_tx = i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+        let h_ty = i32::from_le_bytes(bytes[scan_pos + 8..scan_pos + 12].try_into().unwrap());
+        let lvl_x = i32::from_le_bytes(bytes[scan_pos + 12..scan_pos + 16].try_into().unwrap());
+        let lvl_y = i32::from_le_bytes(bytes[scan_pos + 16..scan_pos + 20].try_into().unwrap());
+        let payload_size =
+            i32::from_le_bytes(bytes[scan_pos + 20..scan_pos + 24].try_into().unwrap());
+
+        if part_num < 0 || part_num as usize >= parts.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled chunk at {scan_pos}: part_number={part_num} out of range 0..{}",
+                parts.len()
+            )));
+        }
+        if payload_size < 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled chunk at {scan_pos}: negative payload size {payload_size}"
+            )));
+        }
+        if lvl_x != 0 || lvl_y != 0 {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled chunk at {scan_pos}: lvlx={lvl_x} lvly={lvl_y} \
+                 (multi-level multi-part tiled is a followup)"
+            )));
+        }
+        let pl_start = scan_pos + 24;
+        let pl_end = pl_start + payload_size as usize;
+        if pl_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled chunk at {scan_pos}: payload runs past EOF"
+            )));
+        }
+        let part_idx = part_num as usize;
+        let ps = &mut state[part_idx];
+        let width = ps.req.data_window.width();
+        let height = ps.req.data_window.height();
+        let tx = h_tx as u32;
+        let ty = h_ty as u32;
+        if tx >= ps.tx_count || ty >= ps.ty_count {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled chunk at {scan_pos}: tile ({tx},{ty}) out of grid \
+                 {}×{}",
+                ps.tx_count, ps.ty_count
+            )));
+        }
+        let x0 = tx * ps.tile_x;
+        let y0 = ty * ps.tile_y;
+        let x1 = (x0 + ps.tile_x).min(width);
+        let y1 = (y0 + ps.tile_y).min(height);
+        let tw = (x1 - x0) as usize;
+        let th = (y1 - y0) as usize;
+        let payload = &bytes[pl_start..pl_end];
+        scatter_tile_into_planes(
+            payload,
+            &ps.sorted_channels,
+            &mut ps.planes,
+            width,
+            x0,
+            y0,
+            tw,
+            th,
+            ps.req.compression,
+            (ty * ps.tx_count + tx) as usize,
+        )?;
+        scan_pos = pl_end;
+    }
+
+    // Assemble per-part ExrImage outputs.
+    let mut images: Vec<ExrImage> = Vec::with_capacity(parts.len());
+    for (part_idx, part) in parts.iter().enumerate() {
+        let PartState {
+            req,
+            sorted_channels,
+            planes,
+            ..
+        } = state.remove(0);
+        let _ = part_idx;
+        images.push(ExrImage {
+            data_window: req.data_window,
+            display_window: req.display_window,
+            line_order: req.line_order,
+            compression: req.compression,
+            pixel_aspect_ratio: req.pixel_aspect_ratio,
+            screen_window_center: req.screen_window_center,
+            screen_window_width: req.screen_window_width,
+            channels: sorted_channels,
+            planes,
+            attributes: part.attributes.clone(),
+        });
+    }
     Ok(images)
 }
 
