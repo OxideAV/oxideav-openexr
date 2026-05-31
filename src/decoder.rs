@@ -1449,10 +1449,17 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
                 ))
             })?;
         let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
+        if tdesc.level_mode == 1 {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled part {part_idx}: tiledesc level_mode=1 (MIPMAP_LEVELS) — \
+                 call parse_exr_multipart_tiled_multilevel() for multi-level multi-part \
+                 tiled files"
+            )));
+        }
         if tdesc.level_mode != 0 {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled part {part_idx}: tiledesc level_mode={} \
-                 (only ONE_LEVEL supported — MIPMAP/RIPMAP multi-part is a followup)",
+                 (only ONE_LEVEL + MIPMAP_LEVELS supported — RIPMAP multi-part is a followup)",
                 tdesc.level_mode
             )));
         }
@@ -1534,7 +1541,8 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
         if lvl_x != 0 || lvl_y != 0 {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled chunk at {scan_pos}: lvlx={lvl_x} lvly={lvl_y} \
-                 (multi-level multi-part tiled is a followup)"
+                 (parse_exr_multipart_tiled is ONE_LEVEL only — call \
+                 parse_exr_multipart_tiled_multilevel() for MIPMAP/RIPMAP)"
             )));
         }
         let pl_start = scan_pos + 24;
@@ -1603,6 +1611,360 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
         });
     }
     Ok(images)
+}
+
+/// One multi-level part decoded by
+/// [`parse_exr_multipart_tiled_multilevel`]. Carries per-part metadata
+/// once plus every decoded pyramid level (in the spec's iteration
+/// order — MIPMAP_LEVELS produces levels `0..N-1` along the `(l, l)`
+/// diagonal).
+#[derive(Debug, Clone)]
+pub struct MultilevelTiledPart {
+    /// `0 = ONE_LEVEL`, `1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS` (only
+    /// 0/1 emitted by [`encode_exr_multipart_tiled_mipmap`]; RIPMAP
+    /// multi-part is a followup).
+    pub level_mode: u8,
+    /// `0 = ROUND_DOWN`, `1 = ROUND_UP`. The encoder emits ROUND_DOWN.
+    pub round_mode: u8,
+    /// Tile dimensions from the part's `tiles[tiledesc]` attribute.
+    pub tile_x: u32,
+    pub tile_y: u32,
+    /// Full-resolution data window (level 0,0).
+    pub data_window: Box2i,
+    pub display_window: Box2i,
+    /// Channel list (alphabetical, matching each level's plane order).
+    pub channels: Vec<Channel>,
+    /// Compression declared by the part (already applied to each
+    /// level's planes — callers see decoded f32 samples).
+    pub compression: Compression,
+    /// Decoded pyramid levels in spec iteration order.
+    pub levels: Vec<TiledLevel>,
+    /// The full part attribute list (for callers that need access to
+    /// optional attributes like `name`).
+    pub attributes: Vec<Attribute>,
+}
+
+/// Parse a multi-part **multi-level** flat (non-deep) tiled EXR file
+/// and return one [`MultilevelTiledPart`] per part. Companion to
+/// [`crate::encode_exr_multipart_tiled_mipmap`].
+///
+/// Accepts every part shape [`parse_exr_multipart_tiled`] does (each
+/// part `type="tiledimage"`, `tiles[tiledesc]` attribute, the standard
+/// required attributes) **plus** parts whose tiledesc declares
+/// `level_mode == 1` (MIPMAP_LEVELS). ONE_LEVEL parts (`level_mode ==
+/// 0`) surface as a single-entry `levels` vector for uniform handling
+/// alongside multi-level parts. Compression NONE / ZIP / ZIPS / RLE.
+///
+/// Layout (multi-part flat tiled, version-field bit 0x1000 set):
+///
+/// ```text
+/// magic(4) | version(4 with multipart=0x1000)
+/// | header_0 ... NUL | header_1 ... NUL | NUL          (extra NUL = end-of-headers)
+/// | offset_table_0(chunkCount_0×u64) | offset_table_1(...) | ...
+/// | chunks: each starts with i32 part_number,
+///           then i32 tx | i32 ty | i32 lvlx | i32 lvly | i32 size | payload[size].
+/// ```
+///
+/// Per-tile payload layout matches the single-part flat-tiled and
+/// single-part MIPMAP encoders: row-major within the tile, channels in
+/// alphabetical order, edge tiles store only the valid pixel rectangle.
+///
+/// **Offset table robustness**: chunks are decoded by linear scan (not
+/// index lookup), matching the round-192 ONE_LEVEL multi-part reader,
+/// so zero-filled offset tables still decode correctly.
+///
+/// RIPMAP_LEVELS multi-part is a followup; level_mode=2 here returns an
+/// `Unsupported` error.
+pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<MultilevelTiledPart>> {
+    let parts = parse_multipart_headers(bytes)?;
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "multi-part tiled multilevel file has no parts".to_string(),
+        ));
+    }
+    for (i, part) in parts.iter().enumerate() {
+        let part_type = find_part_type(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part tiled multilevel: part {i} missing required 'type' attribute"
+            ))
+        })?;
+        if part_type != "tiledimage" {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled multilevel: part {i} type='{part_type}' \
+                 (only 'tiledimage' supported)"
+            )));
+        }
+    }
+    if parts[0].version.non_image {
+        return Err(ExrError::invalid(
+            "parse_exr_multipart_tiled_multilevel called on a deep (non_image bit set) \
+             file — use parse_exr_multipart_deep_tiled() instead"
+                .to_string(),
+        ));
+    }
+
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let cc = find_chunk_count(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part tiled multilevel part {i} missing required chunkCount attribute"
+            ))
+        })?;
+        chunk_counts.push(cc);
+    }
+
+    // Per-part state: required attrs, tile geometry, sorted channels,
+    // tiledesc, allocated per-level planes.
+    struct PartState {
+        req: RequiredAttrs,
+        sorted_channels: Vec<Channel>,
+        tile_x: u32,
+        tile_y: u32,
+        level_mode: u8,
+        round_mode: u8,
+        levels: Vec<TiledLevel>,
+    }
+
+    let mut state: Vec<PartState> = Vec::with_capacity(parts.len());
+    for (part_idx, part) in parts.iter().enumerate() {
+        let req = extract_required(&part.attributes)?;
+        if !matches!(
+            req.compression,
+            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        ) {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled multilevel part {part_idx}: compression {:?} not yet implemented",
+                req.compression
+            )));
+        }
+        let width = req.data_window.width();
+        let height = req.data_window.height();
+        if width == 0 || height == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel part {part_idx}: dataWindow \
+                 {width}×{height} must be > 0"
+            )));
+        }
+        let mut sorted_channels = req.channels.clone();
+        sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+        for ch in &sorted_channels {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part tiled multilevel part {part_idx}: sub-sampled channel '{}' \
+                     (tiled files require 1×1 sampling)",
+                    ch.name
+                )));
+            }
+        }
+        let tdesc_attr = part
+            .attributes
+            .iter()
+            .find(|a| a.name == "tiles")
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "multi-part tiled multilevel part {part_idx} missing required \
+                     'tiles' attribute"
+                ))
+            })?;
+        let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
+        if tdesc.x_size == 0 || tdesc.y_size == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel part {part_idx}: tile size {}×{} must \
+                 both be > 0",
+                tdesc.x_size, tdesc.y_size
+            )));
+        }
+        if tdesc.level_mode > 2 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel part {part_idx}: tiledesc level_mode={} \
+                 unknown (expected 0/1/2)",
+                tdesc.level_mode
+            )));
+        }
+        if tdesc.level_mode == 2 {
+            return Err(ExrError::unsupported(format!(
+                "multi-part tiled multilevel part {part_idx}: tiledesc level_mode=2 \
+                 (RIPMAP_LEVELS) — multi-part RIPMAP is a followup"
+            )));
+        }
+        let round_up = tdesc.round_mode != 0;
+
+        // Enumerate the levels we expect for this part in the spec's
+        // iteration order, then allocate per-level planes.
+        let levels: Vec<TiledLevel> = match tdesc.level_mode {
+            0 => vec![TiledLevel {
+                level_x: 0,
+                level_y: 0,
+                width,
+                height,
+                planes: alloc_planes(&sorted_channels, width, height),
+            }],
+            1 => {
+                let n = mipmap_level_count(width.max(height), round_up);
+                (0..n)
+                    .map(|l| {
+                        let lw = mipmap_level_dim(width, l, round_up);
+                        let lh = mipmap_level_dim(height, l, round_up);
+                        TiledLevel {
+                            level_x: l,
+                            level_y: l,
+                            width: lw,
+                            height: lh,
+                            planes: alloc_planes(&sorted_channels, lw, lh),
+                        }
+                    })
+                    .collect()
+            }
+            _ => unreachable!("checked above"),
+        };
+
+        // Validate chunkCount = sum over levels of tile-grid size.
+        let expected: usize = levels
+            .iter()
+            .map(|l| {
+                l.width.div_ceil(tdesc.x_size) as usize * l.height.div_ceil(tdesc.y_size) as usize
+            })
+            .sum();
+        if chunk_counts[part_idx] != expected {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel part {part_idx}: chunkCount={} but \
+                 multi-level grid expects {expected}",
+                chunk_counts[part_idx]
+            )));
+        }
+
+        state.push(PartState {
+            req,
+            sorted_channels,
+            tile_x: tdesc.x_size,
+            tile_y: tdesc.y_size,
+            level_mode: tdesc.level_mode,
+            round_mode: tdesc.round_mode,
+            levels,
+        });
+    }
+
+    // Skip past all concatenated offset tables.
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let tables_start = parts.last().unwrap().end_offset;
+    let chunk_scan_start = tables_start + total_chunks * 8;
+    if chunk_scan_start > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "multi-part tiled multilevel offset tables run past EOF (need {}, have {})",
+            chunk_scan_start,
+            bytes.len()
+        )));
+    }
+
+    // Linear chunk scan.
+    let mut scan_pos = chunk_scan_start;
+    for _chunk_global_idx in 0..total_chunks {
+        if scan_pos + 24 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel: unexpected EOF at chunk scan position {scan_pos}"
+            )));
+        }
+        let part_num = i32::from_le_bytes(bytes[scan_pos..scan_pos + 4].try_into().unwrap());
+        let h_tx = i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+        let h_ty = i32::from_le_bytes(bytes[scan_pos + 8..scan_pos + 12].try_into().unwrap());
+        let lvl_x = i32::from_le_bytes(bytes[scan_pos + 12..scan_pos + 16].try_into().unwrap());
+        let lvl_y = i32::from_le_bytes(bytes[scan_pos + 16..scan_pos + 20].try_into().unwrap());
+        let payload_size =
+            i32::from_le_bytes(bytes[scan_pos + 20..scan_pos + 24].try_into().unwrap());
+
+        if part_num < 0 || part_num as usize >= parts.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel chunk at {scan_pos}: part_number={part_num} \
+                 out of range 0..{}",
+                parts.len()
+            )));
+        }
+        if payload_size < 0 || h_tx < 0 || h_ty < 0 || lvl_x < 0 || lvl_y < 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel chunk at {scan_pos}: bad header tx={h_tx} \
+                 ty={h_ty} lvlx={lvl_x} lvly={lvl_y} size={payload_size}"
+            )));
+        }
+        let pl_start = scan_pos + 24;
+        let pl_end = pl_start + payload_size as usize;
+        if pl_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel chunk at {scan_pos}: payload runs past EOF"
+            )));
+        }
+        let part_idx = part_num as usize;
+        let ps = &mut state[part_idx];
+
+        // Locate the matching level slot by (lvlx, lvly).
+        let level = ps
+            .levels
+            .iter_mut()
+            .find(|l| l.level_x as i32 == lvl_x && l.level_y as i32 == lvl_y)
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "multi-part tiled multilevel chunk at {scan_pos}: unknown level \
+                     ({lvl_x},{lvl_y}) on part {part_idx}"
+                ))
+            })?;
+        let tx = h_tx as u32;
+        let ty = h_ty as u32;
+        let x0 = tx * ps.tile_x;
+        let y0 = ty * ps.tile_y;
+        if x0 >= level.width || y0 >= level.height {
+            return Err(ExrError::invalid(format!(
+                "multi-part tiled multilevel chunk at {scan_pos}: tile ({tx},{ty}) outside \
+                 level ({lvl_x},{lvl_y}) dims {}×{}",
+                level.width, level.height
+            )));
+        }
+        let x1 = (x0 + ps.tile_x).min(level.width);
+        let y1 = (y0 + ps.tile_y).min(level.height);
+        let tw = (x1 - x0) as usize;
+        let th = (y1 - y0) as usize;
+        let payload = &bytes[pl_start..pl_end];
+        scatter_tile_into_planes(
+            payload,
+            &ps.sorted_channels,
+            &mut level.planes,
+            level.width,
+            x0,
+            y0,
+            tw,
+            th,
+            ps.req.compression,
+            0, // tile_idx is only used for diagnostics
+        )?;
+        scan_pos = pl_end;
+    }
+
+    // Assemble outputs in part order.
+    let mut out: Vec<MultilevelTiledPart> = Vec::with_capacity(parts.len());
+    for (part_idx, part) in parts.iter().enumerate() {
+        let PartState {
+            req,
+            sorted_channels,
+            tile_x,
+            tile_y,
+            level_mode,
+            round_mode,
+            levels,
+            ..
+        } = state.remove(0);
+        let _ = part_idx;
+        out.push(MultilevelTiledPart {
+            level_mode,
+            round_mode,
+            tile_x,
+            tile_y,
+            data_window: req.data_window,
+            display_window: req.display_window,
+            channels: sorted_channels,
+            compression: req.compression,
+            levels,
+            attributes: part.attributes.clone(),
+        });
+    }
+    Ok(out)
 }
 
 /// Find the `type` (string) attribute in a part's attribute list. Used

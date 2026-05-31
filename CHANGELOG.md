@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-196 multi-part flat (non-deep) **multi-level** TILED WRITE + READ.
+  New public API: `encode_exr_multipart_tiled_mipmap`,
+  `parse_exr_multipart_tiled_multilevel`, `MultipartMipmapTiledPart`,
+  `MultilevelTiledPart`. Composes the round-78 single-part MIPMAP_LEVELS
+  encoder with the round-192 multi-part flat-tiled envelope: per-part
+  `tiles[tiledesc, level_mode=1]` + `type="tiledimage"` carry the
+  multi-level tile-ness signal; only the multipart (0x1000) version-field
+  bit is set (the `single_tile` 0x200 bit is NOT set, mirroring the
+  multi-part deep-tiled discipline). Each chunk on disk is
+  `i32 part_number, i32 tx, i32 ty, i32 lvlx, i32 lvly, i32 size,
+  payload[size]` (24 bytes of chunk header + the compressed/raw
+  payload). MIPMAP convention `lvlx == lvly == level` (the diagonal of
+  the `(lvlx, lvly)` grid). Per-part `chunkCount` = sum over levels of
+  `ceil(level_w / tile_x) * ceil(level_h / tile_y)`. The reader uses
+  the same linear-scan strategy as `parse_exr_multipart_tiled` /
+  `parse_exr_multipart_deep_tiled` to remain robust against zero-filled
+  offset tables. Compression NONE / ZIP / ZIPS / RLE per part.
+  ROUND_DOWN only. 8 new unit tests in `src/multipart_mipmap_encoder.rs`
+  cover 2-part NONE / 3-part mixed-compression / 13×9-tile-4 edge tiles
+  ZIPS / version-field-bit invariants (multipart=0x1000, single_tile MUST
+  NOT be set, non_image MUST NOT be set) / rejection of empty parts list
+  / duplicate names / wrong pyramid length / unsupported compression
+  (PIZ) / sub-sampled channels. 3 new integration tests in
+  `tests/multipart_mipmap_validation.rs`: `exrheader` accepts the file
+  with the expected "mip-map" + "tiledimage" + per-part names dump;
+  `exrmultipart -separate` splits each part into a single-part MIPMAP
+  file that our `parse_exr_tiled_multilevel` decodes back to the source
+  pyramid sample-for-sample; pure-Rust 3-part mixed-compression
+  self-roundtrip on `(24×16 ZIP, 16×16 ZIPS, 13×9 RLE)` exercising the
+  public-API import path. `parse_exr_multipart_tiled` now points
+  multi-level multi-part tiled files at the new entry rather than
+  rejecting them outright (both the header-level `level_mode != 0`
+  branch and the chunk-level `lvlx != 0 || lvly != 0` branch surface
+  pointer messages).
+
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.2...v0.0.3) - 2026-05-30
 
 ### Other
