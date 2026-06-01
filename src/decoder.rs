@@ -1449,17 +1449,18 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
                 ))
             })?;
         let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
-        if tdesc.level_mode == 1 {
+        if tdesc.level_mode == 1 || tdesc.level_mode == 2 {
             return Err(ExrError::unsupported(format!(
-                "multi-part tiled part {part_idx}: tiledesc level_mode=1 (MIPMAP_LEVELS) — \
-                 call parse_exr_multipart_tiled_multilevel() for multi-level multi-part \
-                 tiled files"
+                "multi-part tiled part {part_idx}: tiledesc level_mode={} (MIPMAP_LEVELS \
+                 or RIPMAP_LEVELS) — call parse_exr_multipart_tiled_multilevel() for \
+                 multi-level multi-part tiled files",
+                tdesc.level_mode
             )));
         }
         if tdesc.level_mode != 0 {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled part {part_idx}: tiledesc level_mode={} \
-                 (only ONE_LEVEL + MIPMAP_LEVELS supported — RIPMAP multi-part is a followup)",
+                 (only ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS supported)",
                 tdesc.level_mode
             )));
         }
@@ -1617,12 +1618,13 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
 /// [`parse_exr_multipart_tiled_multilevel`]. Carries per-part metadata
 /// once plus every decoded pyramid level (in the spec's iteration
 /// order — MIPMAP_LEVELS produces levels `0..N-1` along the `(l, l)`
-/// diagonal).
+/// diagonal; RIPMAP_LEVELS produces the full 2-D grid in `lvly`-outer
+/// `lvlx`-inner order).
 #[derive(Debug, Clone)]
 pub struct MultilevelTiledPart {
-    /// `0 = ONE_LEVEL`, `1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS` (only
-    /// 0/1 emitted by [`encode_exr_multipart_tiled_mipmap`]; RIPMAP
-    /// multi-part is a followup).
+    /// `0 = ONE_LEVEL`, `1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS`.
+    /// MIPMAP comes from [`encode_exr_multipart_tiled_mipmap`]; RIPMAP
+    /// comes from [`crate::encode_exr_multipart_tiled_ripmap`].
     pub level_mode: u8,
     /// `0 = ROUND_DOWN`, `1 = ROUND_UP`. The encoder emits ROUND_DOWN.
     pub round_mode: u8,
@@ -1651,9 +1653,10 @@ pub struct MultilevelTiledPart {
 /// Accepts every part shape [`parse_exr_multipart_tiled`] does (each
 /// part `type="tiledimage"`, `tiles[tiledesc]` attribute, the standard
 /// required attributes) **plus** parts whose tiledesc declares
-/// `level_mode == 1` (MIPMAP_LEVELS). ONE_LEVEL parts (`level_mode ==
-/// 0`) surface as a single-entry `levels` vector for uniform handling
-/// alongside multi-level parts. Compression NONE / ZIP / ZIPS / RLE.
+/// `level_mode == 1` (MIPMAP_LEVELS) or `level_mode == 2`
+/// (RIPMAP_LEVELS). ONE_LEVEL parts (`level_mode == 0`) surface as a
+/// single-entry `levels` vector for uniform handling alongside
+/// multi-level parts. Compression NONE / ZIP / ZIPS / RLE.
 ///
 /// Layout (multi-part flat tiled, version-field bit 0x1000 set):
 ///
@@ -1673,8 +1676,9 @@ pub struct MultilevelTiledPart {
 /// index lookup), matching the round-192 ONE_LEVEL multi-part reader,
 /// so zero-filled offset tables still decode correctly.
 ///
-/// RIPMAP_LEVELS multi-part is a followup; level_mode=2 here returns an
-/// `Unsupported` error.
+/// For RIPMAP_LEVELS parts, the chunks visit `(lvlx, lvly)` cells in
+/// `lvly`-outer / `lvlx`-inner order with INCREASING_Y row-major within
+/// each cell (the encoder companion writes them in the same order).
 pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<MultilevelTiledPart>> {
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
@@ -1781,16 +1785,13 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
                 tdesc.level_mode
             )));
         }
-        if tdesc.level_mode == 2 {
-            return Err(ExrError::unsupported(format!(
-                "multi-part tiled multilevel part {part_idx}: tiledesc level_mode=2 \
-                 (RIPMAP_LEVELS) — multi-part RIPMAP is a followup"
-            )));
-        }
         let round_up = tdesc.round_mode != 0;
 
         // Enumerate the levels we expect for this part in the spec's
         // iteration order, then allocate per-level planes.
+        // ONE_LEVEL: single (0,0) entry.
+        // MIPMAP_LEVELS: diagonal levels 0..N-1 with level_x == level_y.
+        // RIPMAP_LEVELS: full 2-D grid in lvly-outer / lvlx-inner order.
         let levels: Vec<TiledLevel> = match tdesc.level_mode {
             0 => vec![TiledLevel {
                 level_x: 0,
@@ -1814,6 +1815,25 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
                         }
                     })
                     .collect()
+            }
+            2 => {
+                let nx = mipmap_level_count(width, round_up);
+                let ny = mipmap_level_count(height, round_up);
+                let mut v = Vec::with_capacity((nx * ny) as usize);
+                for ly in 0..ny {
+                    let lh = mipmap_level_dim(height, ly, round_up);
+                    for lx in 0..nx {
+                        let lw = mipmap_level_dim(width, lx, round_up);
+                        v.push(TiledLevel {
+                            level_x: lx,
+                            level_y: ly,
+                            width: lw,
+                            height: lh,
+                            planes: alloc_planes(&sorted_channels, lw, lh),
+                        });
+                    }
+                }
+                v
             }
             _ => unreachable!("checked above"),
         };

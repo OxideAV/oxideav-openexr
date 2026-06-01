@@ -209,12 +209,34 @@
 //! tiled files at the new entry rather than rejecting them outright.
 //! ROUND_DOWN only; compression NONE / ZIP / ZIPS / RLE.
 //!
+//! Round-202 surface (this crate, this round): multi-part **RIPMAP_LEVELS**
+//! flat tiled WRITE + READ ([`encode_exr_multipart_tiled_ripmap`] +
+//! [`MultipartRipmapTiledPart`], read via the existing
+//! [`parse_exr_multipart_tiled_multilevel`] entry — the multi-level
+//! reader's `level_mode=2` rejection is gone and the reader now
+//! enumerates the full 2-D RIPMAP grid alongside ONE_LEVEL and
+//! MIPMAP_LEVELS parts). Composes the round-124 single-part
+//! RIPMAP_LEVELS encoder with the round-192 multi-part flat-tiled
+//! envelope. Per-part `tiles[tiledesc, level_mode=2]` +
+//! `type="tiledimage"` carry the 2-D-reduction-grid signal; only the
+//! multipart (0x1000) version-field bit is set (the `single_tile` 0x200
+//! bit is NOT set, mirroring rounds 192 and 196). Each chunk is `i32
+//! part_number, i32 tx, i32 ty, i32 lvlx, i32 lvly, i32 size,
+//! payload[size]` (24 bytes of chunk header). Iteration: `lvly`-outer
+//! `lvlx`-inner across the grid, then ty-outer tx-inner within each
+//! `(lvlx, lvly)` cell. Per-part chunkCount = sum over the `nx * ny`
+//! cells of `ceil(cell_w/tile_x) * ceil(cell_h/tile_y)`. The reader
+//! uses the same linear chunk-scan strategy as the round-192/196
+//! multi-part readers. ROUND_DOWN only; compression NONE / ZIP / ZIPS /
+//! RLE per part. [`parse_exr_multipart_tiled`] now redirects RIPMAP
+//! multi-part files to `parse_exr_multipart_tiled_multilevel` alongside
+//! the existing MIPMAP redirect.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
 //! public spec); multi-level deep tiled (MIPMAP/RIPMAP, single-part and
-//! multi-part); RIPMAP flat tiled multi-part; HDR pixel-format
-//! integration with `oxideav-core`.
+//! multi-part); HDR pixel-format integration with `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -226,6 +248,7 @@ pub mod image;
 pub mod mipmap_encoder;
 pub mod multipart_encoder;
 pub mod multipart_mipmap_encoder;
+pub mod multipart_ripmap_encoder;
 pub mod multipart_tiled_encoder;
 #[cfg(feature = "registry")]
 pub mod registry;
@@ -267,6 +290,7 @@ pub use multipart_encoder::{
     encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,
 };
 pub use multipart_mipmap_encoder::{encode_exr_multipart_tiled_mipmap, MultipartMipmapTiledPart};
+pub use multipart_ripmap_encoder::{encode_exr_multipart_tiled_ripmap, MultipartRipmapTiledPart};
 pub use multipart_tiled_encoder::{encode_exr_multipart_tiled, MultipartTiledPart};
 pub use tile_encoder::{encode_exr_tiled, encode_exr_tiled_rgba_float_with};
 pub use types::{

@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-202 multi-part flat (non-deep) **RIPMAP_LEVELS** TILED WRITE +
+  READ. New public API: `encode_exr_multipart_tiled_ripmap`,
+  `MultipartRipmapTiledPart`. Composes the round-124 single-part
+  RIPMAP_LEVELS encoder with the round-192 multi-part flat-tiled
+  envelope: per-part `tiles[tiledesc, level_mode=2]` +
+  `type="tiledimage"` carry the 2-D-reduction-grid signal; only the
+  multipart (0x1000) version-field bit is set (the `single_tile` 0x200
+  bit is NOT set, mirroring the round-192 multi-part flat-tiled and
+  round-196 MIPMAP multi-part writers). Each chunk on disk is `i32
+  part_number, i32 tx, i32 ty, i32 lvlx, i32 lvly, i32 size,
+  payload[size]` (24 bytes of chunk header). RIPMAP convention: `lvlx`
+  and `lvly` are independent; iteration walks `lvly`-outer
+  `lvlx`-inner across the grid, then ty-outer tx-inner (INCREASING_Y
+  row-major) within each `(lvlx, lvly)` cell — matching the single-part
+  RIPMAP writer's order and the decoder's `compute_total_tiles` RIPMAP
+  branch. Per-part `chunkCount` = sum over the `nx * ny` cells of
+  `ceil(cell_w / tile_x) * ceil(cell_h / tile_y)`. Compression NONE /
+  ZIP / ZIPS / RLE per part. ROUND_DOWN only. The companion reader is
+  the existing `parse_exr_multipart_tiled_multilevel`, whose former
+  `level_mode == 2` rejection is gone and which now enumerates the full
+  2-D RIPMAP grid alongside ONE_LEVEL and MIPMAP_LEVELS parts using the
+  same linear chunk-scan strategy. `parse_exr_multipart_tiled` also now
+  redirects RIPMAP multi-part files to
+  `parse_exr_multipart_tiled_multilevel` alongside the existing MIPMAP
+  redirect. 10 new unit tests in `src/multipart_ripmap_encoder.rs` cover
+  2-part NONE / 3-part mixed-compression / 13×9-tile-4 edge tiles ZIPS /
+  version-field-bit invariants (multipart=0x1000, single_tile MUST NOT
+  be set, non_image MUST NOT be set) / rejection of empty parts list /
+  duplicate names / bad grid shape / unsupported compression (PIZ) /
+  sub-sampled channels / ONE_LEVEL-reader redirect. 3 new integration
+  tests in `tests/multipart_ripmap_validation.rs`: `exrheader` accepts
+  the file with the expected "rip-map" + "tiledimage" + per-part names
+  dump; `exrmultipart -separate` splits each part into a single-part
+  RIPMAP file that our `parse_exr_tiled_multilevel` decodes back to the
+  source grid sample-for-sample; pure-Rust 3-part mixed-compression
+  self-roundtrip on `(24×16 ZIP, 16×16 ZIPS, 13×9 RLE)` exercising the
+  public-API import path.
+
 - Round-196 multi-part flat (non-deep) **multi-level** TILED WRITE + READ.
   New public API: `encode_exr_multipart_tiled_mipmap`,
   `parse_exr_multipart_tiled_multilevel`, `MultipartMipmapTiledPart`,
