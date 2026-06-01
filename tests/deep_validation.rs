@@ -23,9 +23,11 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_multipart_deep_scanline,
-    parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled, Channel, Compression,
-    DeepScanlineInput, DeepTiledInput, MultipartDeepScanlinePart, PixelType,
+    encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
+    encode_exr_multipart_deep_scanline, parse_exr_deep_multipart, parse_exr_deep_scanline,
+    parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap, Channel, Compression, DeepMipmapTiledInput,
+    DeepMipmapTiledLevelInput, DeepScanlineInput, DeepTiledInput, MultipartDeepScanlinePart,
+    PixelType,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -964,5 +966,126 @@ fn our_writer_and_reader_multipart_deep_full_roundtrip() {
     assert_eq!(got[1].samples_per_pixel, spp_b);
     for (g, w) in got[1].channel_samples.iter().zip(planes_b.iter()) {
         assert_eq!(g, w);
+    }
+}
+
+// ----------------------------------------------------------------------
+// Round 208: single-part deep tiled MIPMAP_LEVELS validation.
+// ----------------------------------------------------------------------
+
+fn build_deep_mipmap_synthetic(w0: u32, h0: u32) -> Vec<(Vec<u32>, [Vec<f32>; 4])> {
+    let mut max_dim = w0.max(h0);
+    let mut n = 1u32;
+    while max_dim > 1 {
+        max_dim /= 2;
+        n += 1;
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for l in 0..n {
+        let lw = (w0 >> l).max(1);
+        let lh = (h0 >> l).max(1);
+        out.push(build_synthetic(lw, lh));
+    }
+    out
+}
+
+#[test]
+fn exrheader_accepts_our_deep_tiled_mipmap_file() {
+    if !exrheader_available() {
+        eprintln!("exrheader not available, skipping");
+        return;
+    }
+    let (w0, h0) = (16u32, 16u32);
+    let pyramid = build_deep_mipmap_synthetic(w0, h0);
+    let pyramid_levels: Vec<DeepMipmapTiledLevelInput> = pyramid
+        .iter()
+        .enumerate()
+        .map(|(l, (spp, planes))| {
+            let lw = (w0 >> l).max(1);
+            let lh = (h0 >> l).max(1);
+            DeepMipmapTiledLevelInput {
+                width: lw,
+                height: lh,
+                samples_per_pixel: spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            }
+        })
+        .collect();
+    let input = DeepMipmapTiledInput {
+        tile_x: 8,
+        tile_y: 8,
+        channels: channels_rgba_float(),
+        pyramid: pyramid_levels,
+        compression: Compression::Zips,
+    };
+    let bytes = encode_exr_deep_tiled_mipmap(&input).unwrap();
+    let dir = tempdir();
+    let path = format!("{dir}/deep_tiled_mipmap.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("exrheader").arg(&path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "exrheader rejected our deep-tiled MIPMAP file:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("deeptile"),
+        "exrheader output didn't mention 'deeptile':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("mip-map") || stdout.contains("mipmap") || stdout.contains("MIPMAP"),
+        "exrheader output didn't indicate mip-map level mode:\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn deep_tiled_mipmap_full_pure_rust_roundtrip_24x16() {
+    // Larger non-power-of-two image with ZIPS compression to exercise:
+    //   * the offset-table sizing across multiple levels,
+    //   * edge tiles in the partial bottom-row of level 0,
+    //   * the per-tile pixel-offset table for non-edge and edge tiles,
+    //   * channel reassembly into pixel-major order from the per-tile
+    //     channel-major sample slabs.
+    let (w0, h0) = (24u32, 16u32);
+    let pyramid = build_deep_mipmap_synthetic(w0, h0);
+    let pyramid_levels: Vec<DeepMipmapTiledLevelInput> = pyramid
+        .iter()
+        .enumerate()
+        .map(|(l, (spp, planes))| {
+            let lw = (w0 >> l).max(1);
+            let lh = (h0 >> l).max(1);
+            DeepMipmapTiledLevelInput {
+                width: lw,
+                height: lh,
+                samples_per_pixel: spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            }
+        })
+        .collect();
+    let input = DeepMipmapTiledInput {
+        tile_x: 8,
+        tile_y: 4,
+        channels: channels_rgba_float(),
+        pyramid: pyramid_levels,
+        compression: Compression::Zips,
+    };
+    let bytes = encode_exr_deep_tiled_mipmap(&input).unwrap();
+    let img = parse_exr_deep_tiled_mipmap(&bytes).unwrap();
+    assert_eq!(img.width(), w0);
+    assert_eq!(img.height(), h0);
+    assert_eq!(img.tile_x, 8);
+    assert_eq!(img.tile_y, 4);
+    assert_eq!(img.level_count(), pyramid.len());
+    for (l, (spp, planes)) in pyramid.iter().enumerate() {
+        assert_eq!(&img.levels[l].samples_per_pixel, spp, "level {l} spp");
+        for (ch_idx, p) in planes.iter().enumerate() {
+            assert_eq!(
+                &img.levels[l].channel_samples[ch_idx], p,
+                "level {l} ch {ch_idx}"
+            );
+        }
     }
 }

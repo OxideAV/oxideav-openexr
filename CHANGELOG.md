@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-208 single-part deep tiled **MIPMAP_LEVELS** WRITE + READ. New
+  public API: `encode_exr_deep_tiled_mipmap`, `parse_exr_deep_tiled_mipmap`,
+  `DeepMipmapTiledInput`, `DeepMipmapTiledLevelInput`,
+  `DeepMipmapTiledImage`, `DeepTiledMipmapLevel`. Composes the round-130
+  single-part deep-tiled chunk shape (`tx, ty, lvlx, lvly` + 3 u64 sizes +
+  per-tile cumulative-inclusive offset table + non-interleaved
+  channel-major sample data) with the round-78 single-part flat
+  MIPMAP_LEVELS iteration order: the offset table walks levels `0..N-1`
+  ascending and within each level INCREASING_Y row-major (ty outer, tx
+  inner); the chunk header carries `lvlx == lvly == level` (the MIPMAP
+  diagonal). Version-field convention mirrors the round-130 single-part
+  deep-tiled writer: only the `non_image` (0x800) bit is set (the
+  `tiles[tiledesc, mode=0x01]` attribute + `type="deeptile"` string
+  attribute carry the multi-level deep-tile signal; `single_tile` 0x200
+  MUST NOT be set). Per-tile pixel-offset table holds `tile_h * tile_w`
+  cumulative-inclusive i32 entries row-major within the tile's valid
+  pixel rectangle. Edge tiles trim to their valid extent in both encoder
+  and decoder; for NONE compression the reader also accepts the
+  reference encoder's `tile_x * tile_y * 4` padded-table convention.
+  Per-file `chunkCount` = sum over levels of
+  `ceil(level_w / tile_x) * ceil(level_h / tile_y)`. Compression NONE /
+  RLE / ZIPS (deep ZIP rejected to match the round-130 single-part
+  deep-tiled discipline and the reference `exrinfo` validator).
+  ROUND_DOWN only. The round-130 `parse_exr_deep_tiled` reader now
+  redirects MIPMAP files to the new entry rather than rejecting them
+  outright (`(mode & 0x0F) == 0x01` surfaces a pointer message). 10 new
+  unit tests in `src/deep.rs` cover NONE 16×16 in 8×8 / ZIPS 24×16 in
+  8×4 (edge tiles at every level) / RLE 13×9 in 4×4 (multi-axis edge
+  tiles) / version-field-bit invariants (non_image MUST be set;
+  multipart, single_tile MUST NOT be set) / rejection of ZIP, wrong
+  pyramid length, sub-sampled channels, zero tile size, empty pyramid /
+  the `parse_exr_deep_tiled` → `parse_exr_deep_tiled_mipmap` redirect
+  pointer / the symmetric ONE_LEVEL-rejection guard in
+  `parse_exr_deep_tiled_mipmap` / a non-power-of-two 16×12 pyramid.
+  2 new integration tests in `tests/deep_validation.rs`: `exrheader`
+  accepts our deep-tiled MIPMAP 16×16 in 8×8 file with `deeptile` +
+  mip-map level-mode output, and a pure-Rust 24×16-in-8×4 ZIPS full
+  pyramid round-trip exercising the public-API import path.
+
 - Round-202 multi-part flat (non-deep) **RIPMAP_LEVELS** TILED WRITE +
   READ. New public API: `encode_exr_multipart_tiled_ripmap`,
   `MultipartRipmapTiledPart`. Composes the round-124 single-part
