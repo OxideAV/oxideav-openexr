@@ -315,13 +315,14 @@ pub use decoder::{
 pub use deep::{
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
     encode_exr_deep_tiled_ripmap, encode_exr_multipart_deep_scanline,
-    encode_exr_multipart_deep_tiled, parse_exr_deep_multipart, parse_exr_deep_scanline,
-    parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap, parse_exr_deep_tiled_ripmap,
-    parse_exr_multipart_deep_tiled, DeepExrImage, DeepMipmapTiledImage, DeepMipmapTiledInput,
-    DeepMipmapTiledLevelInput, DeepRipmapTiledImage, DeepRipmapTiledInput,
-    DeepRipmapTiledLevelInput, DeepScanlineInput, DeepScanlinePart, DeepTiledImage, DeepTiledInput,
-    DeepTiledMipmapLevel, DeepTiledPart, DeepTiledRipmapCell, MultipartDeepScanlinePart,
-    MultipartDeepTiledPart,
+    encode_exr_multipart_deep_tiled, encode_exr_multipart_deep_tiled_mipmap,
+    parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled,
+    parse_exr_deep_tiled_mipmap, parse_exr_deep_tiled_ripmap, parse_exr_multipart_deep_tiled,
+    parse_exr_multipart_deep_tiled_mipmap, DeepExrImage, DeepMipmapTiledImage,
+    DeepMipmapTiledInput, DeepMipmapTiledLevelInput, DeepMipmapTiledPart, DeepRipmapTiledImage,
+    DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepScanlineInput, DeepScanlinePart,
+    DeepTiledImage, DeepTiledInput, DeepTiledMipmapLevel, DeepTiledPart, DeepTiledRipmapCell,
+    MultipartDeepMipmapTiledPart, MultipartDeepScanlinePart, MultipartDeepTiledPart,
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,

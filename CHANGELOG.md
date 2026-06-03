@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-220 multi-part deep tiled **MIPMAP_LEVELS** WRITE + READ. New
+  public API: `encode_exr_multipart_deep_tiled_mipmap`,
+  `parse_exr_multipart_deep_tiled_mipmap`,
+  `MultipartDeepMipmapTiledPart`, `DeepMipmapTiledPart`. Composes the
+  round-181 multi-part deep-tiled chunk shape (`i32 part_number` prefix
+  + `tx, ty, lvlx, lvly` + 3 u64 sizes + per-tile cumulative-inclusive
+  offset table + non-interleaved channel-major sample data) with the
+  round-208 single-part deep-tiled MIPMAP iteration order: per part,
+  the chunks walk levels 0..N-1 ascending and within each level
+  INCREASING_Y row-major (ty outer, tx inner) with `lvlx == lvly ==
+  level` for the MIPMAP diagonal. Each part carries its own pyramid
+  with possibly distinct level-0 dimensions; `chunkCount` is the
+  per-part sum over levels of `ceil(level_w / tile_x) *
+  ceil(level_h / tile_y)`. Version-field bits are `0x800 | 0x1000`
+  (`non_image | multipart`); `single_tile` (0x200) MUST NOT be set —
+  the `tiles[tiledesc, mode=0x01]` attribute + `type="deeptile"` carry
+  the MIPMAP-deep signal. Compression: NONE / RLE / ZIPS per part
+  (deep ZIP rejected to match the reference `exrinfo` validator and
+  the round-130 / 181 / 208 deep-tiled writers). Concatenated offset
+  tables in part-order followed by chunk records in part-order. The
+  reader uses a linear chunk scan (matching the multi-part deep-tiled
+  ONE_LEVEL reader) for robustness against zero-filled offset tables
+  produced by `exrmultipart -combine`. Per-tile pixel-offset table
+  holds `tile_h * tile_w` cumulative-inclusive i32 entries row-major
+  within the tile's valid pixel rectangle (edge tiles trim to their
+  valid extent); for NONE compression the reader also tolerates files
+  that pad the table to the full `tile_x * tile_y * 4` bytes (matching
+  the round-130 single-part deep-tiled discipline). 11 new self-
+  roundtrip tests cover 2-part ZIPS, 3-part mixed NONE/RLE/ZIPS,
+  13×9 non-power-of-two edge-tile RLE+ZIPS, and a layout where the two
+  parts carry distinct level-0 dimensions (16×16 + 24×16 with different
+  tile sizes per part). Reject paths cover empty parts, duplicate
+  names, ZIP compression, and pyramid-length mismatches. The
+  single-part deep MIPMAP entry (`parse_exr_deep_tiled_mipmap`) and
+  the ONE_LEVEL multi-part deep entry (`parse_exr_multipart_deep_tiled`)
+  both now redirect their respective miscategorised files to the new
+  entry instead of returning the generic unsupported-multipart /
+  unsupported-MIPMAP message. ROUND_DOWN only; multi-part deep tiled
+  RIPMAP_LEVELS is the only remaining followup on the deep-tiled
+  matrix.
 - Round-214 single-part deep tiled **RIPMAP_LEVELS** WRITE + READ. New
   public API: `encode_exr_deep_tiled_ripmap`, `parse_exr_deep_tiled_ripmap`,
   `DeepRipmapTiledInput`, `DeepRipmapTiledLevelInput`,
