@@ -24,10 +24,11 @@ use std::process::Command;
 
 use oxideav_openexr::{
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
-    encode_exr_multipart_deep_scanline, parse_exr_deep_multipart, parse_exr_deep_scanline,
-    parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap, Channel, Compression, DeepMipmapTiledInput,
-    DeepMipmapTiledLevelInput, DeepScanlineInput, DeepTiledInput, MultipartDeepScanlinePart,
-    PixelType,
+    encode_exr_deep_tiled_ripmap, encode_exr_multipart_deep_scanline, parse_exr_deep_multipart,
+    parse_exr_deep_scanline, parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap,
+    parse_exr_deep_tiled_ripmap, Channel, Compression, DeepMipmapTiledInput,
+    DeepMipmapTiledLevelInput, DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepScanlineInput,
+    DeepTiledInput, MultipartDeepScanlinePart, PixelType,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -1086,6 +1087,154 @@ fn deep_tiled_mipmap_full_pure_rust_roundtrip_24x16() {
                 &img.levels[l].channel_samples[ch_idx], p,
                 "level {l} ch {ch_idx}"
             );
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Round 214: single-part deep tiled RIPMAP_LEVELS validation.
+// ----------------------------------------------------------------------
+
+#[allow(clippy::type_complexity)]
+fn build_deep_ripmap_synthetic(w0: u32, h0: u32) -> Vec<Vec<(Vec<u32>, [Vec<f32>; 4])>> {
+    // Match the lib-test convention: each grid cell carries an
+    // independent `build_synthetic(cell_w, cell_h)` payload. RIPMAP does
+    // not constrain inter-cell sample relationships at the file-format
+    // level; this just exercises the per-cell encode/decode plumbing.
+    let count_levels = |dim: u32| -> u32 {
+        let mut n = 1u32;
+        let mut d = dim;
+        while d > 1 {
+            d /= 2;
+            n += 1;
+        }
+        n
+    };
+    let level_dim = |dim: u32, l: u32| -> u32 { (dim >> l).max(1) };
+    let nx = count_levels(w0);
+    let ny = count_levels(h0);
+    let mut grid = Vec::with_capacity(ny as usize);
+    for lvly in 0..ny {
+        let lh = level_dim(h0, lvly);
+        let mut row = Vec::with_capacity(nx as usize);
+        for lvlx in 0..nx {
+            let lw = level_dim(w0, lvlx);
+            row.push(build_synthetic(lw, lh));
+        }
+        grid.push(row);
+    }
+    grid
+}
+
+#[test]
+fn exrheader_accepts_our_deep_tiled_ripmap_file() {
+    if !exrheader_available() {
+        eprintln!("exrheader not available, skipping");
+        return;
+    }
+    let (w0, h0) = (16u32, 16u32);
+    let grid = build_deep_ripmap_synthetic(w0, h0);
+    let level_dim = |dim: u32, l: u32| -> u32 { (dim >> l).max(1) };
+    let mut input_grid: Vec<Vec<DeepRipmapTiledLevelInput>> = Vec::with_capacity(grid.len());
+    for (lvly, row) in grid.iter().enumerate() {
+        let lh = level_dim(h0, lvly as u32);
+        let mut out_row: Vec<DeepRipmapTiledLevelInput> = Vec::with_capacity(row.len());
+        for (lvlx, (spp, planes)) in row.iter().enumerate() {
+            let lw = level_dim(w0, lvlx as u32);
+            out_row.push(DeepRipmapTiledLevelInput {
+                width: lw,
+                height: lh,
+                samples_per_pixel: spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            });
+        }
+        input_grid.push(out_row);
+    }
+    let input = DeepRipmapTiledInput {
+        tile_x: 8,
+        tile_y: 8,
+        channels: channels_rgba_float(),
+        grid: input_grid,
+        compression: Compression::Zips,
+    };
+    let bytes = encode_exr_deep_tiled_ripmap(&input).unwrap();
+    let dir = tempdir();
+    let path = format!("{dir}/deep_tiled_ripmap.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("exrheader").arg(&path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "exrheader rejected our deep-tiled RIPMAP file:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("deeptile"),
+        "exrheader output didn't mention 'deeptile':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("rip-map") || stdout.contains("ripmap") || stdout.contains("RIPMAP"),
+        "exrheader output didn't indicate rip-map level mode:\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn deep_tiled_ripmap_full_pure_rust_roundtrip_24x16() {
+    // Non-power-of-two image with ZIPS compression exercises:
+    //   * the offset-table sizing across the full (nx * ny) grid,
+    //   * edge tiles in partial rows/columns at several cells,
+    //   * the per-tile pixel-offset table for non-edge and edge tiles,
+    //   * channel reassembly into pixel-major order from the per-tile
+    //     channel-major sample slabs in every grid cell.
+    let (w0, h0) = (24u32, 16u32);
+    let grid = build_deep_ripmap_synthetic(w0, h0);
+    let level_dim = |dim: u32, l: u32| -> u32 { (dim >> l).max(1) };
+    let mut input_grid: Vec<Vec<DeepRipmapTiledLevelInput>> = Vec::with_capacity(grid.len());
+    for (lvly, row) in grid.iter().enumerate() {
+        let lh = level_dim(h0, lvly as u32);
+        let mut out_row: Vec<DeepRipmapTiledLevelInput> = Vec::with_capacity(row.len());
+        for (lvlx, (spp, planes)) in row.iter().enumerate() {
+            let lw = level_dim(w0, lvlx as u32);
+            out_row.push(DeepRipmapTiledLevelInput {
+                width: lw,
+                height: lh,
+                samples_per_pixel: spp,
+                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            });
+        }
+        input_grid.push(out_row);
+    }
+    let input = DeepRipmapTiledInput {
+        tile_x: 8,
+        tile_y: 4,
+        channels: channels_rgba_float(),
+        grid: input_grid,
+        compression: Compression::Zips,
+    };
+    let bytes = encode_exr_deep_tiled_ripmap(&input).unwrap();
+    let img = parse_exr_deep_tiled_ripmap(&bytes).unwrap();
+    assert_eq!(img.width(), w0);
+    assert_eq!(img.height(), h0);
+    assert_eq!(img.tile_x, 8);
+    assert_eq!(img.tile_y, 4);
+    let (nx, ny) = img.level_counts();
+    assert_eq!(ny as usize, grid.len());
+    assert_eq!(nx as usize, grid[0].len());
+    for (lvly, row) in grid.iter().enumerate() {
+        for (lvlx, (spp, planes)) in row.iter().enumerate() {
+            let cell = &img.grid[lvly][lvlx];
+            assert_eq!(
+                &cell.samples_per_pixel, spp,
+                "cell (lvlx={lvlx}, lvly={lvly}) spp"
+            );
+            for (ch_idx, p) in planes.iter().enumerate() {
+                assert_eq!(
+                    &cell.channel_samples[ch_idx], p,
+                    "cell (lvlx={lvlx}, lvly={lvly}) ch {ch_idx}"
+                );
+            }
         }
     }
 }
