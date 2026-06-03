@@ -3115,10 +3115,18 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
                             .to_string(),
                     ));
                 }
+                if (mode & 0x0F) == 0x02 {
+                    return Err(ExrError::unsupported(
+                        "multi-part RIPMAP_LEVELS deep tiled EXR \
+                         (use parse_exr_multipart_deep_tiled_ripmap)"
+                            .to_string(),
+                    ));
+                }
                 if mode != 0x00 {
                     return Err(ExrError::unsupported(format!(
                         "multi-part deep tiled part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
-                         (only 0x00 = ONE_LEVEL + ROUND_DOWN supported — RIPMAP multi-part deep is a followup)"
+                         (only 0x00 = ONE_LEVEL + ROUND_DOWN, 0x01 = MIPMAP_LEVELS + ROUND_DOWN, \
+                         and 0x02 = RIPMAP_LEVELS + ROUND_DOWN currently supported)"
                     )));
                 }
                 if xs == 0 || ys == 0 {
@@ -4887,10 +4895,25 @@ pub fn encode_exr_deep_tiled_ripmap(input: &DeepRipmapTiledInput) -> Result<Vec<
 /// round-208 MIPMAP deep-tiled reader, and the round-124 flat RIPMAP
 /// convention) for robustness against zero-filled offset tables.
 pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage> {
+    // Peek the multipart bit before falling into parse_header_allow_deep
+    // (which would otherwise route through parse_header's generic
+    // multipart-rejection error and obscure the right entry point).
+    if bytes.len() >= 8 {
+        let v = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let vf_peek = VersionField::from_u32(v);
+        if vf_peek.multipart {
+            return Err(ExrError::unsupported(
+                "multi-part deep tiled RIPMAP EXR \
+                 (use parse_exr_multipart_deep_tiled_ripmap)"
+                    .to_string(),
+            ));
+        }
+    }
     let header = parse_header_allow_deep(bytes)?;
     if header.version.multipart {
         return Err(ExrError::unsupported(
-            "multi-part deep tiled RIPMAP EXR (multi-part RIPMAP deep tiled is a followup)"
+            "multi-part deep tiled RIPMAP EXR \
+             (use parse_exr_multipart_deep_tiled_ripmap)"
                 .to_string(),
         ));
     }
@@ -6048,12 +6071,20 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
                 let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
                 let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
                 let mode = data[8];
+                if (mode & 0x0F) == 0x02 {
+                    return Err(ExrError::unsupported(format!(
+                        "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                         (RIPMAP_LEVELS multi-part deep tiled routes through \
+                         parse_exr_multipart_deep_tiled_ripmap)"
+                    )));
+                }
                 if mode != 0x01 {
                     return Err(ExrError::unsupported(format!(
                         "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
                          (parse_exr_multipart_deep_tiled_mipmap requires mode=0x01 = \
                          MIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
-                         parse_exr_multipart_deep_tiled, multi-part RIPMAP deep is a followup)"
+                         parse_exr_multipart_deep_tiled, RIPMAP_LEVELS through \
+                         parse_exr_multipart_deep_tiled_ripmap)"
                     )));
                 }
                 if xs == 0 || ys == 0 {
@@ -6425,6 +6456,1131 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
             tile_y: ps.tile_y,
             channels: ps.channels,
             levels: levels_out,
+            attributes: ps.attributes,
+        });
+    }
+    Ok(out_parts)
+}
+
+// ---------------------------------------------------------------------
+// Round 227: multi-part deep tiled RIPMAP_LEVELS.
+//
+// Composes the round-181 multi-part deep-tiled chunk shape (`i32
+// part_number` prefix + `tx, ty, lvlx, lvly` + 3 u64 sizes + per-tile
+// cumulative-inclusive offset table + non-interleaved channel-major
+// sample data) with the round-214 single-part deep-tiled RIPMAP
+// iteration order: per part, chunks walk the `(nx × ny)` grid
+// `lvly`-outer / `lvlx`-inner, and within each cell INCREASING_Y
+// row-major (ty outer, tx inner). The chunk header carries the
+// explicit `(lvlx, lvly)` pair (axes independent per RIPMAP).
+//
+// Per-part `chunkCount` = sum over `nx * ny` cells of
+// `ceil(cell_w / tile_x) * ceil(cell_h / tile_y)`; cell `(lvlx, lvly)`
+// has dimensions
+// `(mipmap_level_dim(level0_w, lvlx), mipmap_level_dim(level0_h, lvly))`.
+//
+// Version-field bits: `non_image | multipart` (0x800 | 0x1000); the
+// `single_tile` (0x200) bit is NOT set — the `tiles[tiledesc,
+// mode=0x02]` attribute + `type="deeptile"` carry the
+// RIPMAP-deep signal (mirrors the round-220 multi-part deep MIPMAP
+// writer's discipline).
+//
+// Compression: NONE / RLE / ZIPS (deep ZIP rejected to match the
+// reference `exrinfo` validator and the round-130 / 181 / 208 / 214 /
+// 220 deep-tiled writers).
+//
+// ROUND_DOWN only. This is the final piece of the deep-tiled matrix.
+// ---------------------------------------------------------------------
+
+/// One part of a multi-part deep-tiled RIPMAP_LEVELS file, for input to
+/// [`encode_exr_multipart_deep_tiled_ripmap`].
+///
+/// `name` is mandatory and must be unique across all parts. `grid` is
+/// the full ROUND_DOWN reduction grid, indexed `grid[lvly][lvlx]`; row
+/// count must equal `mipmap_level_count(level0_h, false)` and every row
+/// must have `mipmap_level_count(level0_w, false)` cells. Cell `(lvlx,
+/// lvly)` has dimensions
+/// `(mipmap_level_dim(level0_w, lvlx), mipmap_level_dim(level0_h, lvly))`.
+pub struct MultipartDeepRipmapTiledPart<'a> {
+    /// Part name (must be unique across all parts in the file).
+    pub name: String,
+    /// Tile pixel dimensions. Both must be > 0; edge tiles store only
+    /// the valid pixel rectangle.
+    pub tile_x: u32,
+    pub tile_y: u32,
+    /// Channels in alphabetical order (sub-sampled channels not
+    /// supported on the deep path).
+    pub channels: Vec<Channel>,
+    /// Grid indexed `grid[lvly][lvlx]`.
+    pub grid: Vec<Vec<DeepRipmapTiledLevelInput<'a>>>,
+    pub compression: Compression,
+}
+
+/// One part of a multi-part deep-tiled RIPMAP_LEVELS file, returned
+/// from [`parse_exr_multipart_deep_tiled_ripmap`].
+///
+/// Pixel data is materialised per cell into the same flat layout used
+/// by [`DeepRipmapTiledImage::grid`]; the tile-grid structure is fully
+/// reassembled into row-major pixel coordinates before return.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeepRipmapTiledPart {
+    pub name: String,
+    pub data_window: Box2i,
+    pub display_window: Box2i,
+    pub line_order: LineOrder,
+    pub compression: Compression,
+    pub tile_x: u32,
+    pub tile_y: u32,
+    pub channels: Vec<Channel>,
+    /// `grid[lvly][lvlx]` — outer index is the y-level (0..ny-1), inner
+    /// is the x-level (0..nx-1).
+    pub grid: Vec<Vec<DeepTiledRipmapCell>>,
+    pub attributes: Vec<Attribute>,
+}
+
+impl DeepRipmapTiledPart {
+    pub fn width(&self) -> u32 {
+        self.data_window.width()
+    }
+    pub fn height(&self) -> u32 {
+        self.data_window.height()
+    }
+    /// `(nx, ny)` — count of x-levels and y-levels in the grid.
+    pub fn level_counts(&self) -> (u32, u32) {
+        let ny = self.grid.len() as u32;
+        let nx = if ny == 0 {
+            0
+        } else {
+            self.grid[0].len() as u32
+        };
+        (nx, ny)
+    }
+}
+
+/// Encode a multi-part `type="deeptile"` RIPMAP_LEVELS deep-tiled EXR
+/// (version-field bits 0x1800).
+///
+/// Each part is validated independently (alphabetical channel order,
+/// per-cell dimensions match the ROUND_DOWN 2-D reduction grid, grid
+/// row / column count match `mipmap_level_count(level0_h, false)` /
+/// `mipmap_level_count(level0_w, false)`, per-pixel sample counts,
+/// per-channel sample totals, compression in {NONE, RLE, ZIPS}, unique
+/// non-empty name, no sub-sampling, tile dimensions > 0). Tile chunks
+/// within each part walk the grid `lvly` outer / `lvlx` inner and within
+/// each cell emit `ty` outer / `tx` inner; part chunks are concatenated
+/// in part-order downstream of the concatenated per-part offset tables.
+///
+/// Self-roundtrips through [`parse_exr_multipart_deep_tiled_ripmap`].
+pub fn encode_exr_multipart_deep_tiled_ripmap(
+    parts: &[MultipartDeepRipmapTiledPart],
+) -> Result<Vec<u8>> {
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "encode_exr_multipart_deep_tiled_ripmap: at least one part required".to_string(),
+        ));
+    }
+
+    // ---- Per-part validation. ----
+    for (i, p) in parts.iter().enumerate() {
+        if p.name.is_empty() {
+            return Err(ExrError::invalid(format!(
+                "deep ripmap tiled part {i}: empty name"
+            )));
+        }
+        for (j, other) in parts.iter().enumerate() {
+            if j != i && other.name == p.name {
+                return Err(ExrError::invalid(format!(
+                    "duplicate deep ripmap tiled part name '{}' (parts {i} and {j})",
+                    p.name
+                )));
+            }
+        }
+        if !matches!(
+            p.compression,
+            Compression::None | Compression::Rle | Compression::Zips
+        ) {
+            return Err(ExrError::unsupported(format!(
+                "deep ripmap tiled part '{}' compression {:?} (reference encoder \
+                 accepts only NONE/RLE/ZIPS for deep — ZIP rejected by exrinfo \
+                 with EXR_ERR_INVALID_ATTR)",
+                p.name, p.compression
+            )));
+        }
+        if p.tile_x == 0 || p.tile_y == 0 {
+            return Err(ExrError::invalid(format!(
+                "deep ripmap tiled part '{}': tile size {}×{} must both be > 0",
+                p.name, p.tile_x, p.tile_y
+            )));
+        }
+        if p.grid.is_empty() || p.grid[0].is_empty() {
+            return Err(ExrError::invalid(format!(
+                "deep ripmap tiled part '{}': grid must have at least one cell",
+                p.name
+            )));
+        }
+        for ch in &p.channels {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "deep ripmap tiled part '{}': sub-sampled channel '{}' \
+                     (deep tiled path requires 1×1 sampling)",
+                    p.name, ch.name
+                )));
+            }
+        }
+        for win in p.channels.windows(2) {
+            if win[0].name >= win[1].name {
+                return Err(ExrError::invalid(format!(
+                    "deep ripmap tiled part '{}': channels not alphabetical: '{}' >= '{}'",
+                    p.name, win[0].name, win[1].name
+                )));
+            }
+        }
+        // Level-(0,0) carries the full-resolution dimensions.
+        let level0_w = p.grid[0][0].width;
+        let level0_h = p.grid[0][0].height;
+        if level0_w == 0 || level0_h == 0 {
+            return Err(ExrError::invalid(format!(
+                "deep ripmap tiled part '{}': level-(0,0) {level0_w}×{level0_h} must be > 0",
+                p.name
+            )));
+        }
+        let nx_expected = crate::decoder::mipmap_level_count(level0_w, false);
+        let ny_expected = crate::decoder::mipmap_level_count(level0_h, false);
+        if p.grid.len() as u32 != ny_expected {
+            return Err(ExrError::invalid(format!(
+                "deep ripmap tiled part '{}': grid has {} rows (y-levels), expected {ny_expected} \
+                 for height={level0_h} ROUND_DOWN",
+                p.name,
+                p.grid.len()
+            )));
+        }
+        for (lvly, row) in p.grid.iter().enumerate() {
+            if row.len() as u32 != nx_expected {
+                return Err(ExrError::invalid(format!(
+                    "deep ripmap tiled part '{}': grid row lvly={lvly} has {} cells (x-levels), \
+                     expected {nx_expected} for width={level0_w} ROUND_DOWN",
+                    p.name,
+                    row.len()
+                )));
+            }
+        }
+        for (lvly, row) in p.grid.iter().enumerate() {
+            let want_h = crate::decoder::mipmap_level_dim(level0_h, lvly as u32, false);
+            for (lvlx, cell) in row.iter().enumerate() {
+                let want_w = crate::decoder::mipmap_level_dim(level0_w, lvlx as u32, false);
+                if cell.width != want_w || cell.height != want_h {
+                    return Err(ExrError::invalid(format!(
+                        "deep ripmap tiled part '{}': cell (lvlx={lvlx}, lvly={lvly}) is {}×{} \
+                         but spec requires {want_w}×{want_h} (ROUND_DOWN)",
+                        p.name, cell.width, cell.height
+                    )));
+                }
+                let need_pixels = (cell.width as usize) * (cell.height as usize);
+                if cell.samples_per_pixel.len() != need_pixels {
+                    return Err(ExrError::invalid(format!(
+                        "deep ripmap tiled part '{}': cell (lvlx={lvlx}, lvly={lvly}) \
+                         samples_per_pixel len {} != {}*{} = {need_pixels}",
+                        p.name,
+                        cell.samples_per_pixel.len(),
+                        cell.width,
+                        cell.height
+                    )));
+                }
+                if cell.channel_samples.len() != p.channels.len() {
+                    return Err(ExrError::invalid(format!(
+                        "deep ripmap tiled part '{}': cell (lvlx={lvlx}, lvly={lvly}) has \
+                         {} channel slices but {} channels declared",
+                        p.name,
+                        cell.channel_samples.len(),
+                        p.channels.len()
+                    )));
+                }
+                let cell_total: u64 = cell.samples_per_pixel.iter().map(|&n| n as u64).sum();
+                for (ch, slc) in p.channels.iter().zip(cell.channel_samples.iter()) {
+                    if slc.len() != cell_total as usize {
+                        return Err(ExrError::invalid(format!(
+                            "deep ripmap tiled part '{}': cell (lvlx={lvlx}, lvly={lvly}) channel \
+                             '{}' sample slice len {} != cell total {cell_total}",
+                            p.name,
+                            ch.name,
+                            slc.len()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Per-part chunk-count + max-samples summary. ----
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+    for p in parts {
+        let mut cc = 0usize;
+        for row in &p.grid {
+            for cell in row {
+                let tx = cell.width.div_ceil(p.tile_x);
+                let ty = cell.height.div_ceil(p.tile_y);
+                cc += (tx as usize) * (ty as usize);
+            }
+        }
+        chunk_counts.push(cc);
+    }
+
+    // ---- Per-part header byte blocks. ----
+    let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
+    for (i, p) in parts.iter().enumerate() {
+        let max_samples = p
+            .grid
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|cell| cell.samples_per_pixel.iter().copied())
+            .max()
+            .unwrap_or(0) as i32;
+        let attrs = build_deep_ripmap_tiled_part_attrs(p, chunk_counts[i] as i32, max_samples);
+        let mut hb = Vec::with_capacity(256);
+        for a in &attrs {
+            hb.extend_from_slice(a.name.as_bytes());
+            hb.push(0);
+            let (type_name, payload) = encode_attribute_value(&a.value);
+            hb.extend_from_slice(type_name.as_bytes());
+            hb.push(0);
+            hb.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+            hb.extend_from_slice(&payload);
+        }
+        header_byte_blocks.push(hb);
+    }
+
+    // ---- Stitch magic + version + headers + double-NUL terminator. ----
+    let version = VersionField::from_u32(2 | 0x800 | 0x1000);
+    let mut out: Vec<u8> = Vec::with_capacity(2048);
+    out.extend_from_slice(&EXR_MAGIC.to_le_bytes());
+    out.extend_from_slice(&version.to_u32().to_le_bytes());
+    for hb in &header_byte_blocks {
+        out.extend_from_slice(hb);
+        out.push(0); // per-part header terminator
+    }
+    out.push(0); // double-NUL = end-of-all-headers
+
+    // ---- Build per-tile payloads. ----
+    struct TileBlob {
+        part_idx: u32,
+        tx: u32,
+        ty: u32,
+        lvlx: u32,
+        lvly: u32,
+        packed_table: Vec<u8>,
+        packed_data: Vec<u8>,
+        unpacked_data_len: u64,
+    }
+    let mut tiles_by_part: Vec<Vec<TileBlob>> = Vec::with_capacity(parts.len());
+
+    for (part_idx, p) in parts.iter().enumerate() {
+        let bpp_total: usize = p
+            .channels
+            .iter()
+            .map(|c| c.pixel_type.bytes_per_sample())
+            .sum();
+
+        let mut part_tiles: Vec<TileBlob> = Vec::with_capacity(chunk_counts[part_idx]);
+        for (lvly_idx, row) in p.grid.iter().enumerate() {
+            for (lvlx_idx, cell) in row.iter().enumerate() {
+                let lvlx_u = lvlx_idx as u32;
+                let lvly_u = lvly_idx as u32;
+                let lw = cell.width as usize;
+                let tx_count = cell.width.div_ceil(p.tile_x);
+                let ty_count = cell.height.div_ceil(p.tile_y);
+
+                // Per-cell cumulative-exclusive per-pixel sample starts
+                // so we can slice each channel's per-cell samples by
+                // pixel index.
+                let pixel_sample_starts: Vec<u64> = {
+                    let mut v = Vec::with_capacity(lw * cell.height as usize + 1);
+                    v.push(0u64);
+                    let mut acc: u64 = 0;
+                    for &n in cell.samples_per_pixel {
+                        acc += n as u64;
+                        v.push(acc);
+                    }
+                    v
+                };
+
+                for ty in 0..ty_count {
+                    for tx in 0..tx_count {
+                        let x0 = tx * p.tile_x;
+                        let y0 = ty * p.tile_y;
+                        let x1 = (x0 + p.tile_x).min(cell.width);
+                        let y1 = (y0 + p.tile_y).min(cell.height);
+                        let tw = (x1 - x0) as usize;
+                        let th = (y1 - y0) as usize;
+                        let entries = tw * th;
+
+                        let mut table_bytes = Vec::with_capacity(entries * 4);
+                        let mut tile_spp: Vec<u32> = Vec::with_capacity(entries);
+                        for r in 0..th {
+                            let dst_y = y0 as usize + r;
+                            let mut row_acc: i32 = 0;
+                            for c in 0..tw {
+                                let dst_x = x0 as usize + c;
+                                let n = cell.samples_per_pixel[dst_y * lw + dst_x];
+                                tile_spp.push(n);
+                                row_acc = row_acc.checked_add(n as i32).ok_or_else(|| {
+                                    ExrError::invalid(format!(
+                                        "deep ripmap tiled part '{}' tile (lvlx={lvlx_idx}, \
+                                         lvly={lvly_idx}, tx={tx}, ty={ty}) row {r}: \
+                                         cumulative offset overflows i32",
+                                        p.name
+                                    ))
+                                })?;
+                                table_bytes.extend_from_slice(&row_acc.to_le_bytes());
+                            }
+                        }
+
+                        let tile_total_samples: u64 = tile_spp.iter().map(|&n| n as u64).sum();
+                        let mut sample_bytes: Vec<u8> =
+                            Vec::with_capacity(tile_total_samples as usize * bpp_total);
+                        for (ch_idx, ch) in p.channels.iter().enumerate() {
+                            let plane = cell.channel_samples[ch_idx];
+                            for r in 0..th {
+                                let dst_y = y0 as usize + r;
+                                for c in 0..tw {
+                                    let dst_x = x0 as usize + c;
+                                    let pi = dst_y * lw + dst_x;
+                                    let s_start = pixel_sample_starts[pi] as usize;
+                                    let s_end = pixel_sample_starts[pi + 1] as usize;
+                                    for &v in &plane[s_start..s_end] {
+                                        match ch.pixel_type {
+                                            PixelType::Half => sample_bytes.extend_from_slice(
+                                                &crate::half::f32_to_half(v).to_le_bytes(),
+                                            ),
+                                            PixelType::Float => {
+                                                sample_bytes.extend_from_slice(&v.to_le_bytes())
+                                            }
+                                            PixelType::Uint => {
+                                                let u = if v.is_nan() || v < 0.0 {
+                                                    0u32
+                                                } else if v >= (u32::MAX as f32) {
+                                                    u32::MAX
+                                                } else {
+                                                    (v + 0.5) as u32
+                                                };
+                                                sample_bytes.extend_from_slice(&u.to_le_bytes());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let packed_table = compress_buffer(&table_bytes, p.compression)?;
+                        let packed_data = compress_buffer(&sample_bytes, p.compression)?;
+                        part_tiles.push(TileBlob {
+                            part_idx: part_idx as u32,
+                            tx,
+                            ty,
+                            lvlx: lvlx_u,
+                            lvly: lvly_u,
+                            packed_table,
+                            packed_data,
+                            unpacked_data_len: sample_bytes.len() as u64,
+                        });
+                    }
+                }
+            }
+        }
+        tiles_by_part.push(part_tiles);
+    }
+
+    // ---- Compute absolute offsets after concatenated offset tables. ----
+    // Per-tile-chunk header on disk:
+    //   i32 part_number + i32 tx + i32 ty + i32 lvlx + i32 lvly
+    //   + u64 packed_table + u64 packed_data + u64 unpacked_data
+    // = 4*5 + 24 = 44 bytes
+    let header_bytes_so_far = out.len();
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let offset_table_bytes = total_chunks * 8;
+    let chunks_start = header_bytes_so_far + offset_table_bytes;
+
+    let mut per_part_table: Vec<Vec<u64>> = vec![Vec::new(); parts.len()];
+    let mut running = chunks_start;
+    for part_tiles in &tiles_by_part {
+        for c in part_tiles {
+            per_part_table[c.part_idx as usize].push(running as u64);
+            running += 44 + c.packed_table.len() + c.packed_data.len();
+        }
+    }
+
+    for table in &per_part_table {
+        for &o in table {
+            out.extend_from_slice(&o.to_le_bytes());
+        }
+    }
+
+    for part_tiles in &tiles_by_part {
+        for c in part_tiles {
+            out.extend_from_slice(&(c.part_idx as i32).to_le_bytes());
+            out.extend_from_slice(&(c.tx as i32).to_le_bytes());
+            out.extend_from_slice(&(c.ty as i32).to_le_bytes());
+            out.extend_from_slice(&(c.lvlx as i32).to_le_bytes());
+            out.extend_from_slice(&(c.lvly as i32).to_le_bytes());
+            out.extend_from_slice(&(c.packed_table.len() as u64).to_le_bytes());
+            out.extend_from_slice(&(c.packed_data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&c.unpacked_data_len.to_le_bytes());
+            out.extend_from_slice(&c.packed_table);
+            out.extend_from_slice(&c.packed_data);
+        }
+    }
+
+    Ok(out)
+}
+
+/// Per-part attribute set for a multipart deep-tiled RIPMAP part.
+fn build_deep_ripmap_tiled_part_attrs(
+    part: &MultipartDeepRipmapTiledPart,
+    chunk_count: i32,
+    max_samples: i32,
+) -> Vec<Attribute> {
+    let width = part.grid[0][0].width;
+    let height = part.grid[0][0].height;
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (width - 1) as i32,
+        y_max: (height - 1) as i32,
+    };
+    let mut tiledesc = Vec::with_capacity(9);
+    tiledesc.extend_from_slice(&part.tile_x.to_le_bytes());
+    tiledesc.extend_from_slice(&part.tile_y.to_le_bytes());
+    tiledesc.push(0x02); // RIPMAP_LEVELS + ROUND_DOWN
+    vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(part.channels.clone()),
+        },
+        Attribute {
+            name: "chunkCount".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: chunk_count.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(part.compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "maxSamplesPerPixel".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: max_samples.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "name".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: part.name.as_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "tiles".to_string(),
+            value: AttributeValue::Other {
+                type_name: "tiledesc".to_string(),
+                data: tiledesc,
+            },
+        },
+        Attribute {
+            name: "type".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"deeptile".to_vec(),
+            },
+        },
+        Attribute {
+            name: "version".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: 1i32.to_le_bytes().to_vec(),
+            },
+        },
+    ]
+}
+
+/// Parse a multi-part `type="deeptile"` RIPMAP_LEVELS deep-tiled EXR
+/// (version-field bits 0x1800) back into a `Vec<DeepRipmapTiledPart>`.
+///
+/// Every part must carry `type = "deeptile"`, the standard per-part
+/// required attributes plus the deep-specific `version=1` +
+/// `maxSamplesPerPixel`, and a `tiles[tiledesc]` attribute with
+/// `mode == 0x02` (RIPMAP_LEVELS + ROUND_DOWN).
+///
+/// On-disk layout mirrors the single-part deep-tiled RIPMAP writer per
+/// part, with the chunk record prefixed by an `i32 part_number`.
+/// Compression: NONE / RLE / ZIPS only. The reader uses a linear chunk
+/// scan (matching the multi-part deep-tiled ONE_LEVEL / MIPMAP readers)
+/// for robustness against zero-filled offset tables produced by
+/// `exrmultipart -combine`.
+pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRipmapTiledPart>> {
+    let parts = parse_multipart_headers_allow_deep(bytes)?;
+    if parts.is_empty() {
+        return Err(ExrError::invalid(
+            "multi-part deep tiled RIPMAP file has no parts".to_string(),
+        ));
+    }
+    for (i, part) in parts.iter().enumerate() {
+        let part_type = find_string_attr(&part.attributes, "type").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP: part {i} missing required 'type' attribute"
+            ))
+        })?;
+        if part_type != "deeptile" {
+            return Err(ExrError::unsupported(format!(
+                "multi-part deep tiled RIPMAP: part {i} type='{part_type}' \
+                 (only 'deeptile' supported)"
+            )));
+        }
+    }
+    if !parts[0].version.non_image {
+        return Err(ExrError::invalid(
+            "parse_exr_multipart_deep_tiled_ripmap called on a multi-part file without \
+             the non_image (deep) version bit set"
+                .to_string(),
+        ));
+    }
+    if !parts[0].version.multipart {
+        return Err(ExrError::invalid(
+            "parse_exr_multipart_deep_tiled_ripmap called on a non-multipart EXR".to_string(),
+        ));
+    }
+
+    /// Per-cell metadata for a part.
+    struct CellMeta {
+        width: u32,
+        height: u32,
+        tx_count: u32,
+        ty_count: u32,
+    }
+    /// Per-tile decoded channel samples within a cell.
+    struct TileDecoded {
+        tx: u32,
+        ty: u32,
+        tw: u32,
+        th: u32,
+        channel_samples: Vec<Vec<f32>>,
+    }
+    struct PartState {
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        channels: Vec<Channel>,
+        attributes: Vec<Attribute>,
+        chunk_count: usize,
+        tile_x: u32,
+        tile_y: u32,
+        nx: u32,
+        ny: u32,
+        // metas[lvly][lvlx]
+        metas: Vec<Vec<CellMeta>>,
+        // cell_spp[lvly][lvlx] is a flat `width*height` buffer.
+        cell_spp: Vec<Vec<Vec<u32>>>,
+        // cell_tiles[lvly][lvlx][ty * tx_count + tx]
+        cell_tiles: Vec<Vec<Vec<Option<TileDecoded>>>>,
+    }
+
+    let mut state: Vec<PartState> = Vec::with_capacity(parts.len());
+    let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
+
+    for (i, part) in parts.iter().enumerate() {
+        let name = find_string_attr(&part.attributes, "name").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} missing required 'name' attribute"
+            ))
+        })?;
+        let chunk_count = crate::decoder::find_chunk_count(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'chunkCount' attribute"
+            ))
+        })?;
+        let data_window = find_box2i(&part.attributes, "dataWindow").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'dataWindow' attribute"
+            ))
+        })?;
+        let display_window = find_box2i(&part.attributes, "displayWindow").unwrap_or(data_window);
+        let line_order =
+            find_line_order(&part.attributes, "lineOrder").unwrap_or(LineOrder::IncreasingY);
+        let compression = find_compression(&part.attributes, "compression").ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'compression' attribute"
+            ))
+        })?;
+        if !matches!(
+            compression,
+            Compression::None | Compression::Rle | Compression::Zips
+        ) {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}') uses compression \
+                 {compression:?} (only NONE/RLE/ZIPS accepted for deep)"
+            )));
+        }
+        let channels = find_channels(&part.attributes).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'channels' attribute"
+            ))
+        })?;
+        let mut sorted_channels = channels.clone();
+        sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+        for ch in &sorted_channels {
+            if ch.x_sampling != 1 || ch.y_sampling != 1 {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part deep tiled RIPMAP part {i} ('{name}'): sub-sampled channel '{}' \
+                     (tiled files require 1×1 sampling)",
+                    ch.name
+                )));
+            }
+        }
+        let tile_attr = part
+            .attributes
+            .iter()
+            .find(|a| a.name == "tiles")
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'tiles' attribute"
+                ))
+            })?;
+        let (tile_x, tile_y) = match &tile_attr.value {
+            AttributeValue::Other { type_name, data }
+                if type_name == "tiledesc" && data.len() == 9 =>
+            {
+                let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
+                let mode = data[8];
+                if mode != 0x02 {
+                    return Err(ExrError::unsupported(format!(
+                        "multi-part deep tiled RIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                         (parse_exr_multipart_deep_tiled_ripmap requires mode=0x02 = \
+                         RIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
+                         parse_exr_multipart_deep_tiled, MIPMAP through \
+                         parse_exr_multipart_deep_tiled_mipmap)"
+                    )));
+                }
+                if xs == 0 || ys == 0 {
+                    return Err(ExrError::invalid(format!(
+                        "multi-part deep tiled RIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
+                         must both be > 0"
+                    )));
+                }
+                (xs, ys)
+            }
+            _ => {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep tiled RIPMAP part {i} ('{name}'): tiles attribute has \
+                     unexpected shape: {:?}",
+                    tile_attr.value
+                )));
+            }
+        };
+        let width = data_window.width();
+        let height = data_window.height();
+        if width == 0 || height == 0 {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}'): dataWindow {width}×{height} \
+                 must be > 0"
+            )));
+        }
+        let nx = crate::decoder::mipmap_level_count(width, false);
+        let ny = crate::decoder::mipmap_level_count(height, false);
+        let mut metas: Vec<Vec<CellMeta>> = Vec::with_capacity(ny as usize);
+        let mut expected_chunks: usize = 0;
+        for lvly in 0..ny {
+            let lh = crate::decoder::mipmap_level_dim(height, lvly, false);
+            let mut row: Vec<CellMeta> = Vec::with_capacity(nx as usize);
+            for lvlx in 0..nx {
+                let lw = crate::decoder::mipmap_level_dim(width, lvlx, false);
+                let txc = lw.div_ceil(tile_x);
+                let tyc = lh.div_ceil(tile_y);
+                expected_chunks += (txc as usize) * (tyc as usize);
+                row.push(CellMeta {
+                    width: lw,
+                    height: lh,
+                    tx_count: txc,
+                    ty_count: tyc,
+                });
+            }
+            metas.push(row);
+        }
+        if chunk_count != expected_chunks {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}'): chunkCount={chunk_count} \
+                 disagrees with grid total {expected_chunks} ({nx}×{ny} cells, \
+                 tile {tile_x}×{tile_y})"
+            )));
+        }
+        let cell_spp: Vec<Vec<Vec<u32>>> = metas
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|m| vec![0u32; (m.width as usize) * (m.height as usize)])
+                    .collect()
+            })
+            .collect();
+        let cell_tiles: Vec<Vec<Vec<Option<TileDecoded>>>> = metas
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|m| {
+                        (0..(m.tx_count as usize) * (m.ty_count as usize))
+                            .map(|_| None)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        chunk_counts.push(chunk_count);
+        state.push(PartState {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            channels: sorted_channels,
+            attributes: part.attributes.clone(),
+            chunk_count,
+            tile_x,
+            tile_y,
+            nx,
+            ny,
+            metas,
+            cell_spp,
+            cell_tiles,
+        });
+    }
+
+    // Skip past concatenated offset tables.
+    let total_chunks: usize = chunk_counts.iter().sum();
+    let tables_start = parts.last().unwrap().end_offset;
+    let chunk_scan_start = tables_start + total_chunks * 8;
+    if chunk_scan_start > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "multi-part deep tiled RIPMAP offset tables run past EOF (need {chunk_scan_start}, have {})",
+            bytes.len()
+        )));
+    }
+
+    let mut scan_pos = chunk_scan_start;
+    for _ in 0..total_chunks {
+        // 5 i32 + 3 u64 = 44 bytes of chunk header.
+        if scan_pos + 44 > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP: unexpected EOF at chunk scan position {scan_pos}"
+            )));
+        }
+        let part_num = i32::from_le_bytes(bytes[scan_pos..scan_pos + 4].try_into().unwrap());
+        let tx = i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+        let ty = i32::from_le_bytes(bytes[scan_pos + 8..scan_pos + 12].try_into().unwrap());
+        let lvlx = i32::from_le_bytes(bytes[scan_pos + 12..scan_pos + 16].try_into().unwrap());
+        let lvly = i32::from_le_bytes(bytes[scan_pos + 16..scan_pos + 20].try_into().unwrap());
+        let packed_table =
+            u64::from_le_bytes(bytes[scan_pos + 20..scan_pos + 28].try_into().unwrap()) as usize;
+        let packed_data =
+            u64::from_le_bytes(bytes[scan_pos + 28..scan_pos + 36].try_into().unwrap()) as usize;
+        let unpacked_data =
+            u64::from_le_bytes(bytes[scan_pos + 36..scan_pos + 44].try_into().unwrap()) as usize;
+        if part_num < 0 || part_num as usize >= state.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP chunk at {scan_pos}: part_number={part_num} \
+                 out of range 0..{}",
+                state.len()
+            )));
+        }
+        let part_idx = part_num as usize;
+        let ps = &mut state[part_idx];
+        if lvlx < 0 || (lvlx as u32) >= ps.nx {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): chunk lvlx={lvlx} outside \
+                 [0, {})",
+                ps.name, ps.nx
+            )));
+        }
+        if lvly < 0 || (lvly as u32) >= ps.ny {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): chunk lvly={lvly} outside \
+                 [0, {})",
+                ps.name, ps.ny
+            )));
+        }
+        let lvlx_u = lvlx as u32;
+        let lvly_u = lvly as u32;
+        let meta_tx_count = ps.metas[lvly_u as usize][lvlx_u as usize].tx_count;
+        let meta_ty_count = ps.metas[lvly_u as usize][lvlx_u as usize].ty_count;
+        let meta_width = ps.metas[lvly_u as usize][lvlx_u as usize].width;
+        let meta_height = ps.metas[lvly_u as usize][lvlx_u as usize].height;
+        if tx < 0 || ty < 0 || (tx as u32) >= meta_tx_count || (ty as u32) >= meta_ty_count {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): tx={tx} ty={ty} outside \
+                 cell (lvlx={lvlx_u}, lvly={lvly_u})'s grid {}×{}",
+                ps.name, meta_tx_count, meta_ty_count
+            )));
+        }
+        let tx_u = tx as u32;
+        let ty_u = ty as u32;
+        let x0 = tx_u * ps.tile_x;
+        let y0 = ty_u * ps.tile_y;
+        let x1 = (x0 + ps.tile_x).min(meta_width);
+        let y1 = (y0 + ps.tile_y).min(meta_height);
+        let tw = x1 - x0;
+        let th = y1 - y0;
+        let full_tw = ps.tile_x as usize;
+        let full_th = ps.tile_y as usize;
+        let entries = (tw * th) as usize;
+        let full_entries = full_tw * full_th;
+        let row_stride;
+        let unpacked_table_size;
+        if ps.compression == Compression::None && packed_table == full_entries * 4 {
+            unpacked_table_size = full_entries * 4;
+            row_stride = full_tw;
+        } else {
+            unpacked_table_size = entries * 4;
+            row_stride = tw as usize;
+        }
+
+        let table_start = scan_pos + 44;
+        let table_end = table_start + packed_table;
+        let data_start = table_end;
+        let data_end = data_start + packed_data;
+        if data_end > bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): chunk payload runs past EOF",
+                ps.name
+            )));
+        }
+
+        let table_bytes = decompress_buffer(
+            &bytes[table_start..table_end],
+            unpacked_table_size,
+            ps.compression,
+        )?;
+        let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
+        for ch in table_bytes.chunks_exact(4) {
+            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        }
+        if cumulative_flat.len() != unpacked_table_size / 4 {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): offset-table size mismatch \
+                 ({} != {})",
+                ps.name,
+                cumulative_flat.len(),
+                unpacked_table_size / 4
+            )));
+        }
+
+        let mut tile_total_samples: u64 = 0;
+        let spp_buf = &mut ps.cell_spp[lvly_u as usize][lvlx_u as usize];
+        let lw = meta_width as usize;
+        for r in 0..th as usize {
+            let row_base = r * row_stride;
+            let row_slice = &cumulative_flat[row_base..row_base + tw as usize];
+            let per_pixel = per_pixel_from_cumulative(row_slice)?;
+            let dst_y = y0 as usize + r;
+            let dst_base = dst_y * lw + x0 as usize;
+            for (i, &n) in per_pixel.iter().enumerate() {
+                spp_buf[dst_base + i] = n;
+                tile_total_samples += n as u64;
+            }
+        }
+
+        let block_bpp: usize = ps
+            .channels
+            .iter()
+            .map(|c| c.pixel_type.bytes_per_sample())
+            .sum();
+        let expected_unpacked = tile_total_samples as usize * block_bpp;
+        if expected_unpacked != unpacked_data {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): derived \
+                 unpacked_data={expected_unpacked} disagrees with header \
+                 unpacked_data={unpacked_data}",
+                ps.name
+            )));
+        }
+        let sample_bytes =
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?;
+
+        let mut p = 0usize;
+        let channel_types: Vec<(PixelType, String)> = ps
+            .channels
+            .iter()
+            .map(|c| (c.pixel_type, c.name.clone()))
+            .collect();
+        let mut per_channel: Vec<Vec<f32>> = (0..channel_types.len()).map(|_| Vec::new()).collect();
+        for (ch_idx, (pixel_type, ch_name)) in channel_types.iter().enumerate() {
+            let bps = pixel_type.bytes_per_sample();
+            let need = tile_total_samples as usize * bps;
+            if p + need > sample_bytes.len() {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep tiled RIPMAP part {part_idx} ('{}'): channel '{ch_name}' \
+                     bytes past payload end",
+                    ps.name
+                )));
+            }
+            for s in 0..(tile_total_samples as usize) {
+                let off = p + s * bps;
+                let v = match pixel_type {
+                    PixelType::Half => crate::half::half_to_f32(u16::from_le_bytes(
+                        sample_bytes[off..off + 2].try_into().unwrap(),
+                    )),
+                    PixelType::Float => {
+                        f32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap())
+                    }
+                    PixelType::Uint => {
+                        let bits =
+                            u32::from_le_bytes(sample_bytes[off..off + 4].try_into().unwrap());
+                        bits as f32
+                    }
+                };
+                per_channel[ch_idx].push(v);
+            }
+            p += need;
+        }
+        if p != sample_bytes.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): consumed {p} of {} payload bytes",
+                ps.name,
+                sample_bytes.len()
+            )));
+        }
+
+        let grid_idx = (ty_u * meta_tx_count + tx_u) as usize;
+        if ps.cell_tiles[lvly_u as usize][lvlx_u as usize][grid_idx].is_some() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): tile (lvlx={lvlx_u}, \
+                 lvly={lvly_u}, tx={tx_u}, ty={ty_u}) appears more than once",
+                ps.name
+            )));
+        }
+        ps.cell_tiles[lvly_u as usize][lvlx_u as usize][grid_idx] = Some(TileDecoded {
+            tx: tx_u,
+            ty: ty_u,
+            tw,
+            th,
+            channel_samples: per_channel,
+        });
+
+        scan_pos = data_end;
+        let _ = ps.chunk_count; // reserved for future bounds checks
+    }
+
+    // Second pass: per part, per cell, reassemble pixel-scan order.
+    let mut out_parts: Vec<DeepRipmapTiledPart> = Vec::with_capacity(state.len());
+    for ps in state {
+        let mut grid_out: Vec<Vec<DeepTiledRipmapCell>> = Vec::with_capacity(ps.ny as usize);
+        for lvly in 0..ps.ny as usize {
+            let mut row_out: Vec<DeepTiledRipmapCell> = Vec::with_capacity(ps.nx as usize);
+            for lvlx in 0..ps.nx as usize {
+                let meta = &ps.metas[lvly][lvlx];
+                for (g_idx, slot) in ps.cell_tiles[lvly][lvlx].iter().enumerate() {
+                    if slot.is_none() {
+                        return Err(ExrError::invalid(format!(
+                            "multi-part deep tiled RIPMAP part '{}': cell (lvlx={lvlx}, \
+                             lvly={lvly}) tile grid missing entry {g_idx}",
+                            ps.name
+                        )));
+                    }
+                }
+                let spp = ps.cell_spp[lvly][lvlx].clone();
+                let total_samples: u64 = spp.iter().map(|&n| n as u64).sum();
+                let mut channel_samples: Vec<Vec<f32>> = (0..ps.channels.len())
+                    .map(|_| Vec::with_capacity(total_samples as usize))
+                    .collect();
+                // Per-tile pixel-start cumulative tables.
+                let mut tile_pixel_starts: Vec<Vec<u64>> =
+                    Vec::with_capacity(ps.cell_tiles[lvly][lvlx].len());
+                for td_opt in &ps.cell_tiles[lvly][lvlx] {
+                    let td = td_opt.as_ref().unwrap();
+                    let x0 = td.tx * ps.tile_x;
+                    let y0 = td.ty * ps.tile_y;
+                    let mut starts = Vec::with_capacity((td.tw * td.th) as usize + 1);
+                    starts.push(0u64);
+                    let mut acc: u64 = 0;
+                    for r in 0..td.th as usize {
+                        for c in 0..td.tw as usize {
+                            let dst_y = y0 as usize + r;
+                            let dst_x = x0 as usize + c;
+                            acc += spp[dst_y * meta.width as usize + dst_x] as u64;
+                            starts.push(acc);
+                        }
+                    }
+                    tile_pixel_starts.push(starts);
+                }
+
+                for y in 0..meta.height as usize {
+                    let ty = (y / ps.tile_y as usize) as u32;
+                    let y_in_tile = y - (ty as usize) * ps.tile_y as usize;
+                    for x in 0..meta.width as usize {
+                        let tx = (x / ps.tile_x as usize) as u32;
+                        let x_in_tile = x - (tx as usize) * ps.tile_x as usize;
+                        let grid_idx = (ty * meta.tx_count + tx) as usize;
+                        let td = ps.cell_tiles[lvly][lvlx][grid_idx].as_ref().unwrap();
+                        let pixel_within_tile = y_in_tile * td.tw as usize + x_in_tile;
+                        let s_start = tile_pixel_starts[grid_idx][pixel_within_tile] as usize;
+                        let s_end = tile_pixel_starts[grid_idx][pixel_within_tile + 1] as usize;
+                        for (ch_idx, dst) in channel_samples
+                            .iter_mut()
+                            .enumerate()
+                            .take(ps.channels.len())
+                        {
+                            dst.extend_from_slice(&td.channel_samples[ch_idx][s_start..s_end]);
+                        }
+                    }
+                }
+
+                row_out.push(DeepTiledRipmapCell {
+                    level_x: lvlx as u32,
+                    level_y: lvly as u32,
+                    width: meta.width,
+                    height: meta.height,
+                    samples_per_pixel: spp,
+                    channel_samples,
+                });
+            }
+            grid_out.push(row_out);
+        }
+
+        out_parts.push(DeepRipmapTiledPart {
+            name: ps.name,
+            data_window: ps.data_window,
+            display_window: ps.display_window,
+            line_order: ps.line_order,
+            compression: ps.compression,
+            tile_x: ps.tile_x,
+            tile_y: ps.tile_y,
+            channels: ps.channels,
+            grid: grid_out,
             attributes: ps.attributes,
         });
     }
@@ -8239,6 +9395,417 @@ mod tests {
             bits & 0x200,
             0,
             "single_tile bit must NOT be set (type='deeptile' carries the signal)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Round 227: multi-part deep tiled RIPMAP_LEVELS tests.
+    // -----------------------------------------------------------------
+
+    #[allow(clippy::type_complexity)]
+    fn build_mp_deep_ripmap_part<'a>(
+        name: &str,
+        w0: u32,
+        h0: u32,
+        grid: &'a [Vec<(Vec<u32>, [Vec<f32>; 4])>],
+        tile_x: u32,
+        tile_y: u32,
+        compression: Compression,
+    ) -> MultipartDeepRipmapTiledPart<'a> {
+        let mut out_grid: Vec<Vec<DeepRipmapTiledLevelInput<'a>>> = Vec::with_capacity(grid.len());
+        for (lvly, row) in grid.iter().enumerate() {
+            let lh = crate::decoder::mipmap_level_dim(h0, lvly as u32, false);
+            let mut out_row: Vec<DeepRipmapTiledLevelInput<'a>> = Vec::with_capacity(row.len());
+            for (lvlx, (spp, planes)) in row.iter().enumerate() {
+                let lw = crate::decoder::mipmap_level_dim(w0, lvlx as u32, false);
+                out_row.push(DeepRipmapTiledLevelInput {
+                    width: lw,
+                    height: lh,
+                    samples_per_pixel: spp,
+                    channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                });
+            }
+            out_grid.push(out_row);
+        }
+        MultipartDeepRipmapTiledPart {
+            name: name.to_string(),
+            tile_x,
+            tile_y,
+            channels: mk_channels_rgba_float(),
+            grid: out_grid,
+            compression,
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn assert_mp_deep_ripmap_part_roundtrip(
+        part: &DeepRipmapTiledPart,
+        expected_name: &str,
+        grid: &[Vec<(Vec<u32>, [Vec<f32>; 4])>],
+    ) {
+        assert_eq!(part.name, expected_name);
+        let (nx, ny) = part.level_counts();
+        assert_eq!(
+            ny as usize,
+            grid.len(),
+            "y-level count mismatch for part {expected_name}"
+        );
+        assert_eq!(
+            nx as usize,
+            grid[0].len(),
+            "x-level count mismatch for part {expected_name}"
+        );
+        for (lvly, row) in grid.iter().enumerate() {
+            for (lvlx, (spp, planes)) in row.iter().enumerate() {
+                let cell = &part.grid[lvly][lvlx];
+                assert_eq!(cell.level_x, lvlx as u32);
+                assert_eq!(cell.level_y, lvly as u32);
+                assert_eq!(
+                    &cell.samples_per_pixel, spp,
+                    "part {expected_name} cell (lvlx={lvlx}, lvly={lvly}) spp mismatch"
+                );
+                for (ch_idx, plane) in planes.iter().enumerate() {
+                    assert_eq!(
+                        &cell.channel_samples[ch_idx], plane,
+                        "part {expected_name} cell (lvlx={lvlx}, lvly={lvly}) ch {ch_idx} sample mismatch"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_two_parts_zips_roundtrip() {
+        let (w0, h0) = (16u32, 16u32);
+        let grid_a = synthetic_deep_ripmap(w0, h0);
+        let grid_b = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![
+            build_mp_deep_ripmap_part("alpha", w0, h0, &grid_a, 8, 8, Compression::Zips),
+            build_mp_deep_ripmap_part("beta", w0, h0, &grid_b, 8, 8, Compression::Zips),
+        ];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled_ripmap(&bytes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_mp_deep_ripmap_part_roundtrip(&read[0], "alpha", &grid_a);
+        assert_mp_deep_ripmap_part_roundtrip(&read[1], "beta", &grid_b);
+        assert_eq!(read[0].width(), w0);
+        assert_eq!(read[0].height(), h0);
+        assert_eq!(read[0].tile_x, 8);
+        assert_eq!(read[0].tile_y, 8);
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_three_parts_mixed_compression_roundtrip() {
+        let (w0, h0) = (16u32, 16u32);
+        let grid_a = synthetic_deep_ripmap(w0, h0);
+        let grid_b = synthetic_deep_ripmap(w0, h0);
+        let grid_c = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![
+            build_mp_deep_ripmap_part("none_part", w0, h0, &grid_a, 8, 8, Compression::None),
+            build_mp_deep_ripmap_part("rle_part", w0, h0, &grid_b, 8, 8, Compression::Rle),
+            build_mp_deep_ripmap_part("zips_part", w0, h0, &grid_c, 8, 8, Compression::Zips),
+        ];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled_ripmap(&bytes).unwrap();
+        assert_eq!(read.len(), 3);
+        assert_mp_deep_ripmap_part_roundtrip(&read[0], "none_part", &grid_a);
+        assert_mp_deep_ripmap_part_roundtrip(&read[1], "rle_part", &grid_b);
+        assert_mp_deep_ripmap_part_roundtrip(&read[2], "zips_part", &grid_c);
+        assert_eq!(read[0].compression, Compression::None);
+        assert_eq!(read[1].compression, Compression::Rle);
+        assert_eq!(read[2].compression, Compression::Zips);
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_edge_tiles_non_power_of_two_roundtrip() {
+        // 13×9 → (nx, ny) = (4, 4). 4×4 tiles exercise edge tiles in
+        // many cells; mix RLE + ZIPS across two parts.
+        let (w0, h0) = (13u32, 9u32);
+        let grid_a = synthetic_deep_ripmap(w0, h0);
+        let grid_b = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![
+            build_mp_deep_ripmap_part("p0", w0, h0, &grid_a, 4, 4, Compression::Rle),
+            build_mp_deep_ripmap_part("p1", w0, h0, &grid_b, 4, 4, Compression::Zips),
+        ];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled_ripmap(&bytes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_mp_deep_ripmap_part_roundtrip(&read[0], "p0", &grid_a);
+        assert_mp_deep_ripmap_part_roundtrip(&read[1], "p1", &grid_b);
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_distinct_dims_per_part_roundtrip() {
+        // Two parts of different level-(0,0) dimensions exercises per-part
+        // grid shape / metas independence.
+        let (w0_a, h0_a) = (16u32, 16u32);
+        let (w0_b, h0_b) = (24u32, 16u32);
+        let grid_a = synthetic_deep_ripmap(w0_a, h0_a);
+        let grid_b = synthetic_deep_ripmap(w0_b, h0_b);
+        let parts = vec![
+            build_mp_deep_ripmap_part("small", w0_a, h0_a, &grid_a, 8, 8, Compression::Zips),
+            build_mp_deep_ripmap_part("wide", w0_b, h0_b, &grid_b, 8, 4, Compression::None),
+        ];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let read = parse_exr_multipart_deep_tiled_ripmap(&bytes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_mp_deep_ripmap_part_roundtrip(&read[0], "small", &grid_a);
+        assert_mp_deep_ripmap_part_roundtrip(&read[1], "wide", &grid_b);
+        assert_eq!(read[0].width(), w0_a);
+        assert_eq!(read[1].width(), w0_b);
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_rejects_empty_parts() {
+        let r = encode_exr_multipart_deep_tiled_ripmap(&[]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_rejects_duplicate_names() {
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![
+            build_mp_deep_ripmap_part("dup", w0, h0, &g, 8, 8, Compression::Zips),
+            build_mp_deep_ripmap_part("dup", w0, h0, &g, 8, 8, Compression::Zips),
+        ];
+        assert!(encode_exr_multipart_deep_tiled_ripmap(&parts).is_err());
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_rejects_deep_zip() {
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "z",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::Zip,
+        )];
+        assert!(encode_exr_multipart_deep_tiled_ripmap(&parts).is_err());
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_rejects_wrong_y_level_count() {
+        let (w0, h0) = (16u32, 16u32);
+        let mut g = synthetic_deep_ripmap(w0, h0);
+        // 16×16 → 5 y-levels; truncate to 3.
+        g.truncate(3);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "p",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::Zips,
+        )];
+        assert!(encode_exr_multipart_deep_tiled_ripmap(&parts).is_err());
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_rejects_wrong_x_level_count() {
+        let (w0, h0) = (16u32, 16u32);
+        let mut g = synthetic_deep_ripmap(w0, h0);
+        // 16×16 → 5 x-levels per row; drop the last entry of row 0.
+        g[0].truncate(3);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "p",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::Zips,
+        )];
+        assert!(encode_exr_multipart_deep_tiled_ripmap(&parts).is_err());
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_rejects_sub_sampled_channels() {
+        let (w0, h0) = (8u32, 8u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let mut p = build_mp_deep_ripmap_part("p", w0, h0, &g, 4, 4, Compression::Zips);
+        p.channels = vec![Channel {
+            name: "Y".to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 2,
+            y_sampling: 2,
+        }];
+        assert!(encode_exr_multipart_deep_tiled_ripmap(&[p]).is_err());
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_parse_rejects_single_part_file() {
+        // A single-part deep tiled RIPMAP file should be rejected by the
+        // multi-part RIPMAP entry.
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let input = build_deep_ripmap(w0, h0, &g, 8, 8, Compression::Zips);
+        let bytes = encode_exr_deep_tiled_ripmap(&input).unwrap();
+        let r = parse_exr_multipart_deep_tiled_ripmap(&bytes);
+        assert!(r.is_err());
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(
+            msg.contains("non-multipart") || msg.contains("multipart"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_parse_rejects_multipart_one_level_file() {
+        // A multipart deep-tiled ONE_LEVEL file should be rejected by the
+        // RIPMAP entry (mode=0x00 != 0x02).
+        let (w, h) = (8u32, 8u32);
+        let (spp, samples) = synthetic_deep(w, h);
+        let parts = vec![MultipartDeepTiledPart {
+            name: "p".to_string(),
+            width: w,
+            height: h,
+            tile_x: 4,
+            tile_y: 4,
+            channels: mk_channels_rgba_float(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&samples[0], &samples[1], &samples[2], &samples[3]],
+            compression: Compression::Zips,
+        }];
+        let bytes = encode_exr_multipart_deep_tiled(&parts).unwrap();
+        let r = parse_exr_multipart_deep_tiled_ripmap(&bytes);
+        assert!(r.is_err());
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(
+            msg.contains("mode=0x00") || msg.contains("RIPMAP"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_parse_rejects_multipart_mipmap_file() {
+        // A multipart deep-tiled MIPMAP file should be rejected by the
+        // RIPMAP entry (mode=0x01 != 0x02).
+        let (w0, h0) = (16u32, 16u32);
+        let pyr = synthetic_deep_mipmap(w0, h0);
+        let parts = vec![build_mp_deep_mipmap_part(
+            "p",
+            w0,
+            h0,
+            &pyr,
+            8,
+            8,
+            Compression::Zips,
+        )];
+        let bytes = encode_exr_multipart_deep_tiled_mipmap(&parts).unwrap();
+        let r = parse_exr_multipart_deep_tiled_ripmap(&bytes);
+        assert!(r.is_err());
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(
+            msg.contains("mode=0x01") || msg.contains("RIPMAP"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mp_deep_tiled_one_level_parser_redirects_ripmap_file() {
+        // The ONE_LEVEL multipart parser should redirect when given a
+        // RIPMAP file.
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "p",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::Zips,
+        )];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let r = parse_exr_multipart_deep_tiled(&bytes);
+        assert!(r.is_err());
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(
+            msg.contains("parse_exr_multipart_deep_tiled_ripmap"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mp_deep_tiled_mipmap_parser_redirects_ripmap_file() {
+        // The MIPMAP multipart parser should redirect when given a RIPMAP
+        // file.
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "p",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::Zips,
+        )];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let r = parse_exr_multipart_deep_tiled_mipmap(&bytes);
+        assert!(r.is_err());
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(
+            msg.contains("parse_exr_multipart_deep_tiled_ripmap"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn single_part_deep_ripmap_parser_redirects_multipart_ripmap_file() {
+        // The single-part deep-RIPMAP parser should redirect when given
+        // a multi-part deep-RIPMAP file.
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "p",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::Zips,
+        )];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let r = parse_exr_deep_tiled_ripmap(&bytes);
+        assert!(r.is_err());
+        let msg = format!("{:?}", r.unwrap_err());
+        assert!(
+            msg.contains("parse_exr_multipart_deep_tiled_ripmap"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mp_deep_ripmap_tiled_version_field_bits() {
+        let (w0, h0) = (16u32, 16u32);
+        let g = synthetic_deep_ripmap(w0, h0);
+        let parts = vec![build_mp_deep_ripmap_part(
+            "p",
+            w0,
+            h0,
+            &g,
+            8,
+            8,
+            Compression::None,
+        )];
+        let bytes = encode_exr_multipart_deep_tiled_ripmap(&parts).unwrap();
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let bits = version & 0xFFFFFF00;
+        assert_eq!(bits & 0x800, 0x800, "non_image bit must be set");
+        assert_eq!(bits & 0x1000, 0x1000, "multipart bit must be set");
+        assert_eq!(
+            bits & 0x200,
+            0,
+            "single_tile bit must NOT be set \
+             (type='deeptile' + tiles[tiledesc, mode=0x02] carry the signal)"
         );
     }
 }

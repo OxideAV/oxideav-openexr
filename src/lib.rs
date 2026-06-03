@@ -279,11 +279,52 @@
 //! entry, and [`parse_exr_deep_tiled_mipmap`] rejects RIPMAP files with
 //! a pointer to the new entry alongside its existing ONE_LEVEL guard.
 //!
+//! Round-220 surface (this crate, this round): multi-part deep tiled
+//! **MIPMAP_LEVELS** WRITE + READ ([`encode_exr_multipart_deep_tiled_mipmap`] /
+//! [`parse_exr_multipart_deep_tiled_mipmap`] + [`MultipartDeepMipmapTiledPart`] +
+//! [`DeepMipmapTiledPart`]). Composes the round-181 multi-part deep-tiled
+//! chunk shape (`i32 part_number` prefix + the round-130 single-part deep
+//! tile header) with the round-208 single-part deep-tiled MIPMAP iteration
+//! order (per part, levels 0..N-1 ascending, INCREASING_Y row-major within
+//! each level, `lvlx == lvly == level`). Version-field bits are `0x1800`
+//! (`non_image | multipart`); the `single_tile` 0x200 bit MUST NOT be set
+//! (the `tiles[tiledesc, mode=0x01]` attribute + `type="deeptile"` carry
+//! the MIPMAP-deep signal). Per-part `chunkCount` = sum over levels of
+//! `ceil(level_w / tile_x) * ceil(level_h / tile_y)`. ROUND_DOWN only;
+//! compression NONE / RLE / ZIPS per part.
+//!
+//! Round-227 surface (this crate, this round): multi-part deep tiled
+//! **RIPMAP_LEVELS** WRITE + READ ([`encode_exr_multipart_deep_tiled_ripmap`] /
+//! [`parse_exr_multipart_deep_tiled_ripmap`] + [`MultipartDeepRipmapTiledPart`] +
+//! [`DeepRipmapTiledPart`]). Composes the round-181 multi-part deep-tiled
+//! chunk shape (`i32 part_number` prefix + `tx, ty, lvlx, lvly` + 3 u64
+//! sizes + per-tile cumulative-inclusive offset table + non-interleaved
+//! channel-major sample data) with the round-214 single-part deep-tiled
+//! RIPMAP iteration order: per part, chunks walk the `(nx × ny)` grid
+//! `lvly` outer / `lvlx` inner, and within each cell INCREASING_Y row-major
+//! (ty outer, tx inner). The chunk header carries the explicit
+//! `(lvlx, lvly)` pair (axes independent per RIPMAP). Per-part `chunkCount`
+//! = sum over `nx * ny` cells of `ceil(cell_w / tile_x) *
+//! ceil(cell_h / tile_y)`. Version-field bits are `0x1800`
+//! (`non_image | multipart`); the `single_tile` 0x200 bit MUST NOT be set
+//! (the `tiles[tiledesc, mode=0x02]` attribute + `type="deeptile"` carry
+//! the RIPMAP-deep signal). Concatenated per-part offset tables followed
+//! by chunk records in part-order. The reader uses a linear chunk scan for
+//! robustness against zero-filled offset tables produced by
+//! `exrmultipart -combine`. Compression NONE / RLE / ZIPS per part (deep
+//! ZIP rejected to match the reference `exrinfo` validator and the
+//! round-130 / 181 / 208 / 214 / 220 deep-tiled writers). ROUND_DOWN only.
+//! The legacy [`parse_exr_multipart_deep_tiled`] and
+//! [`parse_exr_multipart_deep_tiled_mipmap`] readers now point RIPMAP
+//! multi-part deep tiled files at the new entry rather than rejecting them
+//! outright, and the single-part [`parse_exr_deep_tiled_ripmap`] reader
+//! redirects multi-part RIPMAP files to the new entry alongside its
+//! existing routing discipline. This closes the deep-tiled matrix.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); multi-part MIPMAP / RIPMAP deep tiled; HDR pixel-format
-//! integration with `oxideav-core`.
+//! public spec); HDR pixel-format integration with `oxideav-core`.
 
 pub mod decoder;
 pub mod deep;
@@ -316,13 +357,15 @@ pub use deep::{
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
     encode_exr_deep_tiled_ripmap, encode_exr_multipart_deep_scanline,
     encode_exr_multipart_deep_tiled, encode_exr_multipart_deep_tiled_mipmap,
-    parse_exr_deep_multipart, parse_exr_deep_scanline, parse_exr_deep_tiled,
-    parse_exr_deep_tiled_mipmap, parse_exr_deep_tiled_ripmap, parse_exr_multipart_deep_tiled,
-    parse_exr_multipart_deep_tiled_mipmap, DeepExrImage, DeepMipmapTiledImage,
+    encode_exr_multipart_deep_tiled_ripmap, parse_exr_deep_multipart, parse_exr_deep_scanline,
+    parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap, parse_exr_deep_tiled_ripmap,
+    parse_exr_multipart_deep_tiled, parse_exr_multipart_deep_tiled_mipmap,
+    parse_exr_multipart_deep_tiled_ripmap, DeepExrImage, DeepMipmapTiledImage,
     DeepMipmapTiledInput, DeepMipmapTiledLevelInput, DeepMipmapTiledPart, DeepRipmapTiledImage,
-    DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepScanlineInput, DeepScanlinePart,
-    DeepTiledImage, DeepTiledInput, DeepTiledMipmapLevel, DeepTiledPart, DeepTiledRipmapCell,
-    MultipartDeepMipmapTiledPart, MultipartDeepScanlinePart, MultipartDeepTiledPart,
+    DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepRipmapTiledPart, DeepScanlineInput,
+    DeepScanlinePart, DeepTiledImage, DeepTiledInput, DeepTiledMipmapLevel, DeepTiledPart,
+    DeepTiledRipmapCell, MultipartDeepMipmapTiledPart, MultipartDeepRipmapTiledPart,
+    MultipartDeepScanlinePart, MultipartDeepTiledPart,
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,
