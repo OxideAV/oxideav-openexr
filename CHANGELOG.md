@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-232 multi-part **mixed** flat scanline + flat tiled WRITE + READ.
+  New public API: `encode_exr_multipart_mixed`,
+  `parse_exr_multipart_mixed`, `MultipartMixedPart`, `MultipartMixedImage`.
+  A single multi-part file may now freely combine `type="scanlineimage"`
+  and `type="tiledimage"` (ONE_LEVEL + ROUND_DOWN) parts in arbitrary
+  order. Composes the round-40 multi-part scanline chunk shape
+  (`i32 part_number, i32 Y, i32 size, payload`) with the round-192
+  multi-part flat-tiled chunk shape (`i32 part_number, i32 tx, i32 ty,
+  i32 lvlx, i32 lvly, i32 size, payload`) inside one file; the reader
+  walks the offset tables linearly and dispatches the chunk-body shape
+  via each part's declared `type` attribute. Version-field bits stay at
+  `0x1000` (`multipart` only; `non_image` is for deep parts, `single_tile`
+  is never set on multi-part files — the per-part `type` + `tiles`
+  attribute carry the tile-ness signal). Per-part `chunkCount` matches
+  the homogeneous writers: scanline = `ceil(height / scanlines_per_block)`,
+  tiled = `tx_count * ty_count`. Per-tile payload layout is identical to
+  the round-192 single-part / multi-part tiled writers (row-major within
+  the tile, channels in alphabetical order, edge tiles store only the
+  valid pixel rectangle). Sub-sampled channels are accepted on scanline
+  parts but rejected on tiled parts (the chunk-body assumes 1×1 sampling,
+  matching round-40 and round-192). Compression: NONE / ZIP / ZIPS / RLE
+  per part. 11 new self-roundtrip tests cover 2-part `Scanline` +
+  `Tiled` (both orderings) under ZIPS and NONE, 3-part RLE + ZIP + ZIP
+  mixed-compression layouts, 13×9 non-power-of-two edge-tile cases
+  paired with a matching scanline part, layouts where the two parts
+  carry distinct dimensions (16×16 scanline + 24×16 tiled), and a
+  UINT + HALF scanline part alongside a FLOAT tiled part. Reject paths
+  cover empty parts, duplicate names, empty names, zero tile sizes,
+  and sub-sampled channels on tiled parts. Multi-level tiled parts in a
+  mixed file remain a followup (pure multi-level multi-part files keep
+  using `parse_exr_multipart_tiled_multilevel`); mixed files with deep
+  parts are a separate followup since the deep chunk shape carries three
+  `u64` sizes plus a per-tile offset table rather than a single `i32`
+  size + payload.
+
 - Round-227 multi-part deep tiled **RIPMAP_LEVELS** WRITE + READ. New
   public API: `encode_exr_multipart_deep_tiled_ripmap`,
   `parse_exr_multipart_deep_tiled_ripmap`,

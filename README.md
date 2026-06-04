@@ -39,6 +39,7 @@ oracles only).
 | Multi-part deep tiled (`deeptile`)  | parse + encode — ONE_LEVEL per part, NONE/RLE/ZIPS, edge-tile aware (self-roundtrip on 2- and 3-part mixed-compression layouts) |
 | Multi-part deep tiled MIPMAP_LEVELS  | parse + encode (`encode_exr_multipart_deep_tiled_mipmap` / `parse_exr_multipart_deep_tiled_mipmap`) — full ROUND_DOWN pyramid per part, NONE/RLE/ZIPS per part, edge-tile aware, supports parts with distinct level-0 dimensions. Self-roundtrips 2- and 3-part mixed-compression layouts plus 13×9 non-power-of-two edge-tile cases. ONE_LEVEL multi-part files dispatched to `parse_exr_multipart_deep_tiled`; MIPMAP multi-part files (tiledesc mode=0x01) dispatched here |
 | Multi-part deep tiled RIPMAP_LEVELS  | parse + encode (`encode_exr_multipart_deep_tiled_ripmap` / `parse_exr_multipart_deep_tiled_ripmap`) — full 2-D ROUND_DOWN reduction grid per part (`lvly`-outer `lvlx`-inner), NONE/RLE/ZIPS per part, edge-tile aware, supports parts with distinct level-(0,0) dimensions. Self-roundtrips 2- and 3-part mixed-compression layouts plus 13×9 non-power-of-two edge-tile cases. The ONE_LEVEL multi-part reader (`parse_exr_multipart_deep_tiled`) and MIPMAP multi-part reader (`parse_exr_multipart_deep_tiled_mipmap`) both redirect RIPMAP multi-part files (tiledesc mode=0x02) here; the single-part deep RIPMAP reader (`parse_exr_deep_tiled_ripmap`) redirects multi-part RIPMAP files here too |
+| Multi-part **mixed** scanline + tiled | parse + encode (`encode_exr_multipart_mixed` / `parse_exr_multipart_mixed`) — a single multi-part file may freely mix `type="scanlineimage"` and `type="tiledimage"` (ONE_LEVEL) parts in arbitrary order, with NONE/ZIP/ZIPS/RLE per part. The reader walks chunks linearly and dispatches each chunk-body shape (scanline `i32 Y, i32 size, payload`; tiled `i32 tx, i32 ty, i32 lvlx, i32 lvly, i32 size, payload`) via the part's declared `type`. Self-roundtrips 2- and 3-part layouts mixing scanline + tiled parts in either order with mixed per-part compression, distinct per-part dimensions, 13×9 non-power-of-two edge-tile cases, and HALF / FLOAT / UINT pixel-type mixes |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact <2^24)        |
 | Spec predictor + interleave         | bit-exact against `exrmetrics`-produced files    |
@@ -67,11 +68,15 @@ against `exrmaketiled`; multi-part validated against `exrmultipart`
 * Multipart-output encode covers scanline parts, flat tiled parts
   (ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS), deep-scanline parts, and
   deep-tiled parts at every level mode (ONE_LEVEL + MIPMAP_LEVELS +
-  RIPMAP_LEVELS) — `encode_exr_multipart`, `encode_exr_multipart_tiled`,
+  RIPMAP_LEVELS), plus mixed `scanlineimage` + `tiledimage` (ONE_LEVEL)
+  multi-part files — `encode_exr_multipart`, `encode_exr_multipart_tiled`,
   `encode_exr_multipart_tiled_mipmap`, `encode_exr_multipart_tiled_ripmap`,
   `encode_exr_multipart_deep_scanline`, `encode_exr_multipart_deep_tiled`,
   `encode_exr_multipart_deep_tiled_mipmap`,
-  `encode_exr_multipart_deep_tiled_ripmap`.
+  `encode_exr_multipart_deep_tiled_ripmap`,
+  `encode_exr_multipart_mixed`. Mixed multi-part files that include deep
+  parts, or that mix multi-level tiled parts with other types, are a
+  followup.
 * The deep-tiled matrix is closed: single-part and multi-part deep
   tiled both support ONE_LEVEL, MIPMAP_LEVELS, and RIPMAP_LEVELS.
 * HDR pixel-format integration with `oxideav-core` (the

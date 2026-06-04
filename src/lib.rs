@@ -321,10 +321,36 @@
 //! redirects multi-part RIPMAP files to the new entry alongside its
 //! existing routing discipline. This closes the deep-tiled matrix.
 //!
+//! Round-232 surface (this crate, this round): multi-part **mixed** flat
+//! scanline + flat tiled WRITE + READ ([`encode_exr_multipart_mixed`] /
+//! [`parse_exr_multipart_mixed`] + [`MultipartMixedPart`] +
+//! [`MultipartMixedImage`]). Composes the round-40 multi-part scanline
+//! chunk shape (`i32 part_number, i32 Y, i32 size, payload`) with the
+//! round-192 multi-part flat-tiled chunk shape (`i32 part_number, i32 tx,
+//! i32 ty, i32 lvlx, i32 lvly, i32 size, payload`) inside a single
+//! file. Until this round every multi-part entry required every part to
+//! share the same type (`type="scanlineimage"` for scanline,
+//! `type="tiledimage"` for flat tiled, `type="deepscanline"` /
+//! `"deeptile"` for deep). The file format itself never enforced that —
+//! the per-part `type` attribute is the only discriminator. The new
+//! reader walks the offset tables linearly and dispatches the chunk-body
+//! shape per part via the declared `type`. Version-field bits stay at
+//! `0x1000` (`multipart` only; `non_image` is for deep, `single_tile` is
+//! never set on multi-part). ONE_LEVEL only for tiled parts; multi-level
+//! tiled parts in a mixed file remain a followup (pure multi-level
+//! multi-part files keep using [`parse_exr_multipart_tiled_multilevel`]).
+//! Compression NONE / ZIP / ZIPS / RLE per part. Sub-sampled channels
+//! are accepted on scanline parts; tiled parts retain the 1×1-sampling
+//! rule from the round-40 single-part tiled writer. Self-roundtrips on
+//! mixed 2- and 3-part layouts mixing scanline + tiled parts in either
+//! order, with mixed per-part compression, and on edge-tile (13×9)
+//! tiled-part-after-scanline-part layouts.
+//!
 //! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
 //! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
 //! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); HDR pixel-format integration with `oxideav-core`.
+//! public spec); HDR pixel-format integration with `oxideav-core`;
+//! mixed-with-deep + mixed-multi-level multi-part files.
 
 pub mod decoder;
 pub mod deep;
@@ -336,6 +362,7 @@ pub mod image;
 pub mod mipmap_encoder;
 pub mod multipart_encoder;
 pub mod multipart_mipmap_encoder;
+pub mod multipart_mixed_encoder;
 pub mod multipart_ripmap_encoder;
 pub mod multipart_tiled_encoder;
 #[cfg(feature = "registry")]
@@ -385,6 +412,9 @@ pub use multipart_encoder::{
     encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,
 };
 pub use multipart_mipmap_encoder::{encode_exr_multipart_tiled_mipmap, MultipartMipmapTiledPart};
+pub use multipart_mixed_encoder::{
+    encode_exr_multipart_mixed, parse_exr_multipart_mixed, MultipartMixedImage, MultipartMixedPart,
+};
 pub use multipart_ripmap_encoder::{encode_exr_multipart_tiled_ripmap, MultipartRipmapTiledPart};
 pub use multipart_tiled_encoder::{encode_exr_multipart_tiled, MultipartTiledPart};
 pub use tile_encoder::{encode_exr_tiled, encode_exr_tiled_rgba_float_with};

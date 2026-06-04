@@ -214,6 +214,12 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
 
 /// Reverse the ZIP-family preprocessing pipeline (uninterleave +
 /// unpredict). Operates on `payload` in place after copying.
+pub(crate) fn undo_zip_pipeline_pub(raw: Vec<u8>) -> Vec<u8> {
+    undo_zip_pipeline(raw)
+}
+
+/// Reverse the ZIP-family preprocessing pipeline (uninterleave +
+/// unpredict). Operates on `payload` in place after copying.
 fn undo_zip_pipeline(raw: Vec<u8>) -> Vec<u8> {
     let mut predicted = raw;
     apply_zip_unpredictor(&mut predicted);
@@ -2018,6 +2024,13 @@ pub(crate) fn find_chunk_count(attrs: &[Attribute]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Public-`crate` wrapper around [`zlib_inflate`] so sibling modules
+/// (e.g. the mixed multi-part reader) can reuse the same `flate2`-backed
+/// decompressor without duplicating the inflate plumbing.
+pub(crate) fn zlib_inflate_pub(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
+    zlib_inflate(data, expected_size)
 }
 
 /// zlib-decompress `data` into a buffer at most `expected_size` bytes
