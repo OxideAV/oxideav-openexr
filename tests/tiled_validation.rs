@@ -1,8 +1,9 @@
 //! Cross-validate tiled-decode by running our scanline encoder, piping
-//! through `exrmaketiled` (an OpenEXR command-line tool used as opaque
-//! oracle), then re-parsing the tiled output and checking every sample
-//! matches the original. The test is auto-skipped (with a printed
-//! reason) when `exrmaketiled` is missing — fine on stripped CI.
+//! through `exrmaketiled` (an OpenEXR command-line tool invoked as an
+//! opaque process — input bytes in, output bytes out), then re-parsing
+//! the tiled output and checking every sample matches the original.
+//! The test is auto-skipped (with a printed reason) when `exrmaketiled`
+//! is missing — fine on stripped CI.
 
 use std::process::Command;
 

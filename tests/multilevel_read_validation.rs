@@ -16,11 +16,11 @@
 //!    level vector.
 //! 4. Non-tiled and multi-part files are rejected with a clear error.
 //!
-//! No external binary is invoked — these are pure-Rust self
-//! round-trips. The encoder side has its own `exrmetrics --convert` /
-//! `exrmaketiled -r` cross-validation in `tests/mipmap_encoder_validation.rs`
-//! and `tests/ripmap_encoder_validation.rs`; this file pins the new
-//! READ path against that same encoder output.
+//! These tests run pure-Rust self round-trips. The encoder side has
+//! its own `exrmetrics --convert` / `exrmaketiled -r` cross-validation
+//! in `tests/mipmap_encoder_validation.rs` and
+//! `tests/ripmap_encoder_validation.rs`; this file pins the new READ
+//! path against that same encoder output.
 
 use oxideav_openexr::{
     encode_exr_scanline_rgba_float_with, encode_exr_tiled_mipmap, encode_exr_tiled_rgba_float_with,

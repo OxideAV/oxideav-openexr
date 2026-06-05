@@ -2,11 +2,10 @@
 
 Pure-Rust OpenEXR (HDR scanline + tiled image) reader/writer for [`oxideav`].
 
-Clean-room from the OpenEXR file format spec — public format
-documentation only, no project-shipped reference source or Rust crate
-mirror consulted. Empirical validation against the `exrheader` /
-`exrinfo` / `exrmetrics` / `exrmaketiled` binaries (used as opaque
-oracles only).
+Clean-room from the OpenEXR file format spec (public format
+documentation). Empirical validation against the `exrheader` /
+`exrinfo` / `exrmetrics` / `exrmaketiled` binaries, invoked as opaque
+processes (input bytes in, stdout/stderr text out).
 
 ## Capability matrix
 

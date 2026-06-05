@@ -3,9 +3,9 @@
 //! (with a printed reason) when the binary is missing — that's fine for
 //! CI machines without an OpenEXR install.
 //!
-//! `exrheader` is used as an opaque oracle: we don't read its source,
-//! we just check it exits zero and emits text that mentions our four
-//! channels. Per workspace policy, no ILM/Academy code is consulted.
+//! `exrheader` is invoked as an opaque process: input bytes in, text
+//! out. The test checks it exits zero and emits text that mentions
+//! our four channels.
 
 use std::process::Command;
 

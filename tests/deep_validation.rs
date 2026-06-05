@@ -899,7 +899,7 @@ fn exrmetrics_decodes_our_deep_tiled_edge_tiles_13x9_in_4x4() {
 
 #[test]
 fn our_writer_and_reader_deep_tiled_full_roundtrip() {
-    // Pure-Rust round-trip: our writer → our reader, no external tools.
+    // Pure-Rust round-trip: our writer → our reader.
     // Larger image with edge tiles in both axes exercises the second
     // pass that re-emits channel samples in pixel-scan order from the
     // per-tile sample slabs.
@@ -928,7 +928,7 @@ fn our_writer_and_reader_deep_tiled_full_roundtrip() {
 
 #[test]
 fn our_writer_and_reader_multipart_deep_full_roundtrip() {
-    // Pure-Rust round-trip: our writer → our reader, no external tools.
+    // Pure-Rust round-trip: our writer → our reader.
     // Larger height with ZIPS to exercise many chunks per part.
     let (spp_a, planes_a) = build_synthetic_seeded(10, 12, 0.0);
     let (spp_b, planes_b) = build_synthetic_seeded(10, 12, 0.25);

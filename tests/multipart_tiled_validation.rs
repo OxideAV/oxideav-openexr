@@ -4,9 +4,9 @@
 //! split it into per-part single-part tiled files our `parse_exr`
 //! reader then reads bit-exactly.
 //!
-//! The reference binaries are used as opaque oracles — no source
-//! consulted, no behaviour copied. If they're not installed the test
-//! prints a skip message and exits zero.
+//! The reference binaries are invoked as opaque processes (input
+//! bytes in, output bytes/text out). If they're not installed the
+//! test prints a skip message and exits zero.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
