@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.3...v0.0.4) - 2026-06-05
+
+### Other
+
+- round 238: typed `string` attribute parser + encoder
+- round 232: multi-part mixed (scanlineimage + tiledimage) WRITE + READ
+- round 227: multi-part deep tiled RIPMAP_LEVELS WRITE + READ
+- round 220: multi-part deep tiled MIPMAP_LEVELS WRITE + READ
+- round 214: single-part deep tiled RIPMAP_LEVELS WRITE + READ
+- round 208: single-part deep tiled MIPMAP_LEVELS WRITE + READ
+- round 202: multi-part flat tiled RIPMAP_LEVELS WRITE + READ
+- round 196: multi-part flat tiled MIPMAP_LEVELS WRITE + READ
+
 ### Added
 
 - Round-238 typed `string` attribute parser + encoder. The
