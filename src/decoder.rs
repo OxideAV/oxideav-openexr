@@ -1996,13 +1996,21 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
 /// Find the `type` (string) attribute in a part's attribute list. Used
 /// to discriminate `scanlineimage` from `tiledimage` / `deepscanline`
 /// / `deeptile` in multi-part files.
+///
+/// Accepts both the typed [`AttributeValue::String`] variant (produced
+/// by `parse_attribute_value`) and the legacy
+/// `AttributeValue::Other { type_name: "string", data }` shape that
+/// older encoder modules in this crate still emit. The two are
+/// equivalent on disk; only the in-memory representation differs.
 pub(crate) fn find_part_type(attrs: &[Attribute]) -> Option<String> {
     for a in attrs {
         if a.name == "type" {
-            if let AttributeValue::Other { type_name, data } = &a.value {
-                if type_name == "string" {
+            match &a.value {
+                AttributeValue::String(s) => return Some(s.clone()),
+                AttributeValue::Other { type_name, data } if type_name == "string" => {
                     return Some(String::from_utf8_lossy(data).to_string());
                 }
+                _ => {}
             }
         }
     }
@@ -2010,16 +2018,23 @@ pub(crate) fn find_part_type(attrs: &[Attribute]) -> Option<String> {
 }
 
 /// Find the `chunkCount` attribute in a part's attribute list.
+///
+/// Accepts both [`AttributeValue::Int`] and the legacy
+/// `AttributeValue::Other { type_name: "int", data }` (4 bytes).
 pub(crate) fn find_chunk_count(attrs: &[Attribute]) -> Option<usize> {
     for a in attrs {
         if a.name == "chunkCount" {
-            if let AttributeValue::Other { type_name, data } = &a.value {
-                if type_name == "int" && data.len() == 4 {
+            match &a.value {
+                AttributeValue::Int(v) if *v >= 0 => return Some(*v as usize),
+                AttributeValue::Other { type_name, data }
+                    if type_name == "int" && data.len() == 4 =>
+                {
                     let v = i32::from_le_bytes(data[..4].try_into().unwrap());
                     if v >= 0 {
                         return Some(v as usize);
                     }
                 }
+                _ => {}
             }
         }
     }

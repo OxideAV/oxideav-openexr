@@ -133,11 +133,36 @@ pub struct Channel {
     pub y_sampling: i32,
 }
 
+/// Chromaticities attribute payload: four CIE-xy primaries.
+///
+/// On disk this is eight consecutive little-endian `f32` values in the
+/// order `red.x, red.y, green.x, green.y, blue.x, blue.y, white.x,
+/// white.y` — 32 bytes total. The type name is `"chromaticities"`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Chromaticities {
+    pub red_x: f32,
+    pub red_y: f32,
+    pub green_x: f32,
+    pub green_y: f32,
+    pub blue_x: f32,
+    pub blue_y: f32,
+    pub white_x: f32,
+    pub white_y: f32,
+}
+
 /// Decoded value of one EXR header attribute.
 ///
-/// Only the round-1-required attribute types are explicitly parsed;
-/// everything else is preserved as `Other { type_name, data }` so the
-/// header can round-trip without losing decoder-irrelevant metadata.
+/// The variants typed here are the fixed-size attribute payloads whose
+/// on-disk byte length is implied by the type name (4 for `int`, 8 for
+/// `double` / `v2i` / `v2f`, 12 for `v3i` / `v3f`, 16 for `box2i`, 32
+/// for `chromaticities`, 36 for `m33f`, 64 for `m44f`) plus the
+/// variable-length `String` (raw bytes, length carried by the outer
+/// attribute size field — the same shape this crate's multi-part
+/// writers already emit and `exrmetrics` round-trips, see round-40
+/// CHANGELOG entry) and the `Channels` payload. Any attribute whose
+/// type name doesn't map to one of these variants is preserved verbatim
+/// as `Other { type_name, data }` so the header round-trips without
+/// losing metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
     Channels(Vec<Channel>),
@@ -145,7 +170,26 @@ pub enum AttributeValue {
     Box2i(Box2i),
     LineOrder(LineOrder),
     Float(f32),
+    /// `int` — single little-endian `i32`, 4 bytes.
+    Int(i32),
+    /// `double` — single little-endian `f64`, 8 bytes.
+    Double(f64),
+    /// `string` — raw UTF-8 bytes; the outer attribute size field
+    /// carries the length, so no NUL terminator is stored.
+    String(String),
     V2f(f32, f32),
+    /// `v2i` — two little-endian `i32`, 8 bytes.
+    V2i(i32, i32),
+    /// `v3i` — three little-endian `i32`, 12 bytes.
+    V3i(i32, i32, i32),
+    /// `v3f` — three little-endian `f32`, 12 bytes.
+    V3f(f32, f32, f32),
+    /// `m33f` — nine little-endian `f32` in row-major order, 36 bytes.
+    M33f([f32; 9]),
+    /// `m44f` — sixteen little-endian `f32` in row-major order, 64 bytes.
+    M44f([f32; 16]),
+    /// `chromaticities` — see [`Chromaticities`].
+    Chromaticities(Chromaticities),
     /// Anything we don't model as a typed enum yet — preserved verbatim.
     Other {
         type_name: String,

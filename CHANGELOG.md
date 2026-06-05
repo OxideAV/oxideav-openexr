@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-238 **typed attribute inspectors** for nine additional EXR header
+  attribute payload types: `int`, `double`, `string`, `v2i`, `v3i`, `v3f`,
+  `m33f`, `m44f`, `chromaticities`. New `AttributeValue` variants `Int(i32)`,
+  `Double(f64)`, `String(String)`, `V2i(i32, i32)`, `V3i(i32, i32, i32)`,
+  `V3f(f32, f32, f32)`, `M33f([f32; 9])`, `M44f([f32; 16])`,
+  `Chromaticities(Chromaticities)` (new public struct with CIE-xy `red_*`,
+  `green_*`, `blue_*`, `white_*` fields). `parse_attribute_value` decodes
+  these from on-disk payloads of the spec-table sizes
+  (4 / 8 / 12 / 36 / 64 / 32 bytes + variable-length `string`) and
+  `encode_attribute_value` round-trips them back to bit-identical bytes
+  with the matching type-name string. The variable-length `string` payload
+  uses the same on-disk shape this crate's multi-part writers already
+  emit and cross-validate against `exrmetrics` (round 40): raw bytes,
+  length carried by the outer attribute size field, no NUL terminator
+  inside the payload. Existing call sites
+  that consumed `AttributeValue::Other { type_name: "string", .. }` /
+  `AttributeValue::Other { type_name: "int", .. }` (the multi-part
+  `find_part_type` / `find_chunk_count` helpers and the deep-file
+  `find_string_attr` / `find_int_attr` helpers) accept both the typed
+  variant and the legacy `Other` shape, so producer code that still emits
+  the `Other` form keeps working unchanged. New test file
+  `tests/typed_attribute_roundtrip.rs` covers (a) algebraic round-trips
+  for every new variant including `i32::{MIN,MAX}`, `f64::{MIN,MAX}`,
+  NaN bit-pattern preservation, multi-byte UTF-8 strings, and
+  alphabetic/identity matrices; (b) full scanline-file round-trips
+  through `encode_exr_scanline` + `parse_exr` confirming the typed
+  variant survives a full encode-then-parse with the bit-exact value;
+  and (c) `exrheader` interop — the binary is invoked as an opaque
+  process (input bytes in, stdout text out) on a generated scanline
+  file carrying every new attribute type, and the test asserts a
+  zero exit status plus the presence of every attribute name in the
+  emitted text. Test count: 297 (+12).
+
 - Round-232 multi-part **mixed** flat scanline + flat tiled WRITE + READ.
   New public API: `encode_exr_multipart_mixed`,
   `parse_exr_multipart_mixed`, `MultipartMixedPart`, `MultipartMixedImage`.

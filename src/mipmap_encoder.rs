@@ -1117,12 +1117,16 @@ mod tests {
             .find(|a| a.name == "chunkCount")
             .expect("encoder must emit chunkCount");
         match &chunk_count_attr.value {
-            AttributeValue::Other { type_name, data } => {
-                assert_eq!(type_name, "int");
+            AttributeValue::Int(v) => {
+                assert_eq!(*v, 9, "chunk count should match pyramid total");
+            }
+            AttributeValue::Other { type_name, data } if type_name == "int" => {
                 let v = i32::from_le_bytes(data[..4].try_into().unwrap());
                 assert_eq!(v, 9, "chunk count should match pyramid total");
             }
-            _ => panic!("chunkCount should be Other(int)"),
+            other => {
+                panic!("chunkCount should decode as Int (or legacy Other(int)); got {other:?}")
+            }
         }
 
         // Also verify tiledesc level_mode = 1 (MIPMAP_LEVELS).

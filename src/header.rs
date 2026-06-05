@@ -16,7 +16,8 @@
 
 use crate::error::{ExrError, Result};
 use crate::types::{
-    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
+    Attribute, AttributeValue, Box2i, Channel, Chromaticities, Compression, LineOrder, PixelType,
+    EXR_MAGIC,
 };
 
 /// Decoded version field flags.
@@ -353,6 +354,118 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
             let y = f32::from_le_bytes(data[4..8].try_into().unwrap());
             Ok(AttributeValue::V2f(x, y))
         }
+        "int" => {
+            if data.len() != 4 {
+                return Err(ExrError::invalid(format!(
+                    "int payload size {} != 4",
+                    data.len()
+                )));
+            }
+            Ok(AttributeValue::Int(i32::from_le_bytes(
+                data[0..4].try_into().unwrap(),
+            )))
+        }
+        "double" => {
+            if data.len() != 8 {
+                return Err(ExrError::invalid(format!(
+                    "double payload size {} != 8",
+                    data.len()
+                )));
+            }
+            Ok(AttributeValue::Double(f64::from_le_bytes(
+                data[0..8].try_into().unwrap(),
+            )))
+        }
+        "string" => {
+            // The outer attribute size field is the length of the string
+            // payload; no NUL terminator is stored inside the payload.
+            let s = std::str::from_utf8(data)
+                .map_err(|e| ExrError::invalid(format!("non-UTF8 string payload: {e}")))?
+                .to_string();
+            Ok(AttributeValue::String(s))
+        }
+        "v2i" => {
+            if data.len() != 8 {
+                return Err(ExrError::invalid(format!(
+                    "v2i payload size {} != 8",
+                    data.len()
+                )));
+            }
+            let x = i32::from_le_bytes(data[0..4].try_into().unwrap());
+            let y = i32::from_le_bytes(data[4..8].try_into().unwrap());
+            Ok(AttributeValue::V2i(x, y))
+        }
+        "v3i" => {
+            if data.len() != 12 {
+                return Err(ExrError::invalid(format!(
+                    "v3i payload size {} != 12",
+                    data.len()
+                )));
+            }
+            let x = i32::from_le_bytes(data[0..4].try_into().unwrap());
+            let y = i32::from_le_bytes(data[4..8].try_into().unwrap());
+            let z = i32::from_le_bytes(data[8..12].try_into().unwrap());
+            Ok(AttributeValue::V3i(x, y, z))
+        }
+        "v3f" => {
+            if data.len() != 12 {
+                return Err(ExrError::invalid(format!(
+                    "v3f payload size {} != 12",
+                    data.len()
+                )));
+            }
+            let x = f32::from_le_bytes(data[0..4].try_into().unwrap());
+            let y = f32::from_le_bytes(data[4..8].try_into().unwrap());
+            let z = f32::from_le_bytes(data[8..12].try_into().unwrap());
+            Ok(AttributeValue::V3f(x, y, z))
+        }
+        "m33f" => {
+            if data.len() != 36 {
+                return Err(ExrError::invalid(format!(
+                    "m33f payload size {} != 36",
+                    data.len()
+                )));
+            }
+            let mut m = [0f32; 9];
+            for (i, slot) in m.iter_mut().enumerate() {
+                let off = i * 4;
+                *slot = f32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            }
+            Ok(AttributeValue::M33f(m))
+        }
+        "m44f" => {
+            if data.len() != 64 {
+                return Err(ExrError::invalid(format!(
+                    "m44f payload size {} != 64",
+                    data.len()
+                )));
+            }
+            let mut m = [0f32; 16];
+            for (i, slot) in m.iter_mut().enumerate() {
+                let off = i * 4;
+                *slot = f32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            }
+            Ok(AttributeValue::M44f(m))
+        }
+        "chromaticities" => {
+            if data.len() != 32 {
+                return Err(ExrError::invalid(format!(
+                    "chromaticities payload size {} != 32",
+                    data.len()
+                )));
+            }
+            let f = |off: usize| f32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+            Ok(AttributeValue::Chromaticities(Chromaticities {
+                red_x: f(0),
+                red_y: f(4),
+                green_x: f(8),
+                green_y: f(12),
+                blue_x: f(16),
+                blue_y: f(20),
+                white_x: f(24),
+                white_y: f(28),
+            }))
+        }
         _ => Ok(AttributeValue::Other {
             type_name: type_name.to_string(),
             data: data.to_vec(),
@@ -454,6 +567,55 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
             v.extend_from_slice(&x.to_le_bytes());
             v.extend_from_slice(&y.to_le_bytes());
             ("v2f".to_string(), v)
+        }
+        AttributeValue::Int(i) => ("int".to_string(), i.to_le_bytes().to_vec()),
+        AttributeValue::Double(d) => ("double".to_string(), d.to_le_bytes().to_vec()),
+        AttributeValue::String(s) => ("string".to_string(), s.as_bytes().to_vec()),
+        AttributeValue::V2i(x, y) => {
+            let mut v = Vec::with_capacity(8);
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            ("v2i".to_string(), v)
+        }
+        AttributeValue::V3i(x, y, z) => {
+            let mut v = Vec::with_capacity(12);
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            v.extend_from_slice(&z.to_le_bytes());
+            ("v3i".to_string(), v)
+        }
+        AttributeValue::V3f(x, y, z) => {
+            let mut v = Vec::with_capacity(12);
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            v.extend_from_slice(&z.to_le_bytes());
+            ("v3f".to_string(), v)
+        }
+        AttributeValue::M33f(m) => {
+            let mut v = Vec::with_capacity(36);
+            for f in m {
+                v.extend_from_slice(&f.to_le_bytes());
+            }
+            ("m33f".to_string(), v)
+        }
+        AttributeValue::M44f(m) => {
+            let mut v = Vec::with_capacity(64);
+            for f in m {
+                v.extend_from_slice(&f.to_le_bytes());
+            }
+            ("m44f".to_string(), v)
+        }
+        AttributeValue::Chromaticities(c) => {
+            let mut v = Vec::with_capacity(32);
+            v.extend_from_slice(&c.red_x.to_le_bytes());
+            v.extend_from_slice(&c.red_y.to_le_bytes());
+            v.extend_from_slice(&c.green_x.to_le_bytes());
+            v.extend_from_slice(&c.green_y.to_le_bytes());
+            v.extend_from_slice(&c.blue_x.to_le_bytes());
+            v.extend_from_slice(&c.blue_y.to_le_bytes());
+            v.extend_from_slice(&c.white_x.to_le_bytes());
+            v.extend_from_slice(&c.white_y.to_le_bytes());
+            ("chromaticities".to_string(), v)
         }
         AttributeValue::Other { type_name, data } => (type_name.clone(), data.clone()),
     }
