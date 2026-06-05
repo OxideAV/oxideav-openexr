@@ -14,6 +14,7 @@ oracles only).
 | ----------------------------------- | ------------------------------------------------ |
 | Magic + version field               | parse + write (format-version 2)                 |
 | Attribute table                     | parse + write, eight required attributes typed   |
+| Typed `string` attribute            | parse + write — `AttributeValue::String(String)`; covers `type`/`name`/`view`/`owner`/`comments`; reader helpers accept both typed and legacy `Other { "string", utf-8 }` shapes; non-UTF8 payloads rejected; cross-validated through `exrheader` |
 | Channel list (`chlist`)             | parse + write — `HALF`, `FLOAT`, `UINT`          |
 | Compression: `NONE`                 | parse + write                                    |
 | Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib via `flate2`)                |

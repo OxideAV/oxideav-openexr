@@ -1995,14 +1995,20 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
 
 /// Find the `type` (string) attribute in a part's attribute list. Used
 /// to discriminate `scanlineimage` from `tiledimage` / `deepscanline`
-/// / `deeptile` in multi-part files.
+/// / `deeptile` in multi-part files. Accepts both the typed
+/// `AttributeValue::String` shape (produced by `parse_attribute_value`
+/// since the string-attribute upgrade) and the legacy
+/// `AttributeValue::Other { type_name: "string", .. }` shape (still
+/// emitted by this crate's encoders).
 pub(crate) fn find_part_type(attrs: &[Attribute]) -> Option<String> {
     for a in attrs {
         if a.name == "type" {
-            if let AttributeValue::Other { type_name, data } = &a.value {
-                if type_name == "string" {
+            match &a.value {
+                AttributeValue::String(s) => return Some(s.clone()),
+                AttributeValue::Other { type_name, data } if type_name == "string" => {
                     return Some(String::from_utf8_lossy(data).to_string());
                 }
+                _ => {}
             }
         }
     }

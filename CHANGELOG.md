@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-238 typed `string` attribute parser + encoder. The
+  `AttributeValue` enum gains a `String(String)` variant; the parser
+  now emits it whenever an attribute's declared type is `string` (the
+  raw UTF-8 byte payload with no length prefix — the outer attribute
+  `size` field bounds the byte count, so the empty string is legal as
+  a zero-byte payload). The encoder writes the typed variant back to
+  byte-identical output: `encode_header(v, [String("x")]) ==
+  encode_header(v, [Other { type_name: "string", data: b"x" }])`. The
+  reader helpers `find_part_type` (multi-part type discrimination)
+  and the deep-module's `find_string_attr` accept BOTH shapes so the
+  existing encoder construction sites (which still build `Other {
+  type_name: "string", .. }` blobs in 16+ locations across the
+  scanline / tiled / mipmap / ripmap / multipart / deep encoders)
+  continue to produce equivalent files. Non-UTF8 payloads under the
+  `string` type are now rejected at parse time (previously surfaced
+  via `String::from_utf8_lossy` at lookup time, silently dropping
+  bytes). 6 new tests: 4 inline (empty + multi-byte UTF-8 round-trip,
+  legacy-bytes equivalence, non-UTF8 reject) and 2 integration
+  (`tests/string_attribute_validation.rs`: pure-Rust round-trip pins
+  the typed-variant promotion; `exrheader` cross-validation splices a
+  typed `comments` attribute into a 4×4 NONE-compression scanline
+  file with corrected line-offset table and confirms `exrheader`
+  reports the string). Standard EXR attributes carrying this type
+  include the multi-part `type` / `name` / `view`, plus optional
+  `owner` / `comments`; all are now first-class typed values rather
+  than opaque `Other` blobs.
+
 - Round-232 multi-part **mixed** flat scanline + flat tiled WRITE + READ.
   New public API: `encode_exr_multipart_mixed`,
   `parse_exr_multipart_mixed`, `MultipartMixedPart`, `MultipartMixedImage`.

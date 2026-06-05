@@ -135,9 +135,15 @@ pub struct Channel {
 
 /// Decoded value of one EXR header attribute.
 ///
-/// Only the round-1-required attribute types are explicitly parsed;
-/// everything else is preserved as `Other { type_name, data }` so the
-/// header can round-trip without losing decoder-irrelevant metadata.
+/// Typed-enum variants cover the attribute types this crate parses
+/// explicitly; everything else is preserved as `Other { type_name,
+/// data }` so the header can round-trip without losing
+/// decoder-irrelevant metadata. Encoder construction sites in this
+/// crate are free to emit either the typed variant or the equivalent
+/// `Other` blob — both encode to the same on-disk bytes and the
+/// reader-side helpers (e.g. `find_part_type`, `find_chunk_count`,
+/// the deep-data `find_string_attr` / `find_int_attr` lookups) accept
+/// both shapes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
     Channels(Vec<Channel>),
@@ -146,6 +152,13 @@ pub enum AttributeValue {
     LineOrder(LineOrder),
     Float(f32),
     V2f(f32, f32),
+    /// `string` attribute. The on-disk payload is the raw UTF-8 byte
+    /// sequence of the string (no length prefix — the outer attribute
+    /// `size` field already gives the byte length), so the string may
+    /// contain interior NULs / be the empty string. Standard
+    /// attributes that take this type include `type`, `name`, `view`,
+    /// `owner`, and `comments`.
+    String(String),
     /// Anything we don't model as a typed enum yet — preserved verbatim.
     Other {
         type_name: String,

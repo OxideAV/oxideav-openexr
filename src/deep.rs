@@ -861,10 +861,12 @@ fn parse_header_allow_deep(bytes: &[u8]) -> Result<crate::header::ParsedHeader> 
 fn find_string_attr(attrs: &[Attribute], name: &str) -> Option<String> {
     for a in attrs {
         if a.name == name {
-            if let AttributeValue::Other { type_name, data } = &a.value {
-                if type_name == "string" {
+            match &a.value {
+                AttributeValue::String(s) => return Some(s.clone()),
+                AttributeValue::Other { type_name, data } if type_name == "string" => {
                     return Some(String::from_utf8_lossy(data).to_string());
                 }
+                _ => {}
             }
         }
     }

@@ -353,6 +353,19 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
             let y = f32::from_le_bytes(data[4..8].try_into().unwrap());
             Ok(AttributeValue::V2f(x, y))
         }
+        "string" => {
+            // The payload is raw UTF-8 with no length prefix; the
+            // outer attribute size field already bounds the byte
+            // count. The empty string is legal (zero-byte payload).
+            // We accept any byte sequence that parses as UTF-8 and
+            // surface a parse error otherwise (rather than silently
+            // dropping bytes via from_utf8_lossy) — round-tripping
+            // arbitrary bytes belongs in the `Other` arm.
+            let s = std::str::from_utf8(data)
+                .map_err(|e| ExrError::invalid(format!("non-UTF8 string attribute: {e}")))?
+                .to_string();
+            Ok(AttributeValue::String(s))
+        }
         _ => Ok(AttributeValue::Other {
             type_name: type_name.to_string(),
             data: data.to_vec(),
@@ -455,6 +468,7 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
             v.extend_from_slice(&y.to_le_bytes());
             ("v2f".to_string(), v)
         }
+        AttributeValue::String(s) => ("string".to_string(), s.as_bytes().to_vec()),
         AttributeValue::Other { type_name, data } => (type_name.clone(), data.clone()),
     }
 }
@@ -511,6 +525,94 @@ mod tests {
         let bytes = encode_channel_list(&chs);
         let chs2 = parse_channel_list(&bytes).unwrap();
         assert_eq!(chs, chs2);
+    }
+
+    #[test]
+    fn string_attribute_roundtrip_simple() {
+        let attrs = vec![
+            Attribute {
+                name: "type".into(),
+                value: AttributeValue::String("scanlineimage".to_string()),
+            },
+            Attribute {
+                name: "name".into(),
+                value: AttributeValue::String("part-0".to_string()),
+            },
+            Attribute {
+                name: "view".into(),
+                value: AttributeValue::String("left".to_string()),
+            },
+        ];
+        let v = VersionField::from_u32(2);
+        let raw = encode_header(v, &attrs);
+        let parsed = parse_header(&raw).unwrap();
+        assert_eq!(parsed.attributes, attrs);
+    }
+
+    #[test]
+    fn string_attribute_roundtrip_empty_and_utf8() {
+        // Empty string + multi-byte UTF-8 codepoints. The OpenEXR
+        // wire format is "raw bytes, length given by outer size", so
+        // any valid UTF-8 sequence (including the empty payload)
+        // round-trips losslessly.
+        let attrs = vec![
+            Attribute {
+                name: "owner".into(),
+                value: AttributeValue::String(String::new()),
+            },
+            Attribute {
+                name: "comments".into(),
+                value: AttributeValue::String("naïve résumé — テスト ✓".to_string()),
+            },
+        ];
+        let v = VersionField::from_u32(2);
+        let raw = encode_header(v, &attrs);
+        let parsed = parse_header(&raw).unwrap();
+        assert_eq!(parsed.attributes, attrs);
+    }
+
+    #[test]
+    fn string_attribute_rejects_non_utf8_payload() {
+        // 0xFF / 0xFE is a stray byte sequence that is never valid
+        // UTF-8 (every 0xFF byte fails leading-byte classification).
+        // We surface this as a parse error rather than silently
+        // dropping bytes via from_utf8_lossy.
+        let payload: Vec<u8> = vec![0xFF, 0xFE, 0x00, 0x01];
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&EXR_MAGIC.to_le_bytes());
+        raw.extend_from_slice(&2u32.to_le_bytes());
+        raw.extend_from_slice(b"badstr\0");
+        raw.extend_from_slice(b"string\0");
+        raw.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+        raw.extend_from_slice(&payload);
+        raw.push(0);
+        let err = parse_header(&raw).expect_err("non-UTF8 string must fail to parse");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("non-UTF8 string attribute"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn string_attribute_wire_format_matches_legacy_other_bytes() {
+        // The typed String variant must produce on-disk bytes
+        // identical to the legacy Other("string", utf-8) shape that
+        // every encoder in this crate currently emits. Otherwise
+        // existing encoder output would change shape when migrated.
+        let typed = Attribute {
+            name: "type".into(),
+            value: AttributeValue::String("tiledimage".to_string()),
+        };
+        let legacy = Attribute {
+            name: "type".into(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"tiledimage".to_vec(),
+            },
+        };
+        let v = VersionField::from_u32(2);
+        assert_eq!(encode_header(v, &[typed]), encode_header(v, &[legacy]));
     }
 
     #[test]
