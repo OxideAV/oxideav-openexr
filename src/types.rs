@@ -122,6 +122,18 @@ impl Box2i {
     }
 }
 
+/// `box2f` attribute value: `(xMin, yMin, xMax, yMax)` as four
+/// little-endian `f32` — 16 bytes on disk, identical field layout to
+/// [`Box2i`] but with floating-point coordinates. The type name on disk
+/// is `"box2f"`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Box2f {
+    pub x_min: f32,
+    pub y_min: f32,
+    pub x_max: f32,
+    pub y_max: f32,
+}
+
 /// One entry in the `channels` (`chlist`) attribute.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
@@ -168,6 +180,8 @@ pub enum AttributeValue {
     Channels(Vec<Channel>),
     Compression(Compression),
     Box2i(Box2i),
+    /// `box2f` — see [`Box2f`]. Four little-endian `f32`, 16 bytes.
+    Box2f(Box2f),
     LineOrder(LineOrder),
     Float(f32),
     /// `int` — single little-endian `i32`, 4 bytes.

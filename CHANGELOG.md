@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-247 **typed `box2f` attribute inspector**. New `AttributeValue::Box2f`
+  variant + public `Box2f` struct (`x_min`, `y_min`, `x_max`, `y_max` as
+  `f32`). `parse_attribute_value` accepts the `"box2f"` type-name with a
+  16-byte payload (four little-endian `f32` packed in declaration order —
+  identical field shape to `box2i` with `i32` swapped for `f32`); short
+  or oversize payloads error. `encode_attribute_value` emits the same
+  16-byte layout under type-name `"box2f"`. New test file
+  `tests/box2f_attribute_roundtrip.rs` (11 tests) covers:
+  (a) algebraic round-trip including signed extremes (`f32::{MIN, MAX,
+  MIN_POSITIVE}`), `INFINITY` / `NEG_INFINITY`, `-0.0`, sub-normal
+  patterns, and NaN bit-pattern preservation;
+  (b) payload-size + LE byte-order pin against a hand-built
+  `1.0 / 2.0 / 4.0 / 8.0` expected-bytes vector;
+  (c) error paths for short and oversize payloads;
+  (d) distinction from `box2i` — same 16-byte width but the two
+  type-names parse into and encode out of distinct typed variants;
+  (e) full scanline-file round-trip through `encode_exr_scanline` +
+  `parse_exr` confirming a `renderRegion: box2f` attribute survives as
+  the typed variant (asserts it doesn't fall through to `Other`); and
+  (f) `exrheader` interop — the binary is invoked as an opaque process
+  on a generated scanline file carrying the `box2f` attribute, asserting
+  zero exit and the presence of the attribute name in the emitted text.
+  Auto-skipped when `exrheader` is absent from `$PATH`. Test count: 308
+  (+11).
+
 - Round-238 **typed attribute inspectors** for nine additional EXR header
   attribute payload types: `int`, `double`, `string`, `v2i`, `v3i`, `v3f`,
   `m33f`, `m44f`, `chromaticities`. New `AttributeValue` variants `Int(i32)`,

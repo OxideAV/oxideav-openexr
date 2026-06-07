@@ -419,8 +419,8 @@ pub use multipart_ripmap_encoder::{encode_exr_multipart_tiled_ripmap, MultipartR
 pub use multipart_tiled_encoder::{encode_exr_multipart_tiled, MultipartTiledPart};
 pub use tile_encoder::{encode_exr_tiled, encode_exr_tiled_rgba_float_with};
 pub use types::{
-    Attribute, AttributeValue, Box2i, Channel, Chromaticities, Compression, LineOrder, PixelType,
-    EXR_MAGIC,
+    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, LineOrder,
+    PixelType, EXR_MAGIC,
 };
 
 #[cfg(feature = "registry")]

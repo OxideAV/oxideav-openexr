@@ -16,8 +16,8 @@
 
 use crate::error::{ExrError, Result};
 use crate::types::{
-    Attribute, AttributeValue, Box2i, Channel, Chromaticities, Compression, LineOrder, PixelType,
-    EXR_MAGIC,
+    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, LineOrder,
+    PixelType, EXR_MAGIC,
 };
 
 /// Decoded version field flags.
@@ -321,6 +321,26 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
                 y_max,
             }))
         }
+        "box2f" => {
+            // Same on-disk shape as box2i with the four fields stored as
+            // little-endian f32 instead of i32. 16 bytes total.
+            if data.len() != 16 {
+                return Err(ExrError::invalid(format!(
+                    "box2f payload size {} != 16",
+                    data.len()
+                )));
+            }
+            let x_min = f32::from_le_bytes(data[0..4].try_into().unwrap());
+            let y_min = f32::from_le_bytes(data[4..8].try_into().unwrap());
+            let x_max = f32::from_le_bytes(data[8..12].try_into().unwrap());
+            let y_max = f32::from_le_bytes(data[12..16].try_into().unwrap());
+            Ok(AttributeValue::Box2f(Box2f {
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+            }))
+        }
         "lineOrder" => {
             if data.len() != 1 {
                 return Err(ExrError::invalid(format!(
@@ -559,6 +579,14 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
             v.extend_from_slice(&b.x_max.to_le_bytes());
             v.extend_from_slice(&b.y_max.to_le_bytes());
             ("box2i".to_string(), v)
+        }
+        AttributeValue::Box2f(b) => {
+            let mut v = Vec::with_capacity(16);
+            v.extend_from_slice(&b.x_min.to_le_bytes());
+            v.extend_from_slice(&b.y_min.to_le_bytes());
+            v.extend_from_slice(&b.x_max.to_le_bytes());
+            v.extend_from_slice(&b.y_max.to_le_bytes());
+            ("box2f".to_string(), v)
         }
         AttributeValue::LineOrder(l) => ("lineOrder".to_string(), vec![*l as u8]),
         AttributeValue::Float(f) => ("float".to_string(), f.to_le_bytes().to_vec()),
