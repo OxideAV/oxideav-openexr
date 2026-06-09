@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-265 **typed `tiledesc` attribute inspector**. New
+  `AttributeValue::TileDesc(TileDesc)` variant routes the 9-byte `tiles`
+  attribute payload through the existing `crate::tiled::TileDesc` struct
+  (`x_size`, `y_size` as `u32`; `level_mode`, `round_mode` as 4-bit
+  nibbles). `parse_attribute_value` now decodes the `"tiledesc"` type
+  name into the typed variant instead of falling through to
+  `AttributeValue::Other { type_name: "tiledesc", .. }`. New
+  `TileDesc::to_bytes() -> [u8; 9]` returns the on-disk packing (two LE
+  `u32` then the packed mode byte = `(round_mode << 4) | level_mode`).
+  `encode_attribute_value` emits the same 9 bytes under type-name
+  `"tiledesc"`. The four call sites in `src/deep.rs` that previously
+  inspected `Other { type_name: "tiledesc", data }` inline (the
+  `parse_exr_deep_tiled` ONE_LEVEL routing, the
+  `parse_exr_deep_tiled_mipmap` MIPMAP routing, the
+  `parse_exr_deep_tiled_ripmap` RIPMAP routing, and their three
+  multi-part siblings) all route through a new
+  `crate::tiled::tiledesc_raw_from_attribute` helper that accepts BOTH
+  the typed variant AND the legacy `Other` shape, so every encoder site
+  that still writes `Other { type_name: "tiledesc", .. }` (round-40 +
+  round-78 + round-124 + round-130 + round-181 + round-192 + round-196 +
+  round-202 + round-208 + round-214 + round-220 + round-227 + round-232)
+  keeps working unchanged. `tiledesc_from_attribute` similarly accepts
+  both shapes. New test file `tests/tiledesc_attribute_roundtrip.rs`
+  (11 tests) covers: (a) algebraic round-trip across every permitted
+  `level_mode` ∈ {0,1,2} × `round_mode` ∈ {0,1} pair plus extreme
+  `x_size`/`y_size` cases (1×1 minimum, large power of two, asymmetric
+  non-power-of-two); (b) on-disk byte-layout pin (two LE `u32` followed
+  by the packed mode byte 0x11 for MIPMAP+ROUND_UP); (c) error paths
+  for short and oversize payloads; (d) full-file round-trip — generate
+  a real tiled file via `encode_exr_tiled_rgba_float_with` and confirm
+  the `tiles` attribute surfaces as the typed
+  `AttributeValue::TileDesc(_)` after `parse_header`, repeated for
+  NONE/ZIP/ZIPS compression to confirm the variant is independent of
+  payload encoding; and (e) `exrheader` interop — opaque-process
+  invocation on a generated tiled file asserts zero exit and the
+  presence of the `tiles` attribute name in the emitted text
+  (auto-skipped when `exrheader` is missing from `$PATH`). Three
+  additional unit tests in `src/tiled.rs` cover the new `to_bytes`
+  helper. Test count: 322 (+14).
+
 - Round-247 **typed `box2f` attribute inspector**. New `AttributeValue::Box2f`
   variant + public `Box2f` struct (`x_min`, `y_min`, `x_max`, `y_max` as
   `f32`). `parse_attribute_value` accepts the `"box2f"` type-name with a

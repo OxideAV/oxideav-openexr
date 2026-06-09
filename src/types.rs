@@ -166,15 +166,15 @@ pub struct Chromaticities {
 ///
 /// The variants typed here are the fixed-size attribute payloads whose
 /// on-disk byte length is implied by the type name (4 for `int`, 8 for
-/// `double` / `v2i` / `v2f`, 12 for `v3i` / `v3f`, 16 for `box2i`, 32
-/// for `chromaticities`, 36 for `m33f`, 64 for `m44f`) plus the
-/// variable-length `String` (raw bytes, length carried by the outer
-/// attribute size field — the same shape this crate's multi-part
-/// writers already emit and `exrmetrics` round-trips, see round-40
-/// CHANGELOG entry) and the `Channels` payload. Any attribute whose
-/// type name doesn't map to one of these variants is preserved verbatim
-/// as `Other { type_name, data }` so the header round-trips without
-/// losing metadata.
+/// `double` / `v2i` / `v2f`, 9 for `tiledesc`, 12 for `v3i` / `v3f`,
+/// 16 for `box2i`, 32 for `chromaticities`, 36 for `m33f`, 64 for
+/// `m44f`) plus the variable-length `String` (raw bytes, length carried
+/// by the outer attribute size field — the same shape this crate's
+/// multi-part writers already emit and `exrmetrics` round-trips, see
+/// round-40 CHANGELOG entry) and the `Channels` payload. Any attribute
+/// whose type name doesn't map to one of these variants is preserved
+/// verbatim as `Other { type_name, data }` so the header round-trips
+/// without losing metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttributeValue {
     Channels(Vec<Channel>),
@@ -204,6 +204,13 @@ pub enum AttributeValue {
     M44f([f32; 16]),
     /// `chromaticities` — see [`Chromaticities`].
     Chromaticities(Chromaticities),
+    /// `tiledesc` — tile-grid descriptor carried by tiled files in the
+    /// `tiles` attribute. Fixed 9-byte payload: two little-endian `u32`
+    /// (`x_size`, `y_size`) followed by a single packed mode byte (low
+    /// nibble = level mode 0=ONE_LEVEL / 1=MIPMAP / 2=RIPMAP; high
+    /// nibble = round mode 0=ROUND_DOWN / 1=ROUND_UP). See
+    /// [`crate::tiled::TileDesc`] for the struct definition.
+    TileDesc(crate::tiled::TileDesc),
     /// Anything we don't model as a typed enum yet — preserved verbatim.
     Other {
         type_name: String,

@@ -15,6 +15,7 @@
 //! a 4-byte signed int holding the payload length in bytes.
 
 use crate::error::{ExrError, Result};
+use crate::tiled::TileDesc;
 use crate::types::{
     Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, LineOrder,
     PixelType, EXR_MAGIC,
@@ -486,6 +487,7 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
                 white_y: f(28),
             }))
         }
+        "tiledesc" => Ok(AttributeValue::TileDesc(TileDesc::from_bytes(data)?)),
         _ => Ok(AttributeValue::Other {
             type_name: type_name.to_string(),
             data: data.to_vec(),
@@ -645,6 +647,7 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
             v.extend_from_slice(&c.white_y.to_le_bytes());
             ("chromaticities".to_string(), v)
         }
+        AttributeValue::TileDesc(td) => ("tiledesc".to_string(), td.to_bytes().to_vec()),
         AttributeValue::Other { type_name, data } => (type_name.clone(), data.clone()),
     }
 }

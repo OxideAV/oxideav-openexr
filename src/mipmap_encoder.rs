@@ -1129,20 +1129,29 @@ mod tests {
             }
         }
 
-        // Also verify tiledesc level_mode = 1 (MIPMAP_LEVELS).
+        // Also verify tiledesc level_mode = 1 (MIPMAP_LEVELS). After r265
+        // the typed `AttributeValue::TileDesc` variant is returned by
+        // `parse_attribute_value`; accept the legacy `Other` shape too
+        // for parity with how the encoder still emits this attribute.
         let tiles_attr = header
             .attributes
             .iter()
             .find(|a| a.name == "tiles")
             .expect("encoder must emit tiles");
         match &tiles_attr.value {
+            AttributeValue::TileDesc(td) => {
+                assert_eq!(td.level_mode, 1, "level_mode should be MIPMAP_LEVELS");
+                assert_eq!(td.round_mode, 0, "round_mode should be ROUND_DOWN");
+            }
             AttributeValue::Other { type_name, data } => {
                 assert_eq!(type_name, "tiledesc");
                 assert_eq!(data.len(), 9);
                 assert_eq!(data[8] & 0x0F, 1, "level_mode should be MIPMAP_LEVELS");
                 assert_eq!((data[8] >> 4) & 0x0F, 0, "round_mode should be ROUND_DOWN");
             }
-            _ => panic!("tiles should be Other(tiledesc)"),
+            other => {
+                panic!("tiles should decode as TileDesc (or legacy Other(tiledesc)); got {other:?}")
+            }
         }
     }
 

@@ -12,7 +12,7 @@ processes (input bytes in, stdout/stderr text out).
 | Capability                          | Status                                           |
 | ----------------------------------- | ------------------------------------------------ |
 | Magic + version field               | parse + write (format-version 2)                 |
-| Attribute table                     | parse + write, eight required attributes typed plus typed inspectors for `int` / `double` / `string` / `v2i` / `v3i` / `v3f` / `m33f` / `m44f` / `chromaticities` / `box2f` (round-trip + validated by `exrheader`) |
+| Attribute table                     | parse + write, eight required attributes typed plus typed inspectors for `int` / `double` / `string` / `v2i` / `v3i` / `v3f` / `m33f` / `m44f` / `chromaticities` / `box2f` / `tiledesc` (round-trip + validated by `exrheader`) |
 | Channel list (`chlist`)             | parse + write — `HALF`, `FLOAT`, `UINT`          |
 | Compression: `NONE`                 | parse + write                                    |
 | Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib via `flate2`)                |

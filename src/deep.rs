@@ -57,6 +57,7 @@ use crate::decoder::{
 use crate::error::{ExrError, Result};
 use crate::header::{encode_attribute_value, parse_header, VersionField};
 use crate::rle::{rle_compress, rle_decompress};
+use crate::tiled::tiledesc_raw_from_attribute;
 use crate::types::{
     Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
 };
@@ -2114,11 +2115,8 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
         .ok_or_else(|| {
             ExrError::invalid("deep tiled file missing required 'tiles' attribute".to_string())
         })?;
-    let (tile_x, tile_y) = match &tile_attr.value {
-        AttributeValue::Other { type_name, data } if type_name == "tiledesc" && data.len() == 9 => {
-            let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-            let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
-            let mode = data[8];
+    let (tile_x, tile_y) =
+        if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
             // ONE_LEVEL = low nibble 0; MIPMAP_LEVELS = 1; RIPMAP_LEVELS = 2;
             // ROUND_DOWN = high nibble 0. Multi-level deep tiled (MIPMAP /
             // RIPMAP) is now handled by dedicated entries — point callers
@@ -2126,22 +2124,22 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
             if (mode & 0x0F) == 0x01 {
                 return Err(ExrError::unsupported(
                     "single-part MIPMAP_LEVELS deep tiled EXR \
-                     (use parse_exr_deep_tiled_mipmap)"
+                 (use parse_exr_deep_tiled_mipmap)"
                         .to_string(),
                 ));
             }
             if (mode & 0x0F) == 0x02 {
                 return Err(ExrError::unsupported(
                     "single-part RIPMAP_LEVELS deep tiled EXR \
-                     (use parse_exr_deep_tiled_ripmap)"
+                 (use parse_exr_deep_tiled_ripmap)"
                         .to_string(),
                 ));
             }
             if mode != 0x00 {
                 return Err(ExrError::unsupported(format!(
                     "deep tiled tiledesc mode=0x{mode:02x} (only 0x00 = ONE_LEVEL + \
-                     ROUND_DOWN, 0x01 = MIPMAP_LEVELS + ROUND_DOWN, and 0x02 = \
-                     RIPMAP_LEVELS + ROUND_DOWN currently supported)"
+                 ROUND_DOWN, 0x01 = MIPMAP_LEVELS + ROUND_DOWN, and 0x02 = \
+                 RIPMAP_LEVELS + ROUND_DOWN currently supported)"
                 )));
             }
             if xs == 0 || ys == 0 {
@@ -2150,14 +2148,12 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
                 )));
             }
             (xs, ys)
-        }
-        _ => {
+        } else {
             return Err(ExrError::invalid(format!(
                 "deep tiled tiles attribute has unexpected shape: {:?}",
                 tile_attr.value
             )));
-        }
-    };
+        };
 
     let width = data_window.width();
     let height = data_window.height();
@@ -3107,47 +3103,41 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
                     "multi-part deep tiled part {i} ('{name}') missing required 'tiles' attribute"
                 ))
             })?;
-        let (tile_x, tile_y) = match &tile_attr.value {
-            AttributeValue::Other { type_name, data }
-                if type_name == "tiledesc" && data.len() == 9 =>
-            {
-                let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-                let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
-                let mode = data[8];
-                if (mode & 0x0F) == 0x01 {
-                    return Err(ExrError::unsupported(
-                        "multi-part MIPMAP_LEVELS deep tiled EXR \
-                         (use parse_exr_multipart_deep_tiled_mipmap)"
-                            .to_string(),
-                    ));
-                }
-                if (mode & 0x0F) == 0x02 {
-                    return Err(ExrError::unsupported(
-                        "multi-part RIPMAP_LEVELS deep tiled EXR \
-                         (use parse_exr_multipart_deep_tiled_ripmap)"
-                            .to_string(),
-                    ));
-                }
-                if mode != 0x00 {
-                    return Err(ExrError::unsupported(format!(
-                        "multi-part deep tiled part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
-                         (only 0x00 = ONE_LEVEL + ROUND_DOWN, 0x01 = MIPMAP_LEVELS + ROUND_DOWN, \
-                         and 0x02 = RIPMAP_LEVELS + ROUND_DOWN currently supported)"
-                    )));
-                }
-                if xs == 0 || ys == 0 {
-                    return Err(ExrError::invalid(format!(
-                        "multi-part deep tiled part {i} ('{name}'): tile size {xs}×{ys} must both be > 0"
-                    )));
-                }
-                (xs, ys)
+        let (tile_x, tile_y) = if let Some((xs, ys, mode)) =
+            tiledesc_raw_from_attribute(&tile_attr.value)
+        {
+            if (mode & 0x0F) == 0x01 {
+                return Err(ExrError::unsupported(
+                    "multi-part MIPMAP_LEVELS deep tiled EXR \
+                     (use parse_exr_multipart_deep_tiled_mipmap)"
+                        .to_string(),
+                ));
             }
-            _ => {
-                return Err(ExrError::invalid(format!(
-                    "multi-part deep tiled part {i} ('{name}'): tiles attribute has unexpected shape: {:?}",
-                    tile_attr.value
+            if (mode & 0x0F) == 0x02 {
+                return Err(ExrError::unsupported(
+                    "multi-part RIPMAP_LEVELS deep tiled EXR \
+                     (use parse_exr_multipart_deep_tiled_ripmap)"
+                        .to_string(),
+                ));
+            }
+            if mode != 0x00 {
+                return Err(ExrError::unsupported(format!(
+                    "multi-part deep tiled part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                     (only 0x00 = ONE_LEVEL + ROUND_DOWN, 0x01 = MIPMAP_LEVELS + ROUND_DOWN, \
+                     and 0x02 = RIPMAP_LEVELS + ROUND_DOWN currently supported)"
                 )));
             }
+            if xs == 0 || ys == 0 {
+                return Err(ExrError::invalid(format!(
+                    "multi-part deep tiled part {i} ('{name}'): tile size {xs}×{ys} must both be > 0"
+                )));
+            }
+            (xs, ys)
+        } else {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled part {i} ('{name}'): tiles attribute has unexpected shape: {:?}",
+                tile_attr.value
+            )));
         };
         let width = data_window.width();
         let height = data_window.height();
@@ -4024,18 +4014,15 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
                 "deep mipmap tiled file missing required 'tiles' attribute".to_string(),
             )
         })?;
-    let (tile_x, tile_y) = match &tile_attr.value {
-        AttributeValue::Other { type_name, data } if type_name == "tiledesc" && data.len() == 9 => {
-            let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-            let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
-            let mode = data[8];
+    let (tile_x, tile_y) =
+        if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
             if mode != 0x01 {
                 return Err(ExrError::unsupported(format!(
                     "deep mipmap tiled tiledesc mode=0x{mode:02x} \
-                     (parse_exr_deep_tiled_mipmap requires mode=0x01 = \
-                     MIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
-                     parse_exr_deep_tiled, RIPMAP_LEVELS through \
-                     parse_exr_deep_tiled_ripmap)"
+                 (parse_exr_deep_tiled_mipmap requires mode=0x01 = \
+                 MIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
+                 parse_exr_deep_tiled, RIPMAP_LEVELS through \
+                 parse_exr_deep_tiled_ripmap)"
                 )));
             }
             if xs == 0 || ys == 0 {
@@ -4044,14 +4031,12 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
                 )));
             }
             (xs, ys)
-        }
-        _ => {
+        } else {
             return Err(ExrError::invalid(format!(
                 "deep mipmap tiled tiles attribute has unexpected shape: {:?}",
                 tile_attr.value
             )));
-        }
-    };
+        };
 
     let width = data_window.width();
     let height = data_window.height();
@@ -4991,18 +4976,15 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
                 "deep ripmap tiled file missing required 'tiles' attribute".to_string(),
             )
         })?;
-    let (tile_x, tile_y) = match &tile_attr.value {
-        AttributeValue::Other { type_name, data } if type_name == "tiledesc" && data.len() == 9 => {
-            let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-            let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
-            let mode = data[8];
+    let (tile_x, tile_y) =
+        if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
             if mode != 0x02 {
                 return Err(ExrError::unsupported(format!(
                     "deep ripmap tiled tiledesc mode=0x{mode:02x} \
-                     (parse_exr_deep_tiled_ripmap requires mode=0x02 = \
-                     RIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
-                     parse_exr_deep_tiled, MIPMAP_LEVELS through \
-                     parse_exr_deep_tiled_mipmap)"
+                 (parse_exr_deep_tiled_ripmap requires mode=0x02 = \
+                 RIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
+                 parse_exr_deep_tiled, MIPMAP_LEVELS through \
+                 parse_exr_deep_tiled_mipmap)"
                 )));
             }
             if xs == 0 || ys == 0 {
@@ -5011,14 +4993,12 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
                 )));
             }
             (xs, ys)
-        }
-        _ => {
+        } else {
             return Err(ExrError::invalid(format!(
                 "deep ripmap tiled tiles attribute has unexpected shape: {:?}",
                 tile_attr.value
             )));
-        }
-    };
+        };
 
     let width = data_window.width();
     let height = data_window.height();
@@ -6070,45 +6050,38 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
                     "multi-part deep tiled MIPMAP part {i} ('{name}') missing required 'tiles' attribute"
                 ))
             })?;
-        let (tile_x, tile_y) = match &tile_attr.value {
-            AttributeValue::Other { type_name, data }
-                if type_name == "tiledesc" && data.len() == 9 =>
-            {
-                let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-                let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
-                let mode = data[8];
+        let (tile_x, tile_y) =
+            if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
                 if (mode & 0x0F) == 0x02 {
                     return Err(ExrError::unsupported(format!(
-                        "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
-                         (RIPMAP_LEVELS multi-part deep tiled routes through \
-                         parse_exr_multipart_deep_tiled_ripmap)"
-                    )));
+                    "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                     (RIPMAP_LEVELS multi-part deep tiled routes through \
+                     parse_exr_multipart_deep_tiled_ripmap)"
+                )));
                 }
                 if mode != 0x01 {
                     return Err(ExrError::unsupported(format!(
-                        "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
-                         (parse_exr_multipart_deep_tiled_mipmap requires mode=0x01 = \
-                         MIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
-                         parse_exr_multipart_deep_tiled, RIPMAP_LEVELS through \
-                         parse_exr_multipart_deep_tiled_ripmap)"
-                    )));
+                    "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                     (parse_exr_multipart_deep_tiled_mipmap requires mode=0x01 = \
+                     MIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
+                     parse_exr_multipart_deep_tiled, RIPMAP_LEVELS through \
+                     parse_exr_multipart_deep_tiled_ripmap)"
+                )));
                 }
                 if xs == 0 || ys == 0 {
                     return Err(ExrError::invalid(format!(
                         "multi-part deep tiled MIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
-                         must both be > 0"
+                     must both be > 0"
                     )));
                 }
                 (xs, ys)
-            }
-            _ => {
+            } else {
                 return Err(ExrError::invalid(format!(
                     "multi-part deep tiled MIPMAP part {i} ('{name}'): tiles attribute has \
-                     unexpected shape: {:?}",
+                 unexpected shape: {:?}",
                     tile_attr.value
                 )));
-            }
-        };
+            };
         let width = data_window.width();
         let height = data_window.height();
         if width == 0 || height == 0 {
@@ -7178,38 +7151,31 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
                     "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'tiles' attribute"
                 ))
             })?;
-        let (tile_x, tile_y) = match &tile_attr.value {
-            AttributeValue::Other { type_name, data }
-                if type_name == "tiledesc" && data.len() == 9 =>
-            {
-                let xs = u32::from_le_bytes(data[0..4].try_into().unwrap());
-                let ys = u32::from_le_bytes(data[4..8].try_into().unwrap());
-                let mode = data[8];
+        let (tile_x, tile_y) =
+            if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
                 if mode != 0x02 {
                     return Err(ExrError::unsupported(format!(
-                        "multi-part deep tiled RIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
-                         (parse_exr_multipart_deep_tiled_ripmap requires mode=0x02 = \
-                         RIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
-                         parse_exr_multipart_deep_tiled, MIPMAP through \
-                         parse_exr_multipart_deep_tiled_mipmap)"
-                    )));
+                    "multi-part deep tiled RIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
+                     (parse_exr_multipart_deep_tiled_ripmap requires mode=0x02 = \
+                     RIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
+                     parse_exr_multipart_deep_tiled, MIPMAP through \
+                     parse_exr_multipart_deep_tiled_mipmap)"
+                )));
                 }
                 if xs == 0 || ys == 0 {
                     return Err(ExrError::invalid(format!(
                         "multi-part deep tiled RIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
-                         must both be > 0"
+                     must both be > 0"
                     )));
                 }
                 (xs, ys)
-            }
-            _ => {
+            } else {
                 return Err(ExrError::invalid(format!(
                     "multi-part deep tiled RIPMAP part {i} ('{name}'): tiles attribute has \
-                     unexpected shape: {:?}",
+                 unexpected shape: {:?}",
                     tile_attr.value
                 )));
-            }
-        };
+            };
         let width = data_window.width();
         let height = data_window.height();
         if width == 0 || height == 0 {
