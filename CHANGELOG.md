@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-273 **optional standard header-attribute types**: six previously
+  `Other`-passthrough attribute types now parse + encode as typed
+  `AttributeValue` variants. `v2d` (two LE `f64`, 16 bytes), `v3d`
+  (three LE `f64`, 24 bytes), `rational` (`i32` numerator + `u32`
+  denominator, 8 bytes — used by `framesPerSecond`), `timecode`
+  (`Timecode { time_and_flags, user_data }`, two LE `u32`, 8 bytes; the
+  `time_and_flags` word is stored verbatim and BCD `hours`/`minutes`/
+  `seconds`/`frames` accessors decode the four time nibbles),
+  `keycode` (`Keycode` — seven LE `i32` in the order film-mfc-code,
+  film-type, prefix, count, perf-offset, perfs-per-frame,
+  perfs-per-count; 28 bytes), and `stringvector` (a sequence of
+  `i32`-length-prefixed UTF-8 entries, count implied by the outer
+  attribute size). Each type's exact on-disk layout (field order, byte
+  widths, BCD packing, keycode field ranges) was derived empirically
+  from the opaque `exrheader` validator's text rendering. New
+  `tests/optional_attribute_roundtrip.rs` adds algebraic round-trips,
+  malformed-size rejection, a full-header round-trip through
+  `parse_exr`, and an `exrheader` interop check (auto-skipped when the
+  binary is absent). 9 new tests.
+
 - Round-265 **typed `tiledesc` attribute inspector**. New
   `AttributeValue::TileDesc(TileDesc)` variant routes the 9-byte `tiles`
   attribute payload through the existing `crate::tiled::TileDesc` struct

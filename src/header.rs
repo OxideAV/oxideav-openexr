@@ -17,8 +17,8 @@
 use crate::error::{ExrError, Result};
 use crate::tiled::TileDesc;
 use crate::types::{
-    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, LineOrder,
-    PixelType, EXR_MAGIC,
+    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, Keycode,
+    LineOrder, PixelType, Timecode, EXR_MAGIC,
 };
 
 /// Decoded version field flags.
@@ -488,6 +488,105 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
             }))
         }
         "tiledesc" => Ok(AttributeValue::TileDesc(TileDesc::from_bytes(data)?)),
+        "v2d" => {
+            if data.len() != 16 {
+                return Err(ExrError::invalid(format!(
+                    "v2d payload size {} != 16",
+                    data.len()
+                )));
+            }
+            let x = f64::from_le_bytes(data[0..8].try_into().unwrap());
+            let y = f64::from_le_bytes(data[8..16].try_into().unwrap());
+            Ok(AttributeValue::V2d(x, y))
+        }
+        "v3d" => {
+            if data.len() != 24 {
+                return Err(ExrError::invalid(format!(
+                    "v3d payload size {} != 24",
+                    data.len()
+                )));
+            }
+            let x = f64::from_le_bytes(data[0..8].try_into().unwrap());
+            let y = f64::from_le_bytes(data[8..16].try_into().unwrap());
+            let z = f64::from_le_bytes(data[16..24].try_into().unwrap());
+            Ok(AttributeValue::V3d(x, y, z))
+        }
+        "rational" => {
+            if data.len() != 8 {
+                return Err(ExrError::invalid(format!(
+                    "rational payload size {} != 8",
+                    data.len()
+                )));
+            }
+            let n = i32::from_le_bytes(data[0..4].try_into().unwrap());
+            let d = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            Ok(AttributeValue::Rational(n, d))
+        }
+        "timecode" => {
+            if data.len() != 8 {
+                return Err(ExrError::invalid(format!(
+                    "timecode payload size {} != 8",
+                    data.len()
+                )));
+            }
+            let time_and_flags = u32::from_le_bytes(data[0..4].try_into().unwrap());
+            let user_data = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            Ok(AttributeValue::Timecode(Timecode {
+                time_and_flags,
+                user_data,
+            }))
+        }
+        "keycode" => {
+            if data.len() != 28 {
+                return Err(ExrError::invalid(format!(
+                    "keycode payload size {} != 28",
+                    data.len()
+                )));
+            }
+            let f = |i: usize| i32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap());
+            Ok(AttributeValue::Keycode(Keycode {
+                film_mfc_code: f(0),
+                film_type: f(1),
+                prefix: f(2),
+                count: f(3),
+                perf_offset: f(4),
+                perfs_per_frame: f(5),
+                perfs_per_count: f(6),
+            }))
+        }
+        "stringvector" => {
+            // A sequence of (i32 length, UTF-8 bytes) entries. The entry
+            // count is implied by the payload size — read until the bytes
+            // are exhausted.
+            let mut strings = Vec::new();
+            let mut pos = 0usize;
+            while pos < data.len() {
+                if pos + 4 > data.len() {
+                    return Err(ExrError::invalid(
+                        "stringvector truncated reading entry length".to_string(),
+                    ));
+                }
+                let len = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                if len < 0 {
+                    return Err(ExrError::invalid(format!(
+                        "stringvector entry has negative length {len}"
+                    )));
+                }
+                pos += 4;
+                let len = len as usize;
+                if pos + len > data.len() {
+                    return Err(ExrError::invalid(
+                        "stringvector entry length exceeds payload".to_string(),
+                    ));
+                }
+                let s = std::str::from_utf8(&data[pos..pos + len])
+                    .map_err(|e| ExrError::invalid(format!("non-UTF8 stringvector entry: {e}")))?
+                    .to_string();
+                strings.push(s);
+                pos += len;
+            }
+            Ok(AttributeValue::StringVector(strings))
+        }
         _ => Ok(AttributeValue::Other {
             type_name: type_name.to_string(),
             data: data.to_vec(),
@@ -648,6 +747,54 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
             ("chromaticities".to_string(), v)
         }
         AttributeValue::TileDesc(td) => ("tiledesc".to_string(), td.to_bytes().to_vec()),
+        AttributeValue::V2d(x, y) => {
+            let mut v = Vec::with_capacity(16);
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            ("v2d".to_string(), v)
+        }
+        AttributeValue::V3d(x, y, z) => {
+            let mut v = Vec::with_capacity(24);
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            v.extend_from_slice(&z.to_le_bytes());
+            ("v3d".to_string(), v)
+        }
+        AttributeValue::Rational(n, d) => {
+            let mut v = Vec::with_capacity(8);
+            v.extend_from_slice(&n.to_le_bytes());
+            v.extend_from_slice(&d.to_le_bytes());
+            ("rational".to_string(), v)
+        }
+        AttributeValue::Timecode(tc) => {
+            let mut v = Vec::with_capacity(8);
+            v.extend_from_slice(&tc.time_and_flags.to_le_bytes());
+            v.extend_from_slice(&tc.user_data.to_le_bytes());
+            ("timecode".to_string(), v)
+        }
+        AttributeValue::Keycode(kc) => {
+            let mut v = Vec::with_capacity(28);
+            for field in [
+                kc.film_mfc_code,
+                kc.film_type,
+                kc.prefix,
+                kc.count,
+                kc.perf_offset,
+                kc.perfs_per_frame,
+                kc.perfs_per_count,
+            ] {
+                v.extend_from_slice(&field.to_le_bytes());
+            }
+            ("keycode".to_string(), v)
+        }
+        AttributeValue::StringVector(strings) => {
+            let mut v = Vec::new();
+            for s in strings {
+                v.extend_from_slice(&(s.len() as i32).to_le_bytes());
+                v.extend_from_slice(s.as_bytes());
+            }
+            ("stringvector".to_string(), v)
+        }
         AttributeValue::Other { type_name, data } => (type_name.clone(), data.clone()),
     }
 }

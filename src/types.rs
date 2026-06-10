@@ -211,11 +211,98 @@ pub enum AttributeValue {
     /// nibble = round mode 0=ROUND_DOWN / 1=ROUND_UP). See
     /// [`crate::tiled::TileDesc`] for the struct definition.
     TileDesc(crate::tiled::TileDesc),
+    /// `v2d` — two little-endian `f64`, 16 bytes.
+    V2d(f64, f64),
+    /// `v3d` — three little-endian `f64`, 24 bytes.
+    V3d(f64, f64, f64),
+    /// `rational` — an `i32` numerator followed by a `u32` denominator,
+    /// 8 bytes. Used by e.g. `framesPerSecond`.
+    Rational(i32, u32),
+    /// `timecode` — see [`Timecode`]. Two little-endian `u32`, 8 bytes.
+    Timecode(Timecode),
+    /// `keycode` — see [`Keycode`]. Seven little-endian `i32`, 28 bytes.
+    Keycode(Keycode),
+    /// `stringvector` — a sequence of length-prefixed strings. Each entry
+    /// is a little-endian `i32` byte length followed by that many UTF-8
+    /// bytes (no NUL terminator). The entry count is implied by the
+    /// outer attribute size field.
+    StringVector(Vec<String>),
     /// Anything we don't model as a typed enum yet — preserved verbatim.
     Other {
         type_name: String,
         data: Vec<u8>,
     },
+}
+
+/// `timecode` attribute payload.
+///
+/// On disk this is two consecutive little-endian `u32` words, 8 bytes
+/// total. The type name is `"timecode"`.
+///
+/// * `time_and_flags` — the packed time + flag word (SMPTE 12M layout):
+///   the four time components (hours, minutes, seconds, frames) are
+///   stored as binary-coded-decimal nibble pairs, interleaved with the
+///   drop-frame / colour-frame / field-phase / binary-group flag bits.
+///   This crate stores the word verbatim so the encoding round-trips
+///   bit-exactly regardless of which flag bits are set; the
+///   [`Timecode::hours`] / [`Timecode::minutes`] / [`Timecode::seconds`]
+///   / [`Timecode::frames`] accessors decode the BCD time nibbles that
+///   the `exrheader` validator renders as `HH:MM:SS:FF`.
+/// * `user_data` — the second 32-bit word, carried verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timecode {
+    pub time_and_flags: u32,
+    pub user_data: u32,
+}
+
+impl Timecode {
+    /// Decode the BCD `frames` field (low two nibbles of the BCD time
+    /// quartet — the `tens` nibble is masked to two bits per SMPTE 12M
+    /// since frame counts never exceed 39).
+    pub fn frames(&self) -> u8 {
+        let b = (self.time_and_flags & 0xFF) as u8;
+        ((b >> 4) & 0x3) * 10 + (b & 0xF)
+    }
+    /// Decode the BCD `seconds` field (tens nibble masked to three bits).
+    pub fn seconds(&self) -> u8 {
+        let b = ((self.time_and_flags >> 8) & 0xFF) as u8;
+        ((b >> 4) & 0x7) * 10 + (b & 0xF)
+    }
+    /// Decode the BCD `minutes` field (tens nibble masked to three bits).
+    pub fn minutes(&self) -> u8 {
+        let b = ((self.time_and_flags >> 16) & 0xFF) as u8;
+        ((b >> 4) & 0x7) * 10 + (b & 0xF)
+    }
+    /// Decode the BCD `hours` field (tens nibble masked to two bits).
+    pub fn hours(&self) -> u8 {
+        let b = ((self.time_and_flags >> 24) & 0xFF) as u8;
+        ((b >> 4) & 0x3) * 10 + (b & 0xF)
+    }
+}
+
+/// `keycode` attribute payload: SMPTE 268M motion-picture-film key code.
+///
+/// On disk this is seven consecutive little-endian `i32` words, 28 bytes
+/// total, in the field order observed below. The type name is
+/// `"keycode"`. The validator-enforced value ranges (which this crate
+/// does not itself enforce on parse, to keep arbitrary headers
+/// round-trippable) are noted per field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keycode {
+    /// Film manufacturer code (0..=99).
+    pub film_mfc_code: i32,
+    /// Film type code (0..=99).
+    pub film_type: i32,
+    /// Prefix identifying the film roll (0..=999999).
+    pub prefix: i32,
+    /// Count of film perforations within the roll (0..=9999).
+    pub count: i32,
+    /// Perforation offset within the frame (0..=119).
+    pub perf_offset: i32,
+    /// Number of perforations per frame (1..=15).
+    pub perfs_per_frame: i32,
+    /// Number of perforations per count (20..=120).
+    pub perfs_per_count: i32,
 }
 
 /// One header attribute (name + typed value).
