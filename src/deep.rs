@@ -110,7 +110,7 @@ impl DeepExrImage {
 /// Helper: cumulative-prefix-sum of a samples-per-pixel slice. Output
 /// length == input length; entry `i` is the running sum *through pixel i*
 /// (NOT exclusive — matches the OpenEXR offset-table convention).
-fn cumulative_inclusive(spp: &[u32]) -> Vec<i32> {
+pub(crate) fn cumulative_inclusive(spp: &[u32]) -> Vec<i32> {
     let mut out = Vec::with_capacity(spp.len());
     let mut acc: i64 = 0;
     for &n in spp {
@@ -122,7 +122,7 @@ fn cumulative_inclusive(spp: &[u32]) -> Vec<i32> {
 
 /// Convert a list of column-indexed cumulative offsets back to per-pixel
 /// sample counts. Inverse of [`cumulative_inclusive`] for one row.
-fn per_pixel_from_cumulative(cumulative: &[i32]) -> Result<Vec<u32>> {
+pub(crate) fn per_pixel_from_cumulative(cumulative: &[i32]) -> Result<Vec<u32>> {
     let mut out = Vec::with_capacity(cumulative.len());
     let mut prev: i32 = 0;
     for &c in cumulative {
@@ -140,7 +140,7 @@ fn per_pixel_from_cumulative(cumulative: &[i32]) -> Result<Vec<u32>> {
 /// Apply the same compress-byte pipeline used for flat scanlines:
 /// interleave + predictor + (zlib | rle). Inverse of
 /// [`decompress_buffer`].
-fn compress_buffer(raw: &[u8], compression: Compression) -> Result<Vec<u8>> {
+pub(crate) fn compress_buffer(raw: &[u8], compression: Compression) -> Result<Vec<u8>> {
     Ok(match compression {
         Compression::None => raw.to_vec(),
         Compression::Zips => {
@@ -178,7 +178,7 @@ fn compress_buffer(raw: &[u8], compression: Compression) -> Result<Vec<u8>> {
 
 /// Inverse of [`compress_buffer`]. `unpacked_size` is the expected size
 /// of the recovered uncompressed buffer.
-fn decompress_buffer(
+pub(crate) fn decompress_buffer(
     payload: &[u8],
     unpacked_size: usize,
     compression: Compression,
@@ -859,7 +859,7 @@ fn parse_header_allow_deep(bytes: &[u8]) -> Result<crate::header::ParsedHeader> 
     Ok(parsed)
 }
 
-fn find_string_attr(attrs: &[Attribute], name: &str) -> Option<String> {
+pub(crate) fn find_string_attr(attrs: &[Attribute], name: &str) -> Option<String> {
     for a in attrs {
         if a.name == name {
             match &a.value {

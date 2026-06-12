@@ -71,7 +71,7 @@ fn mixed_scanline_then_tiled_zips() {
         .iter()
         .zip([(&a0, &b0, &g0, &r0), (&a1, &b1, &g1, &r1)].iter())
     {
-        let image = img.image();
+        let image = img.image().expect("flat part");
         assert_eq!(image.width(), w);
         assert_eq!(image.height(), h);
         assert_eq!(&image.planes[0].samples, *sa);
@@ -114,8 +114,8 @@ fn mixed_tiled_then_scanline_none() {
     assert_eq!(imgs.len(), 2);
     assert!(imgs[0].is_tiled());
     assert!(imgs[1].is_scanline());
-    let img0 = imgs[0].image();
-    let img1 = imgs[1].image();
+    let img0 = imgs[0].image().expect("flat part");
+    let img1 = imgs[1].image().expect("flat part");
     assert_eq!(&img0.planes[0].samples, &a0);
     assert_eq!(&img0.planes[1].samples, &b0);
     assert_eq!(&img0.planes[2].samples, &g0);
@@ -173,7 +173,7 @@ fn mixed_three_parts_mixed_compression() {
         (&a2, &b2, &g2, &r2),
     ];
     for (img, (sa, sb, sg, sr)) in imgs.iter().zip(sources.iter()) {
-        let image = img.image();
+        let image = img.image().expect("flat part");
         assert_eq!(&image.planes[0].samples, *sa);
         assert_eq!(&image.planes[1].samples, *sb);
         assert_eq!(&image.planes[2].samples, *sg);
@@ -214,8 +214,8 @@ fn mixed_tiled_with_edge_tiles_zip() {
     .unwrap();
     let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
     assert_eq!(imgs.len(), 2);
-    let img0 = imgs[0].image();
-    let img1 = imgs[1].image();
+    let img0 = imgs[0].image().expect("flat part");
+    let img1 = imgs[1].image().expect("flat part");
     assert_eq!(&img0.planes[0].samples, &a0);
     assert_eq!(&img0.planes[1].samples, &b0);
     assert_eq!(&img0.planes[2].samples, &g0);
@@ -259,8 +259,8 @@ fn mixed_distinct_dimensions_per_part() {
     .unwrap();
     let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
     assert_eq!(imgs.len(), 2);
-    let img0 = imgs[0].image();
-    let img1 = imgs[1].image();
+    let img0 = imgs[0].image().expect("flat part");
+    let img1 = imgs[1].image().expect("flat part");
     assert_eq!(img0.width(), w0);
     assert_eq!(img0.height(), h0);
     assert_eq!(img1.width(), w1);
@@ -415,7 +415,7 @@ fn mixed_uint_and_half_pixel_types() {
     .unwrap();
     let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
     assert_eq!(imgs.len(), 2);
-    let img0 = imgs[0].image();
+    let img0 = imgs[0].image().expect("flat part");
     // ID plane (UINT) bit-exact under 2^24.
     assert_eq!(&img0.planes[0].samples, &id_plane);
     // Z plane (HALF) is lossy at high precision; the chosen values are
@@ -423,7 +423,416 @@ fn mixed_uint_and_half_pixel_types() {
     // 1/8 in the [0, 8) range, well inside HALF's exactly-representable
     // subnormals.
     assert_eq!(&img0.planes[1].samples, &z_plane);
-    let img1 = imgs[1].image();
+    let img1 = imgs[1].image().expect("flat part");
     assert_eq!(&img1.planes[0].samples, &a1);
     assert_eq!(&img1.planes[3].samples, &r1);
+}
+
+// ---------------------------------------------------------------------
+// Round-282: deep parts inside mixed multi-part files.
+// ---------------------------------------------------------------------
+
+use oxideav_openexr::{
+    build_box_filter_pyramid, encode_exr_multipart_tiled_mipmap, parse_exr,
+    parse_exr_deep_scanline, parse_exr_deep_tiled, MultipartMipmapTiledPart,
+};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+fn exr_tool_available(tool: &str) -> bool {
+    Command::new(tool)
+        .output()
+        .map(|o| o.status.code().is_some())
+        .unwrap_or(false)
+}
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn tempdir(tag: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "oxideav-openexr-mixdeep-{tag}-{nanos}-{}-{c}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.to_string_lossy().into_owned()
+}
+
+fn cleanup_dir(dir: &str) -> std::io::Result<()> {
+    for ent in std::fs::read_dir(dir)?.flatten() {
+        let _ = std::fs::remove_file(ent.path());
+    }
+    std::fs::remove_dir(dir)
+}
+
+fn az_deep_channels() -> Vec<Channel> {
+    ["A", "Z"]
+        .iter()
+        .map(|n| Channel {
+            name: (*n).to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        })
+        .collect()
+}
+
+/// Deterministic deep-data fixture: per-pixel sample counts cycling
+/// 0..=3 (zeros included so empty pixels are exercised) plus two
+/// channel sample lists in pixel-scan order.
+fn make_deep_data(w: u32, h: u32, salt: f32) -> (Vec<u32>, Vec<f32>, Vec<f32>) {
+    let pixels = (w as usize) * (h as usize);
+    let mut spp = Vec::with_capacity(pixels);
+    let mut a = Vec::new();
+    let mut z = Vec::new();
+    for p in 0..pixels {
+        let n = ((p + (salt * 4.0) as usize) % 4) as u32;
+        spp.push(n);
+        for s in 0..n {
+            a.push((p as f32) * 0.5 + (s as f32) + salt);
+            z.push((p as f32) * 0.25 - (s as f32) * 2.0 + salt);
+        }
+    }
+    (spp, a, z)
+}
+
+#[test]
+fn mixed_flat_scanline_and_deep_scanline_roundtrip() {
+    let w = 16;
+    let h = 12;
+    let (a0, b0, g0, r0) = make_planes(w, h, 0.0);
+    let (spp, da, dz) = make_deep_data(w, h, 0.5);
+    let bytes = encode_exr_multipart_mixed(&[
+        MultipartMixedPart::Scanline {
+            name: "flat".to_string(),
+            width: w,
+            height: h,
+            channels: rgba_channels(),
+            planes: vec![&a0, &b0, &g0, &r0],
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::DeepScanline {
+            name: "deep".to_string(),
+            width: w,
+            height: h,
+            channels: az_deep_channels(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&da, &dz],
+            compression: Compression::Zips,
+        },
+    ])
+    .unwrap();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert_eq!(imgs.len(), 2);
+    assert!(imgs[0].is_scanline());
+    assert!(imgs[1].is_deep_scanline());
+    let flat = imgs[0].image().expect("flat part");
+    assert_eq!(&flat.planes[0].samples, &a0);
+    assert_eq!(&flat.planes[3].samples, &r0);
+    assert!(imgs[1].image().is_none());
+    let deep = imgs[1].deep_scanline().expect("deep part");
+    assert_eq!(deep.name, "deep");
+    assert_eq!(deep.samples_per_pixel, spp);
+    assert_eq!(deep.channel_samples[0], da);
+    assert_eq!(deep.channel_samples[1], dz);
+}
+
+#[test]
+fn mixed_deep_tiled_and_flat_tiled_edge_tiles() {
+    // 13×9 with 4×3 tiles → right column + bottom row are edge tiles.
+    let w = 13;
+    let h = 9;
+    let (a0, b0, g0, r0) = make_planes(w, h, 0.25);
+    let (spp, da, dz) = make_deep_data(w, h, 0.0);
+    let bytes = encode_exr_multipart_mixed(&[
+        MultipartMixedPart::DeepTiled {
+            name: "deep_t".to_string(),
+            width: w,
+            height: h,
+            tile_x: 4,
+            tile_y: 3,
+            channels: az_deep_channels(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&da, &dz],
+            compression: Compression::Rle,
+        },
+        MultipartMixedPart::Tiled {
+            name: "flat_t".to_string(),
+            width: w,
+            height: h,
+            tile_x: 4,
+            tile_y: 3,
+            channels: rgba_channels(),
+            planes: vec![&a0, &b0, &g0, &r0],
+            compression: Compression::None,
+        },
+    ])
+    .unwrap();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert_eq!(imgs.len(), 2);
+    assert!(imgs[0].is_deep_tiled());
+    assert!(imgs[1].is_tiled());
+    let deep = imgs[0].deep_tiled().expect("deep tiled part");
+    assert_eq!(deep.name, "deep_t");
+    assert_eq!(deep.tile_x, 4);
+    assert_eq!(deep.tile_y, 3);
+    assert_eq!(deep.samples_per_pixel, spp);
+    assert_eq!(deep.channel_samples[0], da);
+    assert_eq!(deep.channel_samples[1], dz);
+    let flat = imgs[1].image().expect("flat part");
+    assert_eq!(&flat.planes[0].samples, &a0);
+    assert_eq!(&flat.planes[3].samples, &r0);
+}
+
+/// Build the canonical four-part fixture (scanline, deep scanline,
+/// tiled, deep tiled — distinct dimensions + compressions per part).
+#[allow(clippy::type_complexity)]
+fn four_part_fixture() -> (
+    Vec<u8>,
+    (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>),
+    (Vec<u32>, Vec<f32>, Vec<f32>),
+    (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>),
+    (Vec<u32>, Vec<f32>, Vec<f32>),
+) {
+    let flat0 = make_planes(16, 12, 0.0);
+    let deep0 = make_deep_data(11, 7, 0.25);
+    let flat1 = make_planes(13, 9, 0.5);
+    let deep1 = make_deep_data(13, 9, 0.75);
+    let bytes = encode_exr_multipart_mixed(&[
+        MultipartMixedPart::Scanline {
+            name: "p0_scan".to_string(),
+            width: 16,
+            height: 12,
+            channels: rgba_channels(),
+            planes: vec![&flat0.0, &flat0.1, &flat0.2, &flat0.3],
+            compression: Compression::Zip,
+        },
+        MultipartMixedPart::DeepScanline {
+            name: "p1_deepscan".to_string(),
+            width: 11,
+            height: 7,
+            channels: az_deep_channels(),
+            samples_per_pixel: &deep0.0,
+            channel_samples: vec![&deep0.1, &deep0.2],
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::Tiled {
+            name: "p2_tile".to_string(),
+            width: 13,
+            height: 9,
+            tile_x: 4,
+            tile_y: 3,
+            channels: rgba_channels(),
+            planes: vec![&flat1.0, &flat1.1, &flat1.2, &flat1.3],
+            compression: Compression::Rle,
+        },
+        MultipartMixedPart::DeepTiled {
+            name: "p3_deeptile".to_string(),
+            width: 13,
+            height: 9,
+            tile_x: 8,
+            tile_y: 8,
+            channels: az_deep_channels(),
+            samples_per_pixel: &deep1.0,
+            channel_samples: vec![&deep1.1, &deep1.2],
+            compression: Compression::None,
+        },
+    ])
+    .unwrap();
+    (bytes, flat0, deep0, flat1, deep1)
+}
+
+#[test]
+fn mixed_all_four_part_types_roundtrip() {
+    let (bytes, flat0, deep0, flat1, deep1) = four_part_fixture();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert_eq!(imgs.len(), 4);
+    assert!(imgs[0].is_scanline());
+    assert!(imgs[1].is_deep_scanline());
+    assert!(imgs[2].is_tiled());
+    assert!(imgs[3].is_deep_tiled());
+
+    let img0 = imgs[0].image().expect("flat scanline");
+    assert_eq!(img0.width(), 16);
+    assert_eq!(&img0.planes[0].samples, &flat0.0);
+    assert_eq!(&img0.planes[3].samples, &flat0.3);
+
+    let d0 = imgs[1].deep_scanline().expect("deep scanline");
+    assert_eq!(d0.name, "p1_deepscan");
+    assert_eq!(d0.width(), 11);
+    assert_eq!(d0.samples_per_pixel, deep0.0);
+    assert_eq!(d0.channel_samples[0], deep0.1);
+    assert_eq!(d0.channel_samples[1], deep0.2);
+
+    let img1 = imgs[2].image().expect("flat tiled");
+    assert_eq!(img1.width(), 13);
+    assert_eq!(&img1.planes[0].samples, &flat1.0);
+    assert_eq!(&img1.planes[3].samples, &flat1.3);
+
+    let d1 = imgs[3].deep_tiled().expect("deep tiled");
+    assert_eq!(d1.name, "p3_deeptile");
+    assert_eq!(d1.width(), 13);
+    assert_eq!(d1.samples_per_pixel, deep1.0);
+    assert_eq!(d1.channel_samples[0], deep1.1);
+    assert_eq!(d1.channel_samples[1], deep1.2);
+}
+
+#[test]
+fn mixed_rejects_deep_zip_compression() {
+    // Deep parts accept only NONE/RLE/ZIPS — ZIP must be rejected at
+    // encode time (matching the homogeneous deep writers).
+    let (spp, da, dz) = make_deep_data(8, 8, 0.0);
+    let res = encode_exr_multipart_mixed(&[MultipartMixedPart::DeepScanline {
+        name: "bad".to_string(),
+        width: 8,
+        height: 8,
+        channels: az_deep_channels(),
+        samples_per_pixel: &spp,
+        channel_samples: vec![&da, &dz],
+        compression: Compression::Zip,
+    }]);
+    assert!(res.is_err());
+}
+
+#[test]
+fn mixed_reader_redirects_multilevel_tiled_files() {
+    // A multi-part MIPMAP tiled file must be rejected with a pointer at
+    // the dedicated multi-level reader, not mis-decoded as ONE_LEVEL.
+    let (a, b, g, r) = make_planes(16, 16, 0.0);
+    let pyramid = build_box_filter_pyramid(16, 16, &[a, b, g, r]);
+    let parts = vec![MultipartMipmapTiledPart {
+        name: "pyr".to_string(),
+        tile_x: 8,
+        tile_y: 8,
+        channels: rgba_channels(),
+        pyramid,
+        compression: Compression::Zip,
+    }];
+    let bytes = encode_exr_multipart_tiled_mipmap(&parts).unwrap();
+    let err = parse_exr_multipart_mixed(&bytes).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("level_mode"),
+        "expected multi-level redirect, got: {msg}"
+    );
+}
+
+#[test]
+fn exrheader_accepts_mixed_deep_flat_file() {
+    if !exr_tool_available("exrheader") {
+        eprintln!("exrheader not available, skipping");
+        return;
+    }
+    let (bytes, ..) = four_part_fixture();
+    let dir = tempdir("exrheader");
+    let path = format!("{dir}/mixed.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("exrheader").arg(&path).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "exrheader failed on our mixed deep+flat multi-part file\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    for needle in [
+        "scanlineimage",
+        "deepscanline",
+        "tiledimage",
+        "deeptile",
+        "p0_scan",
+        "p1_deepscan",
+        "p2_tile",
+        "p3_deeptile",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "exrheader output missing '{needle}'\nstdout: {stdout}"
+        );
+    }
+    let _ = cleanup_dir(&dir);
+}
+
+#[test]
+fn exrmultipart_separate_splits_mixed_deep_flat() {
+    if !exr_tool_available("exrmultipart") || !exr_tool_available("exrheader") {
+        eprintln!("exrmultipart / exrheader not available, skipping");
+        return;
+    }
+    let (bytes, flat0, deep0, flat1, deep1) = four_part_fixture();
+    let dir = tempdir("separate");
+    let in_path = format!("{dir}/in.exr");
+    std::fs::write(&in_path, &bytes).unwrap();
+    let _ = Command::new("exrmultipart")
+        .arg("-separate")
+        .arg("-i")
+        .arg(&in_path)
+        .arg("-o")
+        .arg(format!("{dir}/out.exr"))
+        .output()
+        .expect("exrmultipart spawn");
+
+    let mut splits: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                if name != "in.exr" && name.ends_with(".exr") {
+                    splits.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    splits.sort();
+    if splits.len() != 4 {
+        eprintln!(
+            "exrmultipart split count = {} (expected 4) in {dir}; skipping cross-check",
+            splits.len()
+        );
+        let _ = cleanup_dir(&dir);
+        return;
+    }
+
+    // Identify each split by its part name (exrheader output), then
+    // decode through the matching single-part reader and compare to the
+    // source data sample-for-sample.
+    let mut seen = [false; 4];
+    for s in &splits {
+        let header_out = Command::new("exrheader").arg(s).output().unwrap();
+        let txt = String::from_utf8_lossy(&header_out.stdout);
+        let split_bytes = std::fs::read(s).unwrap();
+        if txt.contains("p0_scan") {
+            let img = parse_exr(&split_bytes).unwrap();
+            assert_eq!(&img.planes[0].samples, &flat0.0, "p0_scan plane A");
+            assert_eq!(&img.planes[3].samples, &flat0.3, "p0_scan plane R");
+            seen[0] = true;
+        } else if txt.contains("p1_deepscan") {
+            let img = parse_exr_deep_scanline(&split_bytes).unwrap();
+            assert_eq!(img.samples_per_pixel, deep0.0, "p1_deepscan spp");
+            assert_eq!(img.channel_samples[0], deep0.1, "p1_deepscan A");
+            assert_eq!(img.channel_samples[1], deep0.2, "p1_deepscan Z");
+            seen[1] = true;
+        } else if txt.contains("p2_tile") {
+            let img = parse_exr(&split_bytes).unwrap();
+            assert_eq!(&img.planes[0].samples, &flat1.0, "p2_tile plane A");
+            assert_eq!(&img.planes[3].samples, &flat1.3, "p2_tile plane R");
+            seen[2] = true;
+        } else if txt.contains("p3_deeptile") {
+            let img = parse_exr_deep_tiled(&split_bytes).unwrap();
+            assert_eq!(img.samples_per_pixel, deep1.0, "p3_deeptile spp");
+            assert_eq!(img.channel_samples[0], deep1.1, "p3_deeptile A");
+            assert_eq!(img.channel_samples[1], deep1.2, "p3_deeptile Z");
+            seen[3] = true;
+        }
+    }
+    assert_eq!(
+        seen, [true; 4],
+        "did not locate all four parts in split outputs"
+    );
+    let _ = cleanup_dir(&dir);
 }

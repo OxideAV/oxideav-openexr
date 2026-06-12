@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-282 **deep parts inside mixed multi-part files**:
+  `encode_exr_multipart_mixed` / `parse_exr_multipart_mixed` now accept
+  any combination of all four part types — `scanlineimage`,
+  `tiledimage` (ONE_LEVEL), `deepscanline`, and `deeptile` (ONE_LEVEL)
+  — in arbitrary order in one file. `MultipartMixedPart` gains
+  `DeepScanline` / `DeepTiled` input variants (per-pixel sample counts
+  + channel-major sample lists, mirroring the homogeneous deep
+  multi-part writers); `MultipartMixedImage` gains matching output
+  variants wrapping `DeepScanlinePart` / `DeepTiledPart`, plus
+  `deep_scanline()` / `deep_tiled()` / `is_deep_scanline()` /
+  `is_deep_tiled()` accessors. Compression per part: NONE/ZIP/ZIPS/RLE
+  for flat parts, NONE/ZIPS/RLE for deep parts. The version field sets
+  the `non_image` (0x800) bit alongside `multipart` (0x1000) when at
+  least one part is deep. Multi-level tiled parts in a mixed file are
+  still rejected with a redirect at the dedicated multi-level readers.
+  Validated against `exrheader` (accepts the 4-type file and prints
+  every part) and `exrmultipart -separate` (the 4-way split decodes
+  bit-exactly back through `parse_exr`, `parse_exr_deep_scanline`, and
+  `parse_exr_deep_tiled`). 7 new tests.
+
+### Changed
+
+- `MultipartMixedImage::image()` / `into_image()` now return
+  `Option<&ExrImage>` / `Option<ExrImage>` (`None` for deep parts).
+- The mixed multi-part writer now emits one shared `displayWindow` (the
+  union of all part data windows) across every part instead of
+  duplicating each part's `dataWindow`. The reference `exrheader`
+  validator refuses multi-part files whose parts carry different
+  `displayWindow` values, which previously made mixed files with
+  distinct per-part dimensions unreadable by the reference tools (the
+  pure-Rust reader accepted them either way).
+
+### Added
+
 - Round-273 **optional standard header-attribute types**: six previously
   `Other`-passthrough attribute types now parse + encode as typed
   `AttributeValue` variants. `v2d` (two LE `f64`, 16 bytes), `v3d`
