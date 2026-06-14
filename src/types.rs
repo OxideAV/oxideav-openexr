@@ -212,6 +212,12 @@ pub enum AttributeValue {
     M33f([f32; 9]),
     /// `m44f` — sixteen little-endian `f32` in row-major order, 64 bytes.
     M44f([f32; 16]),
+    /// `m33d` — nine little-endian `f64` in row-major order, 72 bytes.
+    /// The double-precision companion of [`AttributeValue::M33f`].
+    M33d([f64; 9]),
+    /// `m44d` — sixteen little-endian `f64` in row-major order, 128 bytes.
+    /// The double-precision companion of [`AttributeValue::M44f`].
+    M44d([f64; 16]),
     /// `chromaticities` — see [`Chromaticities`].
     Chromaticities(Chromaticities),
     /// `tiledesc` — tile-grid descriptor carried by tiled files in the

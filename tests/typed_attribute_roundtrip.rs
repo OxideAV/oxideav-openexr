@@ -1,6 +1,7 @@
 //! Typed-attribute round-trip + reference-binary interop coverage for the
 //! attribute variants added to [`AttributeValue`]: `Int`, `Double`,
-//! `String`, `V2i`, `V3i`, `V3f`, `M33f`, `M44f`, `Chromaticities`.
+//! `String`, `V2i`, `V3i`, `V3f`, `M33f`, `M44f`, `M33d`, `M44d`,
+//! `Chromaticities`.
 //!
 //! Three layers of coverage:
 //!
@@ -126,6 +127,32 @@ fn matrix_roundtrips() {
         1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
     ];
     assert_eq!(rt(AttributeValue::M44f(m44)), AttributeValue::M44f(m44));
+
+    // Double-precision matrices use values that have no exact f32
+    // representation, so a round-trip through f32 would corrupt them —
+    // proving the m33d/m44d path preserves full f64 width.
+    let m33d = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, std::f64::consts::PI];
+    assert_eq!(rt(AttributeValue::M33d(m33d)), AttributeValue::M33d(m33d));
+
+    let m44d = [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+        1.0 / 3.0,
+        std::f64::consts::E,
+        std::f64::consts::PI,
+        -1.0 / 7.0,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::MIN,
+    ];
+    assert_eq!(rt(AttributeValue::M44d(m44d)), AttributeValue::M44d(m44d));
 }
 
 #[test]
@@ -171,6 +198,8 @@ fn payload_sizes_match_spec_table() {
         (AttributeValue::V3f(0.0, 0.0, 0.0), "v3f", 12),
         (AttributeValue::M33f([0.0; 9]), "m33f", 36),
         (AttributeValue::M44f([0.0; 16]), "m44f", 64),
+        (AttributeValue::M33d([0.0; 9]), "m33d", 72),
+        (AttributeValue::M44d([0.0; 16]), "m44d", 128),
         (
             AttributeValue::Chromaticities(Chromaticities {
                 red_x: 0.0,
@@ -215,6 +244,30 @@ fn rejects_short_int_payload() {
 fn rejects_oversize_m33f_payload() {
     let r = oxideav_openexr::header::parse_attribute_value("m33f", &[0u8; 37]);
     assert!(r.is_err(), "37-byte m33f payload must error");
+}
+
+#[test]
+fn rejects_wrong_size_double_matrix_payloads() {
+    // m33d is exactly 72 bytes (9 × f64); m44d is exactly 128 (16 × f64).
+    assert!(
+        oxideav_openexr::header::parse_attribute_value("m33d", &[0u8; 71]).is_err(),
+        "71-byte m33d payload must error"
+    );
+    assert!(
+        oxideav_openexr::header::parse_attribute_value("m33d", &[0u8; 73]).is_err(),
+        "73-byte m33d payload must error"
+    );
+    assert!(
+        oxideav_openexr::header::parse_attribute_value("m44d", &[0u8; 127]).is_err(),
+        "127-byte m44d payload must error"
+    );
+    assert!(
+        oxideav_openexr::header::parse_attribute_value("m44d", &[0u8; 129]).is_err(),
+        "129-byte m44d payload must error"
+    );
+    // Exact sizes parse.
+    assert!(oxideav_openexr::header::parse_attribute_value("m33d", &[0u8; 72]).is_ok());
+    assert!(oxideav_openexr::header::parse_attribute_value("m44d", &[0u8; 128]).is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +388,31 @@ fn full_header_roundtrip_all_typed_variants() {
             name: "worldToCamera".to_string(),
             value: AttributeValue::M44f(m44),
         },
+        Attribute {
+            name: "colorMatrixD".to_string(),
+            value: AttributeValue::M33d([0.1, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.3]),
+        },
+        Attribute {
+            name: "worldToCameraD".to_string(),
+            value: AttributeValue::M44d([
+                std::f64::consts::PI,
+                0.0,
+                0.0,
+                5.0,
+                0.0,
+                std::f64::consts::E,
+                0.0,
+                6.0,
+                0.0,
+                0.0,
+                1.0 / 3.0,
+                7.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ]),
+        },
     ];
 
     let bytes = minimal_scanline_with_extra_attrs(extras.clone());
@@ -447,6 +525,19 @@ fn exrheader_accepts_file_with_every_typed_attribute() {
         Attribute {
             name: "worldToCamera".to_string(),
             value: AttributeValue::M44f([
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ]),
+        },
+        Attribute {
+            name: "colorTransformD".to_string(),
+            value: AttributeValue::M33d([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+        },
+        Attribute {
+            name: "worldToCameraD".to_string(),
+            value: AttributeValue::M44d([
                 1.0, 0.0, 0.0, 0.0, //
                 0.0, 1.0, 0.0, 0.0, //
                 0.0, 0.0, 1.0, 0.0, //

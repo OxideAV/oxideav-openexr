@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-303 **typed `m33d` / `m44d` double-precision matrix attributes**:
+  the header attribute parser + encoder now model `m33d` (nine
+  little-endian `f64` in row-major order, 72 bytes) and `m44d` (sixteen
+  little-endian `f64`, 128 bytes) as the typed `AttributeValue::M33d` /
+  `AttributeValue::M44d` variants — the double-precision companions of
+  the existing `M33f` / `M44f`, completing the float/double matrix
+  pairing alongside `v2f`/`v2d` and `v3f`/`v3d`. Both round-trip
+  bit-exactly through `encode_attribute_value` / `parse_attribute_value`
+  and through a full scanline header via `encode_exr_scanline` /
+  `parse_exr`; payloads with the wrong byte length are rejected. Both
+  are validated against the `exrheader` binary (invoked as an opaque
+  process) in `tests/typed_attribute_roundtrip.rs`.
+
 - Round-296 **`parse_deep_scanline` cargo-fuzz target** (`fuzz/`): a
   coverage-guided libfuzzer harness over `parse_exr_deep_scanline`,
   driving both raw fuzz bytes and a structurally valid deep file whose

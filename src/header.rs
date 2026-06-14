@@ -468,6 +468,34 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
             }
             Ok(AttributeValue::M44f(m))
         }
+        "m33d" => {
+            if data.len() != 72 {
+                return Err(ExrError::invalid(format!(
+                    "m33d payload size {} != 72",
+                    data.len()
+                )));
+            }
+            let mut m = [0f64; 9];
+            for (i, slot) in m.iter_mut().enumerate() {
+                let off = i * 8;
+                *slot = f64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            }
+            Ok(AttributeValue::M33d(m))
+        }
+        "m44d" => {
+            if data.len() != 128 {
+                return Err(ExrError::invalid(format!(
+                    "m44d payload size {} != 128",
+                    data.len()
+                )));
+            }
+            let mut m = [0f64; 16];
+            for (i, slot) in m.iter_mut().enumerate() {
+                let off = i * 8;
+                *slot = f64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            }
+            Ok(AttributeValue::M44d(m))
+        }
         "chromaticities" => {
             if data.len() != 32 {
                 return Err(ExrError::invalid(format!(
@@ -733,6 +761,20 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
                 v.extend_from_slice(&f.to_le_bytes());
             }
             ("m44f".to_string(), v)
+        }
+        AttributeValue::M33d(m) => {
+            let mut v = Vec::with_capacity(72);
+            for f in m {
+                v.extend_from_slice(&f.to_le_bytes());
+            }
+            ("m33d".to_string(), v)
+        }
+        AttributeValue::M44d(m) => {
+            let mut v = Vec::with_capacity(128);
+            for f in m {
+                v.extend_from_slice(&f.to_le_bytes());
+            }
+            ("m44d".to_string(), v)
         }
         AttributeValue::Chromaticities(c) => {
             let mut v = Vec::with_capacity(32);
