@@ -1,0 +1,45 @@
+[package]
+name = "oxideav-openexr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# The in-tree `tests` module already drives the deep-scanline decoder
+# through hand-built valid files (encode/decode roundtrips) plus a small
+# set of malformed-attribute rejection cases. What it does NOT do is
+# coverage-guided exploration of the deep chunk layout — the offset
+# table, the per-block header triple (packed_table / packed_data /
+# unpacked_data), the per-row cumulative sample-count table, and the
+# channel-major sample payload. Those fields are read straight off the
+# wire as 64-bit values and turned into buffer offsets and allocation
+# sizes, which is exactly the surface a coverage-guided fuzzer is good
+# at exploring.
+#
+# `parse_deep_scanline` drives `parse_exr_deep_scanline` — the deep
+# scanline decode entry point. Every byte slice must produce either
+# `Ok(DeepExrImage)` or `Err(ExrError::Invalid | Unsupported)`; panics,
+# debug-mode integer overflows, attacker-claimed-length allocations, and
+# index-out-of-bounds are all bugs.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-openexr]
+path = ".."
+default-features = false
+
+# Keep the cargo-fuzz crate out of the umbrella workspace resolve graph:
+# libfuzzer-sys needs nightly and pulls deps that don't belong upstream.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse_deep_scanline"
+path = "fuzz_targets/parse_deep_scanline.rs"
+test = false
+doc = false

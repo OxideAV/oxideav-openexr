@@ -670,6 +670,25 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
             "deep dataWindow {width}×{height} must be > 0"
         )));
     }
+    // `width`/`height` are derived from on-wire box bounds, so a hostile
+    // dataWindow can claim an enormous pixel grid. The per-pixel
+    // sample-count buffer is one `u32` per pixel, so `width * height` is
+    // both an allocation count (must not overflow `usize`) and an
+    // attacker-controlled allocation size (must be backed by the file).
+    // A deep file must contain at least the offset table plus a 28-byte
+    // chunk header for every block, so the pixel count can never exceed
+    // `bytes.len()` for any real file — reject grids larger than that
+    // before the allocation rather than letting it overflow or OOM.
+    let pixel_count = (width as u64)
+        .checked_mul(height as u64)
+        .filter(|&p| p <= bytes.len() as u64)
+        .ok_or_else(|| {
+            ExrError::invalid(format!(
+                "deep dataWindow {width}×{height} claims more pixels than the \
+                 file could possibly back ({} bytes)",
+                bytes.len()
+            ))
+        })? as usize;
     let block_h = compression.scanlines_per_block();
     let expected_chunks = height.div_ceil(block_h) as usize;
     if chunk_count != expected_chunks {
@@ -694,14 +713,20 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
 
     // We accumulate per-row sample counts and per-channel sample values
     // for the entire image, in pixel-scan order.
-    let mut samples_per_pixel: Vec<u32> = vec![0; (width as usize) * (height as usize)];
+    let mut samples_per_pixel: Vec<u32> = vec![0; pixel_count];
     // Pre-allocate per-channel sample storage. We don't know the total
     // yet, so push as we go.
     let mut channel_samples: Vec<Vec<f32>> =
         (0..sorted_channels.len()).map(|_| Vec::new()).collect();
 
     for (block_idx, &block_off) in offsets.iter().enumerate() {
-        if block_off + 4 + 8 + 8 + 8 > bytes.len() {
+        // `block_off`, `packed_table`, and `packed_data` are read straight
+        // off the wire as 64-bit values, so every offset/size sum below
+        // must use checked arithmetic — an unchecked `+` panics on a
+        // hostile file in a debug build and silently wraps past the EOF
+        // bound in release.
+        let header_end = block_off.checked_add(28).filter(|&e| e <= bytes.len());
+        if header_end.is_none() {
             return Err(ExrError::invalid(format!(
                 "deep block {block_idx} header past EOF"
             )));
@@ -714,14 +739,17 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
         let unpacked_data =
             u64::from_le_bytes(bytes[block_off + 20..block_off + 28].try_into().unwrap()) as usize;
         let table_start = block_off + 28;
-        let table_end = table_start + packed_table;
-        let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
+        let data_end = table_start
+            .checked_add(packed_table)
+            .and_then(|table_end| table_end.checked_add(packed_data))
+            .filter(|&end| end <= bytes.len());
+        let Some(data_end) = data_end else {
             return Err(ExrError::invalid(format!(
                 "deep block {block_idx} payload past EOF"
             )));
-        }
+        };
+        let table_end = table_start + packed_table;
+        let data_start = table_end;
 
         let row_in_image = (y_coord - data_window.y_min) as i64;
         if row_in_image < 0 || row_in_image as u32 >= height {
@@ -7616,6 +7644,56 @@ mod tests {
             s += n as usize;
         }
         (spp, [a, b, g, r])
+    }
+
+    // Regression: a hostile per-block packed_table size near u64::MAX must
+    // be rejected, not overflow `table_start + packed_table` (found by the
+    // parse_deep_scanline fuzz target).
+    #[test]
+    fn deep_scanline_block_header_size_overflow_rejected() {
+        let (spp, planes) = synthetic_deep(8, 4);
+        let input = DeepScanlineInput {
+            width: 8,
+            height: 4,
+            channels: mk_channels_rgba_half(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::None,
+        };
+        let mut bytes = encode_exr_deep_scanline(&input).unwrap();
+        let h = parse_header_allow_deep(&bytes).unwrap();
+        let block_off =
+            u64::from_le_bytes(bytes[h.end_offset..h.end_offset + 8].try_into().unwrap()) as usize;
+        // packed_table sits at block_off + 4 .. block_off + 12.
+        bytes[block_off + 4..block_off + 12].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_exr_deep_scanline(&bytes).is_err());
+    }
+
+    // Regression: a dataWindow pairing x_min=i32::MIN with x_max=i32::MAX
+    // must not overflow Box2i::width() / produce an unbacked pixel-grid
+    // allocation (found by the parse_deep_scanline fuzz target).
+    #[test]
+    fn deep_scanline_huge_data_window_rejected() {
+        let (spp, planes) = synthetic_deep(8, 4);
+        let input = DeepScanlineInput {
+            width: 8,
+            height: 4,
+            channels: mk_channels_rgba_half(),
+            samples_per_pixel: &spp,
+            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            compression: Compression::None,
+        };
+        let bytes = encode_exr_deep_scanline(&input).unwrap();
+        let needle = b"dataWindow\0box2i\0";
+        let idx = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("dataWindow attr present");
+        let payload = idx + needle.len() + 4; // skip the 4-byte size field
+        let mut bytes = bytes.clone();
+        bytes[payload..payload + 4].copy_from_slice(&i32::MIN.to_le_bytes()); // x_min
+        bytes[payload + 8..payload + 12].copy_from_slice(&i32::MAX.to_le_bytes()); // x_max
+        assert!(parse_exr_deep_scanline(&bytes).is_err());
     }
 
     #[test]

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-296 **`parse_deep_scanline` cargo-fuzz target** (`fuzz/`): a
+  coverage-guided libfuzzer harness over `parse_exr_deep_scanline`,
+  driving both raw fuzz bytes and a structurally valid deep file whose
+  offset table + per-block headers are overlaid with fuzz-controlled
+  bytes so the deep chunk arithmetic is reached without first
+  rediscovering a valid header. ~265k execs/run, crash-free after the
+  fixes below.
+
+### Fixed
+
+- Round-296 **deep-scanline hostile-input hardening** (found by the new
+  fuzz target). A 64-bit per-block `packed_table` / `packed_data` size
+  read off the wire overflowed the `table_start + packed_table` /
+  `+ packed_data` offset sums (debug-build panic, silent wrap past the
+  EOF bound in release); the chunk-header offsets now use checked
+  arithmetic and reject out-of-range blocks. A `dataWindow` pairing
+  `x_min = i32::MIN` with `x_max = i32::MAX` overflowed
+  `Box2i::width()` / `height()`; the extent is now computed in `i64` and
+  clamped into `u32`. `parse_exr_deep_scanline` additionally rejects a
+  pixel grid larger than the input could possibly back before allocating
+  the per-pixel sample-count buffer. 3 new regression tests.
+
 - Round-282 **deep parts inside mixed multi-part files**:
   `encode_exr_multipart_mixed` / `parse_exr_multipart_mixed` now accept
   any combination of all four part types — `scanlineimage`,

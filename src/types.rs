@@ -114,11 +114,21 @@ pub struct Box2i {
 }
 
 impl Box2i {
+    /// Box width in pixels. The fields come straight off the wire, so a
+    /// hostile `dataWindow` can pair `x_min = i32::MIN` with
+    /// `x_max = i32::MAX`; computing `x_max - x_min + 1` in `i32` would
+    /// overflow (a debug-build panic, a silent wrap in release). Widen to
+    /// `i64` for the subtraction and clamp the result into `u32`. A
+    /// well-formed box (`x_max >= x_min`, dimensions inside `u32`) is
+    /// unaffected; a degenerate box yields a finite extent that the
+    /// caller's downstream EOF / size checks reject.
     pub fn width(&self) -> u32 {
-        (self.x_max - self.x_min + 1) as u32
+        let w = self.x_max as i64 - self.x_min as i64 + 1;
+        w.clamp(0, u32::MAX as i64) as u32
     }
     pub fn height(&self) -> u32 {
-        (self.y_max - self.y_min + 1) as u32
+        let h = self.y_max as i64 - self.y_min as i64 + 1;
+        h.clamp(0, u32::MAX as i64) as u32
     }
 }
 
@@ -310,4 +320,44 @@ pub struct Keycode {
 pub struct Attribute {
     pub name: String,
     pub value: AttributeValue,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box2i_extent_does_not_overflow_on_extreme_bounds() {
+        // A normal box reports its exact extent.
+        let b = Box2i {
+            x_min: 0,
+            y_min: 0,
+            x_max: 7,
+            y_max: 3,
+        };
+        assert_eq!(b.width(), 8);
+        assert_eq!(b.height(), 4);
+
+        // i32::MIN .. i32::MAX would overflow an i32 subtraction; the
+        // widened computation clamps into u32 instead of panicking.
+        let huge = Box2i {
+            x_min: i32::MIN,
+            y_min: i32::MIN,
+            x_max: i32::MAX,
+            y_max: i32::MAX,
+        };
+        assert_eq!(huge.width(), u32::MAX);
+        assert_eq!(huge.height(), u32::MAX);
+
+        // An inverted box (x_max < x_min) clamps to zero rather than
+        // wrapping to a huge value.
+        let inverted = Box2i {
+            x_min: 10,
+            y_min: 10,
+            x_max: 0,
+            y_max: 0,
+        };
+        assert_eq!(inverted.width(), 0);
+        assert_eq!(inverted.height(), 0);
+    }
 }

@@ -106,6 +106,29 @@ let bytes = encode_exr_scanline_rgba_float(width, height, &rgba_f32).unwrap();
 let img = parse_exr(&bytes).unwrap();
 ```
 
+## Fuzzing
+
+A coverage-guided `cargo-fuzz` target lives under `fuzz/`:
+
+* `parse_deep_scanline` — drives `parse_exr_deep_scanline` over both raw
+  fuzz bytes and a structurally valid deep file whose offset table and
+  per-block headers (`packed_table` / `packed_data` / `unpacked_data`)
+  are overlaid with fuzz-controlled bytes, exercising the deep chunk
+  arithmetic without first rediscovering a valid header.
+
+```sh
+cargo +nightly fuzz run parse_deep_scanline
+```
+
+The decode contract is that every byte slice returns `Ok` or `Err`,
+never panicking, integer-overflowing (debug build), indexing out of
+bounds, or allocating an attacker-claimed length the input can't back.
+The target surfaced and fixed two hostile-input defects: a 64-bit
+per-block size that overflowed the `table_start + packed_table` offset
+sum, and a `dataWindow` pairing `x_min = i32::MIN` with
+`x_max = i32::MAX` that overflowed `Box2i::width()` / drove an unbacked
+pixel-grid allocation.
+
 ## License
 
 MIT — see `LICENSE`.
