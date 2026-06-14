@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.3...v0.0.4) - 2026-06-14
+
+### Other
+
+- round 303: typed m33d/m44d double-precision matrix attributes
+- add parse_deep_scanline cargo-fuzz target + harden deep decode against hostile sizes
+- Mixed multi-part files now carry deep parts: all four part types in one file
+- typed v2d/v3d/rational/timecode/keycode/stringvector header attributes
+- round 265: typed tiledesc attribute inspector
+- round 247: typed box2f attribute inspector
+- round 238: typed inspectors for nine more attribute payload types
+- scrub validation prose to positive-only form
+- round 232: multi-part mixed (scanlineimage + tiledimage) WRITE + READ
+- round 227: multi-part deep tiled RIPMAP_LEVELS WRITE + READ
+- round 220: multi-part deep tiled MIPMAP_LEVELS WRITE + READ
+- round 214: single-part deep tiled RIPMAP_LEVELS WRITE + READ
+- round 208: single-part deep tiled MIPMAP_LEVELS WRITE + READ
+- round 202: multi-part flat tiled RIPMAP_LEVELS WRITE + READ
+- round 196: multi-part flat tiled MIPMAP_LEVELS WRITE + READ
+
 ### Added
 
 - Round-303 **typed `m33d` / `m44d` double-precision matrix attributes**:
