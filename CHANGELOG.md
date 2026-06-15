@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Round-318 **offset-table overflow hardening (untrusted input)**: each
+  EXR data chunk is located through an offset table whose entries are
+  absolute `u64` byte positions read straight off the wire. The decoder
+  cast each entry to `usize` and then bounds-checked the chunk header
+  with `block_off + 8 > bytes.len()` (scanline) or `tile_off + 20 >
+  bytes.len()` (single-tile + multi-level tile). A hostile entry near
+  `usize::MAX` overflowed the `+ N` *inside* the bounds check itself —
+  a panic in debug builds, a wrap into an out-of-bounds slice (also a
+  panic) in release — so a malformed file could crash the decoder before
+  the past-EOF guard ever ran. All three offset-table dereference sites
+  in `decoder.rs` (`parse_exr` scanline loop, `parse_exr` single-tile
+  loop, `parse_exr_tiled_multilevel` loop) now compute the header end
+  with `checked_add(..).filter(|e| *e <= len)` and the payload end with
+  `checked_add(payload_size)`, returning a clean `ExrError::invalid`
+  instead of unwinding. Well-formed files decode unchanged. New
+  `tests/offset_table_overflow_hardening.rs` (5 tests) corrupts the
+  first offset-table entry of a valid scanline / tiled / mipmapped file
+  with `u64::MAX` (and a just-past-EOF value) and asserts each parser
+  returns `Err` without panicking, plus a happy-path regression guard.
+  fmt + clippy clean; all 184 library/integration tests pass.
+
 - Round-309 **library-lockfile hygiene**: stop tracking the crate-root
   `Cargo.lock` (this is a library, so the resolved lockfile must not live
   in version control) and add a `.gitignore` carrying `/target` plus a

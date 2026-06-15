@@ -76,6 +76,10 @@ cargo +nightly fuzz run parse_deep_scanline
 The decode contract is that every byte slice returns `Ok` or `Err`,
 never panicking, integer-overflowing (debug build), indexing out of
 bounds, or allocating an attacker-claimed length the input can't back.
+Offset-table entries (absolute `u64` byte positions read off the wire)
+are bounds-checked with overflow-safe arithmetic so a near-`usize::MAX`
+entry yields an error rather than wrapping past its EOF guard — see
+`tests/offset_table_overflow_hardening.rs`.
 
 ## License
 

@@ -400,21 +400,32 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
         .collect();
 
     for (block_idx, &block_off) in offsets.iter().enumerate() {
-        if block_off + 8 > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "block {block_idx} offset {block_off} past EOF"
-            )));
-        }
+        // `block_off` is an untrusted u64 from the offset table cast to
+        // usize; a hostile value near usize::MAX would overflow the
+        // `block_off + 8` bounds check itself (debug panic / release wrap
+        // into an out-of-bounds slice). Add with overflow detection.
+        let block_hdr_end = block_off
+            .checked_add(8)
+            .filter(|&e| e <= bytes.len())
+            .ok_or_else(|| {
+                ExrError::invalid(format!("block {block_idx} offset {block_off} past EOF"))
+            })?;
         let y_coord = i32::from_le_bytes(bytes[block_off..block_off + 4].try_into().unwrap());
         let payload_size =
-            i32::from_le_bytes(bytes[block_off + 4..block_off + 8].try_into().unwrap());
+            i32::from_le_bytes(bytes[block_off + 4..block_hdr_end].try_into().unwrap());
         if payload_size < 0 {
             return Err(ExrError::invalid(format!(
                 "block {block_idx} negative size {payload_size}"
             )));
         }
-        let payload_start = block_off + 8;
-        let payload_end = payload_start + payload_size as usize;
+        let payload_start = block_hdr_end;
+        let payload_end = payload_start
+            .checked_add(payload_size as usize)
+            .ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "block {block_idx} payload size {payload_size} overflows address space"
+                ))
+            })?;
         if payload_end > bytes.len() {
             return Err(ExrError::invalid(format!(
                 "block {block_idx} payload runs past EOF (start {payload_start}, size {payload_size})"
@@ -674,24 +685,31 @@ fn parse_tiled(
     // Iterate all tiles. For multi-level files we only scatter tiles with
     // lvlx=0 and lvly=0 (the full-resolution level) into the planes.
     for (tile_idx, &tile_off) in all_offsets.iter().enumerate() {
-        if tile_off + 20 > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} offset {tile_off} past EOF"
-            )));
-        }
+        // `tile_off` is an untrusted u64 offset-table entry cast to usize;
+        // guard the 20-byte tile-header bounds check against usize overflow.
+        let tile_hdr_end = tile_off
+            .checked_add(20)
+            .filter(|&e| e <= bytes.len())
+            .ok_or_else(|| {
+                ExrError::invalid(format!("tile {tile_idx} offset {tile_off} past EOF"))
+            })?;
         let h_tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
         let h_ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
         let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
         let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
         let payload_size =
-            i32::from_le_bytes(bytes[tile_off + 16..tile_off + 20].try_into().unwrap());
+            i32::from_le_bytes(bytes[tile_off + 16..tile_hdr_end].try_into().unwrap());
         if payload_size < 0 {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} negative payload size {payload_size}"
             )));
         }
-        let pl_start = tile_off + 20;
-        let pl_end = pl_start + payload_size as usize;
+        let pl_start = tile_hdr_end;
+        let pl_end = pl_start.checked_add(payload_size as usize).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "tile {tile_idx} payload size {payload_size} overflows address space"
+            ))
+        })?;
         if pl_end > bytes.len() {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} payload runs past EOF"
@@ -1006,24 +1024,31 @@ pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> 
     // locate the matching level slot by (lvlx, lvly), then scatter into
     // that level's planes using the level's dims as the row stride.
     for (tile_idx, &tile_off) in offsets.iter().enumerate() {
-        if tile_off + 20 > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} offset {tile_off} past EOF"
-            )));
-        }
+        // `tile_off` is an untrusted u64 offset-table entry cast to usize;
+        // guard the 20-byte tile-header bounds check against usize overflow.
+        let tile_hdr_end = tile_off
+            .checked_add(20)
+            .filter(|&e| e <= bytes.len())
+            .ok_or_else(|| {
+                ExrError::invalid(format!("tile {tile_idx} offset {tile_off} past EOF"))
+            })?;
         let tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
         let ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
         let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
         let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
         let payload_size =
-            i32::from_le_bytes(bytes[tile_off + 16..tile_off + 20].try_into().unwrap());
+            i32::from_le_bytes(bytes[tile_off + 16..tile_hdr_end].try_into().unwrap());
         if payload_size < 0 || tx < 0 || ty < 0 || lvl_x < 0 || lvl_y < 0 {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} bad header: tx={tx} ty={ty} lvlx={lvl_x} lvly={lvl_y} size={payload_size}"
             )));
         }
-        let pl_start = tile_off + 20;
-        let pl_end = pl_start + payload_size as usize;
+        let pl_start = tile_hdr_end;
+        let pl_end = pl_start.checked_add(payload_size as usize).ok_or_else(|| {
+            ExrError::invalid(format!(
+                "tile {tile_idx} payload size {payload_size} overflows address space"
+            ))
+        })?;
         if pl_end > bytes.len() {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} payload runs past EOF"
