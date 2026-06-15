@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round-309 **library-lockfile hygiene**: stop tracking the crate-root
+  `Cargo.lock` (this is a library, so the resolved lockfile must not live
+  in version control) and add a `.gitignore` carrying `/target` plus a
+  `Cargo.lock` line. The previously-committed root lock pinned
+  `oxideav-core` at a stale crates.io patch (`0.1.26`) while the umbrella
+  patch table resolves the local path crate (`0.1.28`); an untracked lock
+  removes that dual-version hazard and lets each consumer resolve the
+  intended single version. The `fuzz/` binary crate keeps its own
+  `Cargo.lock` (binaries pin their dependency graph; `fuzz/.gitignore`
+  already excludes only build artefacts). No source changes; all 179
+  library tests + every integration suite still pass; fmt + clippy clean.
+
 ### Added
 
 - Round-303 **typed `m33d` / `m44d` double-precision matrix attributes**:
