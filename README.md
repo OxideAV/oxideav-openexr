@@ -15,7 +15,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib)                             |
 | Compression: `ZIPS` (1 line/blk)    | parse + write (zlib)                             |
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
-| Compression: `PXR24` (16 lines/blk) | **parse** (single-part scanline) — zlib inflate + byte-plane horizontal-delta prefix-sum + 24-bit FLOAT reconstruction; HALF/UINT lossless. Validated bit-exact vs reference `exrmetrics -z pxr24` |
+| Compression: `PXR24` (16 lines/blk) | **parse + write** (single-part scanline) — encode: FLOAT→24-bit reduction (round mantissa to 15 bits) + byte-plane horizontal-delta + zlib deflate with raw fallback; decode: zlib inflate + prefix-sum + 24-bit reconstruction. HALF/UINT lossless. Decode validated bit-exact vs `exrmetrics -z pxr24`; encode round-trips through our decoder AND is accepted + decoded identically by reference `exrmetrics` |
 | Single-part scanline                | parse + write                                    |
 | Single-part tiled (`ONE_LEVEL`)     | parse + write                                    |
 | Tiled `MIPMAP_LEVELS`               | parse + write — full pyramid via `parse_exr_tiled_multilevel`; NONE / ZIP / ZIPS / RLE. `parse_exr` returns level-0 only |
@@ -32,10 +32,10 @@ Clean-room from the public OpenEXR file-format specification.
 ## What this crate does NOT yet cover
 
 * Compression types `PIZ`, `B44`, `B44A`, `DWAA`, `DWAB` — recognised
-  in the type enum but rejected on parse. (`PXR24` decode now landed for
-  single-part scanline images; PXR24 encode and tiled/multi-part PXR24
-  decode are follow-ups. `B44`/`B44A` block layouts are pinned by the
-  staged observer-spec and queued next.)
+  in the type enum but rejected on parse. (`PXR24` decode + encode now
+  landed for single-part scanline images; tiled/multi-part PXR24
+  encode/decode are follow-ups. `B44`/`B44A` block layouts are pinned by
+  the staged observer-spec and queued next.)
 * `ZIP_COMPRESSION` is rejected for deep data (the format validators
   reject deep ZIP files even though the spec page text lists ZIP as
   permitted).

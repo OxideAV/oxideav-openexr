@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-326 **PXR24 compression / encode (single-part scanline)**: the
+  lossy 24-bit FLOAT compressor can now be written, completing the PXR24
+  read+write pair for scanline images. `encode_exr_scanline` /
+  `encode_exr_scanline_rgba_float_with` accept `Compression::Pxr24`. Each
+  FLOAT sample is reduced to its 24-bit code (round the mantissa to 15
+  bits, drop the low byte; inf/NaN handled per observer-spec §1.1), HALF
+  and UINT pass through losslessly; the block is reorganised into
+  per-row, per-channel, byte-plane-major form with most-significant-first
+  horizontal deltas, then zlib-deflated. The universal raw-fallback rule
+  is honoured: if deflate does not shrink the reorganised stream the raw
+  bytes are stored and the decoder detects this by length. Validated by a
+  self round-trip through our PXR24 decoder, an incompressible-data
+  raw-fallback round-trip, and a reference cross-check where `exrmetrics`
+  reads our PXR24 file and transcodes it to ZIP yielding the same spec-
+  reduced pixels (`tests/pxr24_encode_validation.rs`). Tiled / multi-part
+  PXR24 encode remain follow-ups.
 - Round-321 **PXR24 decompression (single-part scanline)**: the lossy
   24-bit FLOAT compressor is now decoded. The block payload is
   zlib-inflated to a per-row, per-channel, byte-plane-major stream;

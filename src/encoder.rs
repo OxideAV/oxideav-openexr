@@ -33,6 +33,40 @@ use crate::error::{ExrError, Result};
 use crate::header::{encode_header, VersionField};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 
+/// Reduce a binary32 word to its PXR24 24-bit code (observer-spec §1.1):
+/// round the mantissa to 15 bits and discard the low byte of the 32-bit
+/// word. The returned value occupies the low 24 bits of the `u32`.
+///
+/// This is the exact inverse-target of [`crate::decoder`]'s
+/// `pxr24_code_to_f32_bits`: the decoder places this 24-bit code back
+/// into the top 24 bits of a binary32, so a sample round-trips to
+/// `f32::from_bits(code << 8)`.
+fn pxr24_f32_to_code24(bits: u32) -> u32 {
+    let s = bits & 0x8000_0000;
+    let e = bits & 0x7f80_0000;
+    let m = bits & 0x007f_ffff;
+    if e == 0x7f80_0000 {
+        // inf / NaN: keep the exponent (all ones), carry the top 15
+        // mantissa bits. A NaN whose top 15 mantissa bits are all zero
+        // would collapse to infinity, so force at least one bit set.
+        if m == 0 {
+            e >> 8
+        } else {
+            let mm = m >> 8;
+            (e >> 8) | mm | u32::from(mm == 0)
+        }
+    } else {
+        // Finite: add the round bit (bit 7 of the mantissa) into (e|m)
+        // and shift right by 8. If rounding carries the exponent past
+        // the maximum, redo by truncation instead.
+        let mut i = ((e | m) + (m & 0x80)) >> 8;
+        if i >= 0x7f_8000 {
+            i = (e | m) >> 8;
+        }
+        (s >> 8) | i
+    }
+}
+
 /// Build the standard 4-channel RGBA float header attribute set.
 fn rgba_float_attributes(width: u32, height: u32, compression: Compression) -> Vec<Attribute> {
     // chlist must be alphabetical: A, B, G, R.
@@ -108,6 +142,116 @@ fn rgba_float_attributes(width: u32, height: u32, compression: Compression) -> V
     ]
 }
 
+/// Reduced on-the-wire byte width of a channel under PXR24: FLOAT is
+/// carried as 3 bytes (24-bit reduction), HALF as 2, UINT as 4.
+/// Mirrors the decoder's `pxr24_channel_bytes`.
+fn pxr24_channel_bytes(pt: PixelType) -> usize {
+    match pt {
+        PixelType::Float => 3,
+        PixelType::Half => 2,
+        PixelType::Uint => 4,
+    }
+}
+
+/// Build the PXR24 reorganised (byte-plane + horizontal-delta) stream for
+/// one scanline block, then zlib-deflate it (observer-spec §1.2/§1.3).
+///
+/// Visiting order matches the decoder exactly: rows top-to-bottom, then
+/// channels in sorted order, then byte planes most-significant first,
+/// plane-major across the row. Each plane byte is the horizontal delta of
+/// the sample's integer code against the previous sample of the same
+/// channel on the same row (prediction resets to 0 per channel/row).
+/// FLOAT codes are the 24-bit reduction; HALF/UINT codes are the raw
+/// little-endian sample value widened to `u32`.
+///
+/// Returns the zlib stream, or — per the universal raw-fallback rule —
+/// the reorganised bytes themselves when deflate did not shrink them. The
+/// caller distinguishes the two by comparing the returned length against
+/// the uncompressed (native) block size, exactly as the decoder does.
+fn build_pxr24_block_payload(
+    channels: &[Channel],
+    planes: &[&[f32]],
+    width: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+) -> Result<Vec<u8>> {
+    // Size the reorganised stream: sum over present rows/channels of
+    // (reduced bytes per sample) * (sub-width).
+    let mut reorg_size = 0usize;
+    for line in 0..lines_in_block as u32 {
+        let dst_y = block_y0 + line;
+        for ch in channels {
+            let ys = ch.y_sampling as u32;
+            if dst_y % ys != 0 {
+                continue;
+            }
+            let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
+            reorg_size += pxr24_channel_bytes(ch.pixel_type) * pw;
+        }
+    }
+
+    let mut reorg = vec![0u8; reorg_size];
+    let mut wp = 0usize;
+    for line in 0..lines_in_block as u32 {
+        let dst_y = block_y0 + line;
+        for (ch_idx, ch) in channels.iter().enumerate() {
+            let ys = ch.y_sampling as u32;
+            if dst_y % ys != 0 {
+                continue;
+            }
+            let xs = ch.x_sampling as u32;
+            let pw = subsampled_dim(width, xs) as usize;
+            let nbytes = pxr24_channel_bytes(ch.pixel_type);
+            let plane_y = (dst_y / ys) as usize;
+            let plane = planes[ch_idx];
+
+            // Emit one byte-plane per reduced byte, most-significant
+            // first, plane-major. `prev` is the previous sample's code on
+            // this channel/row (resets to 0 at the row start), and the
+            // delta is taken modulo 2^32 (wrapping), matching the
+            // decoder's running prefix-sum.
+            let mut prev: u32 = 0;
+            for x in 0..pw {
+                let v = plane[plane_y * pw + x];
+                let code = match ch.pixel_type {
+                    PixelType::Float => pxr24_f32_to_code24(v.to_bits()),
+                    PixelType::Half => u32::from(crate::half::f32_to_half(v)),
+                    PixelType::Uint => {
+                        if v.is_nan() || v < 0.0 {
+                            0u32
+                        } else if v >= (u32::MAX as f32) {
+                            u32::MAX
+                        } else {
+                            (v + 0.5) as u32
+                        }
+                    }
+                };
+                let diff = code.wrapping_sub(prev);
+                prev = code;
+                // Most-significant reduced byte first. For FLOAT the code
+                // is 24-bit so bytes are diff>>16, diff>>8, diff; HALF is
+                // diff>>8, diff; UINT is diff>>24..diff.
+                for b in 0..nbytes {
+                    let shift = 8 * (nbytes - 1 - b);
+                    reorg[wp + b * pw + x] = (diff >> shift) as u8;
+                }
+            }
+            wp += nbytes * pw;
+        }
+    }
+    debug_assert_eq!(wp, reorg_size);
+
+    let compressed = zlib_deflate(&reorg)?;
+    // Universal raw-fallback (observer-spec §0): if deflate did not
+    // shrink the reorganised stream, store it uncompressed. The decoder
+    // detects this by `payload.len() == reorg_size`.
+    Ok(if compressed.len() >= reorg.len() {
+        reorg
+    } else {
+        compressed
+    })
+}
+
 /// Encode a width × height RGBA-float scanline EXR with the requested
 /// compression. `samples` is `width * height * 4` long, in `R, G, B, A`
 /// pixel order.
@@ -137,10 +281,14 @@ pub fn encode_exr_scanline_rgba_float_with(
     }
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (round-2 encoder supports NONE + ZIP + ZIPS + RLE; PIZ/B44 read-only or deferred)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24; PIZ/B44 read-only or deferred)"
         )));
     }
 
@@ -225,10 +373,14 @@ pub fn encode_exr_scanline(
 
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (round-2 encoder supports NONE + ZIP + ZIPS + RLE)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24)"
         )));
     }
 
@@ -307,6 +459,13 @@ pub fn encode_exr_scanline(
                 } else {
                     compressed
                 }
+            }
+            Compression::Pxr24 => {
+                // PXR24 reorganises the FLOAT-reduced / HALF / UINT codes
+                // into byte-plane + horizontal-delta form straight from
+                // the planes (a different layout from the native `raw`
+                // stream), then zlib-deflates with a raw fallback.
+                build_pxr24_block_payload(channels, planes, width, row0, lines_in_block)?
             }
             _ => unreachable!("filtered above"),
         };
