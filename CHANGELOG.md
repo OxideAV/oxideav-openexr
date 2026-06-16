@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-321 **PXR24 decompression (single-part scanline)**: the lossy
+  24-bit FLOAT compressor is now decoded. The block payload is
+  zlib-inflated to a per-row, per-channel, byte-plane-major stream;
+  each plane carries the most-significant-first horizontal deltas of the
+  channel's samples, which are prefix-summed back into per-sample integer
+  codes. FLOAT codes are reconstructed from their 24-bit form (the
+  dropped low byte is implicitly zero), HALF and UINT are preserved
+  losslessly. Multi-block images and odd widths are handled; an encoder
+  raw-fallback (compressed == reorganised size) is detected. Validated
+  bit-exact against the reference `exrmetrics -z pxr24` transcode plus
+  the observer-spec §1.1 worked-fact reduction table
+  (`tests/pxr24_decode_validation.rs`). PXR24 encode and tiled /
+  multi-part PXR24 decode remain follow-ups.
+
 ### Fixed
 
 - Round-318 **offset-table overflow hardening (untrusted input)**: each

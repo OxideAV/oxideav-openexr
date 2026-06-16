@@ -11,10 +11,10 @@
 //! then concatenated per-part offset tables, then chunks prefixed with
 //! a 4-byte part number. Use [`parse_exr_multipart`] to parse them.
 //!
-//! Compression coverage (round 3): NONE, ZIP, ZIPS, RLE.
-//! PIZ / B44 / B44A / DWAA / DWAB: header-parsed, decoded as
-//! pass-through (uncompressed) where that is correct per spec, otherwise
-//! rejected with a clear unsupported message.
+//! Compression coverage: NONE, ZIP, ZIPS, RLE, and PXR24 (PXR24 decode
+//! for single-part scanline images — see [`decode_pxr24_payload`]).
+//! PIZ / B44 / B44A / DWAA / DWAB: header-parsed and rejected on parse
+//! with a clear unsupported message.
 //!
 //! ZIP-family compression pre-applies two reversible transforms
 //! documented in the OpenEXR file-format spec:
@@ -254,6 +254,135 @@ fn decode_rle_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8
     Ok(undo_zip_pipeline(raw))
 }
 
+/// Describes, for one PXR24 scanline block, which channel rows are
+/// present and how wide each row is. The PXR24 inflated stream is laid
+/// out line-major then channel-major then byte-plane-major, so the
+/// decoder must replay the exact same visiting order to reconstruct the
+/// standard uncompressed little-endian sample stream.
+struct Pxr24RowSpec<'a> {
+    sorted_channels: &'a [Channel],
+    width: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+}
+
+/// Reduced on-the-wire byte width of a channel under PXR24: FLOAT is
+/// carried as 3 bytes (24-bit reduction), HALF as 2, UINT as 4.
+fn pxr24_channel_bytes(pt: PixelType) -> usize {
+    match pt {
+        PixelType::Float => 3,
+        PixelType::Half => 2,
+        PixelType::Uint => 4,
+    }
+}
+
+/// Reverse the PXR24 24-bit float reduction: place the recovered 24-bit
+/// code into the top 24 bits of a binary32 word (the dropped low byte is
+/// implicitly zero). See observer-spec §1.1/§1.3.
+fn pxr24_code_to_f32_bits(code24: u32) -> u32 {
+    (code24 & 0x00ff_ffff) << 8
+}
+
+/// Decode a PXR24 scanline-block payload into the standard uncompressed
+/// little-endian sample byte stream consumed by
+/// [`scatter_block_into_planes`].
+///
+/// PXR24 (observer-spec §1): zlib-inflate the payload, then for each
+/// image row walk the channels in sorted order; each channel emits one
+/// byte plane per reduced byte (FLOAT=3, HALF=2, UINT=4) holding the
+/// most-significant byte first, plane-major across the row. Each plane
+/// byte is a horizontal delta against the previous sample of the same
+/// channel on the same row (prediction resets to 0 per channel/row).
+/// The decoder reassembles each sample's integer code by prefix-summing
+/// the reassembled per-sample delta, then writes the sample back in the
+/// channel's native pixel type (FLOAT reconstructed from the 24-bit
+/// code, HALF/UINT verbatim) as little-endian bytes.
+fn decode_pxr24_payload(
+    payload: &[u8],
+    spec: &Pxr24RowSpec,
+    uncompressed_size: usize,
+) -> Result<Vec<u8>> {
+    // Reorganised (delta+plane) byte-stream size for this block: sum over
+    // present rows/channels of (reduced bytes per sample) * (sub-width).
+    let mut reorg_size = 0usize;
+    for line in 0..spec.lines_in_block as u32 {
+        let dst_y = spec.block_y0 + line;
+        for ch in spec.sorted_channels {
+            let ys = ch.y_sampling as u32;
+            if dst_y % ys != 0 {
+                continue;
+            }
+            let pw = subsampled_dim(spec.width, ch.x_sampling as u32) as usize;
+            reorg_size += pxr24_channel_bytes(ch.pixel_type) * pw;
+        }
+    }
+
+    // Raw-fallback: an encoder that couldn't shrink the chunk stores the
+    // reorganised stream uncompressed (compressed length == reorg size).
+    let reorg: Vec<u8> = if payload.len() == reorg_size {
+        payload.to_vec()
+    } else {
+        let inflated = zlib_inflate(payload, reorg_size)?;
+        if inflated.len() != reorg_size {
+            return Err(ExrError::invalid(format!(
+                "PXR24 inflate produced {} bytes, expected {reorg_size}",
+                inflated.len()
+            )));
+        }
+        inflated
+    };
+
+    let mut out = vec![0u8; uncompressed_size];
+    let mut rp = 0usize; // read cursor into the reorganised stream
+    let mut wp = 0usize; // write cursor into the native sample stream
+    for line in 0..spec.lines_in_block as u32 {
+        let dst_y = spec.block_y0 + line;
+        for ch in spec.sorted_channels {
+            let ys = ch.y_sampling as u32;
+            if dst_y % ys != 0 {
+                continue;
+            }
+            let pw = subsampled_dim(spec.width, ch.x_sampling as u32) as usize;
+            let nbytes = pxr24_channel_bytes(ch.pixel_type);
+            // Read this channel/row's planes (most-significant first),
+            // prefix-summing each sample's reassembled delta into a
+            // running 32-bit code.
+            let planes = &reorg[rp..rp + nbytes * pw];
+            rp += nbytes * pw;
+            let mut acc: u32 = 0;
+            for x in 0..pw {
+                let mut diff: u32 = 0;
+                for b in 0..nbytes {
+                    diff = (diff << 8) | u32::from(planes[b * pw + x]);
+                }
+                acc = acc.wrapping_add(diff);
+                match ch.pixel_type {
+                    PixelType::Float => {
+                        let bits = pxr24_code_to_f32_bits(acc);
+                        out[wp..wp + 4].copy_from_slice(&bits.to_le_bytes());
+                        wp += 4;
+                    }
+                    PixelType::Half => {
+                        let bits = (acc & 0xffff) as u16;
+                        out[wp..wp + 2].copy_from_slice(&bits.to_le_bytes());
+                        wp += 2;
+                    }
+                    PixelType::Uint => {
+                        out[wp..wp + 4].copy_from_slice(&acc.to_le_bytes());
+                        wp += 4;
+                    }
+                }
+            }
+        }
+    }
+    if wp != uncompressed_size {
+        return Err(ExrError::invalid(format!(
+            "PXR24 produced {wp} of {uncompressed_size} native bytes"
+        )));
+    }
+    Ok(out)
+}
+
 /// Decode one byte-flat scanline-block payload into the per-channel
 /// f32 planes. `block_y0` is the top row of the block within the data
 /// window; `lines_in_block` is the number of image rows the block
@@ -472,7 +601,21 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
             }
             Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
             Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
-            _ => unreachable!("filtered above"),
+            Compression::Pxr24 => decode_pxr24_payload(
+                payload,
+                &Pxr24RowSpec {
+                    sorted_channels: &sorted_channels,
+                    width,
+                    block_y0,
+                    lines_in_block,
+                },
+                uncompressed_size,
+            )?,
+            other => {
+                return Err(ExrError::unsupported(format!(
+                    "scanline compression {other:?} not yet implemented"
+                )))
+            }
         };
 
         scatter_block_into_planes(
