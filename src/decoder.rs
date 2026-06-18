@@ -1601,7 +1601,13 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
         let req = extract_required(&part.attributes)?;
         if !matches!(
             req.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Pxr24
+                | Compression::B44
+                | Compression::B44a
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part part {part_idx}: compression {:?} not yet implemented",
@@ -1699,6 +1705,22 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
             })
             .sum();
 
+        // B44 / B44A regroup the chunk into per-channel planes and scatter
+        // directly (the shared raw fallback is handled inside the branch).
+        if matches!(req.compression, Compression::B44 | Compression::B44a) {
+            scatter_b44_block_into_planes(
+                payload,
+                sorted_channels,
+                &mut planes_list[part_idx],
+                width,
+                block_y0,
+                lines_in_block,
+                uncompressed_size,
+            )?;
+            scan_pos = pl_end;
+            continue;
+        }
+
         let uncompressed: Vec<u8> = match req.compression {
             Compression::None => {
                 if payload.len() != uncompressed_size {
@@ -1712,6 +1734,16 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
             }
             Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
             Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
+            Compression::Pxr24 => decode_pxr24_payload(
+                payload,
+                &Pxr24RowSpec {
+                    sorted_channels,
+                    width,
+                    block_y0,
+                    lines_in_block,
+                },
+                uncompressed_size,
+            )?,
             _ => unreachable!("filtered above"),
         };
 

@@ -107,10 +107,17 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
         }
         if !matches!(
             p.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Pxr24
+                | Compression::B44
+                | Compression::B44a
         ) {
             return Err(ExrError::unsupported(format!(
-                "part '{}': compression {:?} (multipart encoder supports NONE/ZIP/ZIPS/RLE)",
+                "part '{}': compression {:?} \
+                 (multipart encoder supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)",
                 p.name, p.compression
             )));
         }
@@ -183,7 +190,35 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
                     }
                 }
             }
-            let payload = compress_block(raw, p.compression)?;
+            // PXR24 / B44 reorganise the block from the f32 source planes
+            // (a layout distinct from the native `raw` stream), so they reuse
+            // the scanline block builders directly.
+            let payload = match p.compression {
+                Compression::Pxr24 => crate::encoder::build_pxr24_block_payload(
+                    &p.channels,
+                    &p.planes,
+                    p.width,
+                    row0,
+                    lines_in_block,
+                )?,
+                Compression::B44 | Compression::B44a => {
+                    let flat = matches!(p.compression, Compression::B44a);
+                    let packed = crate::encoder::build_b44_block_payload(
+                        &p.channels,
+                        &p.planes,
+                        p.width,
+                        row0,
+                        lines_in_block,
+                        flat,
+                    );
+                    if packed.len() >= raw.len() {
+                        raw
+                    } else {
+                        packed
+                    }
+                }
+                _ => compress_block(raw, p.compression)?,
+            };
             blocks.push(payload);
         }
         part_block_payloads.push(blocks);
@@ -524,6 +559,129 @@ mod tests {
                     assert_eq!(a[off], source[off * 4 + 3]);
                 }
             }
+        }
+    }
+
+    /// Mirror of the PXR24 24-bit FLOAT reduction (observer-spec §1.1).
+    fn pxr24_reduce(f: f32) -> f32 {
+        let bits = f.to_bits();
+        let s = bits & 0x8000_0000;
+        let e = bits & 0x7f80_0000;
+        let m = bits & 0x007f_ffff;
+        let i: u32 = if e == 0x7f80_0000 {
+            if m == 0 {
+                e >> 8
+            } else {
+                let mm = m >> 8;
+                (e >> 8) | mm | u32::from(mm == 0)
+            }
+        } else {
+            let r = ((e | m) + (m & 0x80)) >> 8;
+            if r >= 0x7f8000 {
+                (e | m) >> 8
+            } else {
+                r
+            }
+        };
+        let code24 = (s >> 8) | i;
+        f32::from_bits((code24 & 0x00ff_ffff) << 8)
+    }
+
+    #[test]
+    fn multipart_pxr24_float_roundtrip() {
+        let w = 16;
+        let h = 16;
+        let s_a = make_image(w, h, 0.0);
+        let s_b = make_image(w, h, 0.5);
+        let bytes = encode_exr_multipart_rgba_float_with(&[
+            ("p0".to_string(), w, h, s_a.as_slice(), Compression::Pxr24),
+            ("p1".to_string(), w, h, s_b.as_slice(), Compression::Pxr24),
+        ])
+        .unwrap();
+        let parts = parse_exr_multipart(&bytes).unwrap();
+        assert_eq!(parts.len(), 2);
+        for (img, source) in parts.iter().zip([&s_a, &s_b]) {
+            let r = &img.planes[3].samples;
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let off = y * w as usize + x;
+                    assert_eq!(r[off], pxr24_reduce(source[off * 4]), "R ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_b44_half_roundtrip_is_fixed_point() {
+        // B44 HALF channels are lossy; decode must be a fixed point of the
+        // encode (re-encoding the decoded samples reproduces them exactly).
+        let w = 16;
+        let h = 16;
+        let chs = vec![Channel {
+            name: "Y".to_string(),
+            pixel_type: PixelType::Half,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        }];
+        let mut plane = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                plane.push(((x as f32) * 0.07 - (y as f32) * 0.03).cos() * 3.0);
+            }
+        }
+        let part = MultipartScanlinePart {
+            name: "main".to_string(),
+            width: w,
+            height: h,
+            channels: chs.clone(),
+            planes: vec![plane.as_slice()],
+            compression: Compression::B44,
+        };
+        let bytes = encode_exr_multipart(&[part]).unwrap();
+        let parts = parse_exr_multipart(&bytes).unwrap();
+        let decoded: Vec<f32> = parts[0].planes[0].samples.clone();
+
+        let part2 = MultipartScanlinePart {
+            name: "main".to_string(),
+            width: w,
+            height: h,
+            channels: chs,
+            planes: vec![decoded.as_slice()],
+            compression: Compression::B44,
+        };
+        let bytes2 = encode_exr_multipart(&[part2]).unwrap();
+        let parts2 = parse_exr_multipart(&bytes2).unwrap();
+        assert_eq!(
+            decoded, parts2[0].planes[0].samples,
+            "multipart B44 decode must be a fixed point of the encode"
+        );
+    }
+
+    #[test]
+    fn multipart_b44a_flat_constant_roundtrips() {
+        let w = 16;
+        let h = 16;
+        let chs = vec![Channel {
+            name: "Y".to_string(),
+            pixel_type: PixelType::Half,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        }];
+        let plane = vec![0.25_f32; (w * h) as usize]; // 0.25 exact in binary16
+        let part = MultipartScanlinePart {
+            name: "flat".to_string(),
+            width: w,
+            height: h,
+            channels: chs,
+            planes: vec![plane.as_slice()],
+            compression: Compression::B44a,
+        };
+        let bytes = encode_exr_multipart(&[part]).unwrap();
+        let parts = parse_exr_multipart(&bytes).unwrap();
+        for (i, &v) in parts[0].planes[0].samples.iter().enumerate() {
+            assert_eq!(v, 0.25, "B44A multipart flat pixel {i}");
         }
     }
 
