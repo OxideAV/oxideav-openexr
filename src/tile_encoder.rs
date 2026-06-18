@@ -178,10 +178,17 @@ pub fn encode_exr_tiled_rgba_float_with(
     }
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (round-40 tiled encoder supports NONE + ZIP + ZIPS + RLE)"
+            "compression {compression:?} (tiled encoder supports \
+             NONE + ZIP + ZIPS + RLE + PXR24 + B44 + B44A)"
         )));
     }
 
@@ -297,10 +304,17 @@ pub fn encode_exr_tiled(
     }
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (round-40 tiled encoder supports NONE + ZIP + ZIPS + RLE)"
+            "compression {compression:?} (tiled encoder supports \
+             NONE + ZIP + ZIPS + RLE + PXR24 + B44 + B44A)"
         )));
     }
 
@@ -368,7 +382,29 @@ pub fn encode_exr_tiled(
                     }
                 }
             }
-            let payload = compress_tile_payload(raw, compression)?;
+            // PXR24 / B44 reorganise the tile into byte-plane / per-channel
+            // forms (a layout distinct from the native `raw` stream), so they
+            // consume tile-local f32 sub-planes rather than `raw`. Gather one
+            // `tw × th` sub-plane per channel (1×1 sampling for tiled files).
+            let payload = match compression {
+                Compression::Pxr24 | Compression::B44 | Compression::B44a => {
+                    let mut sub_planes: Vec<Vec<f32>> = Vec::with_capacity(channels.len());
+                    for plane in planes.iter() {
+                        let mut sp = Vec::with_capacity(tw * th);
+                        for line in 0..th {
+                            let dst_y = y0 as usize + line;
+                            for xx in 0..tw {
+                                let dst_x = x0 as usize + xx;
+                                sp.push(plane[dst_y * width as usize + dst_x]);
+                            }
+                        }
+                        sub_planes.push(sp);
+                    }
+                    let refs: Vec<&[f32]> = sub_planes.iter().map(|p| p.as_slice()).collect();
+                    compress_tile_payload_reorg(raw, channels, &refs, tw as u32, th, compression)?
+                }
+                _ => compress_tile_payload(raw, compression)?,
+            };
             tile_payloads.push((tx, ty, payload));
         }
     }
@@ -460,6 +496,42 @@ fn compress_tile_payload(raw: Vec<u8>, compression: Compression) -> Result<Vec<u
             }
         }
         _ => unreachable!("filtered above"),
+    })
+}
+
+/// Compress one tile under PXR24 / B44 / B44A. Unlike [`compress_tile_payload`]
+/// (which works on the interleaved native `raw` stream), these schemes
+/// reorganise the tile into byte-plane / per-channel forms and so consume the
+/// tile-local f32 sub-planes (`sub_planes[i]` is channel `i`'s `tw × th`
+/// row-major slice). The tile is treated as a single self-contained block:
+/// width = `tw`, origin row 0, `th` rows (tiled files use 1×1 sampling).
+///
+/// `raw` is the interleaved native tile stream, used for the shared
+/// raw-fallback decision (store the raw bytes when the reorganised payload
+/// would not be smaller — observer-spec §0).
+fn compress_tile_payload_reorg(
+    raw: Vec<u8>,
+    channels: &[Channel],
+    sub_planes: &[&[f32]],
+    tw: u32,
+    th: usize,
+    compression: Compression,
+) -> Result<Vec<u8>> {
+    Ok(match compression {
+        Compression::Pxr24 => {
+            crate::encoder::build_pxr24_block_payload(channels, sub_planes, tw, 0, th)?
+        }
+        Compression::B44 | Compression::B44a => {
+            let flat = matches!(compression, Compression::B44a);
+            let packed =
+                crate::encoder::build_b44_block_payload(channels, sub_planes, tw, 0, th, flat);
+            if packed.len() >= raw.len() {
+                raw
+            } else {
+                packed
+            }
+        }
+        _ => unreachable!("caller dispatches only PXR24 / B44 / B44A here"),
     })
 }
 
@@ -575,6 +647,158 @@ mod tests {
                 panic!("chunkCount should decode as Int (or legacy Other(int)); got {other:?}")
             }
         }
+    }
+
+    /// Mirror of the PXR24 24-bit FLOAT reduction (observer-spec §1.1) so a
+    /// FLOAT-channel roundtrip can be asserted exactly against the lossy
+    /// quantisation the scheme is defined to apply.
+    fn pxr24_reduce(f: f32) -> f32 {
+        let bits = f.to_bits();
+        let s = bits & 0x8000_0000;
+        let e = bits & 0x7f80_0000;
+        let m = bits & 0x007f_ffff;
+        let i: u32 = if e == 0x7f80_0000 {
+            if m == 0 {
+                e >> 8
+            } else {
+                let mm = m >> 8;
+                (e >> 8) | mm | u32::from(mm == 0)
+            }
+        } else {
+            let r = ((e | m) + (m & 0x80)) >> 8;
+            if r >= 0x7f8000 {
+                (e | m) >> 8
+            } else {
+                r
+            }
+        };
+        let code24 = (s >> 8) | i;
+        f32::from_bits((code24 & 0x00ff_ffff) << 8)
+    }
+
+    #[test]
+    fn tiled_pxr24_float_roundtrip_8x8_in_16x16() {
+        // PXR24 is lossy only for FLOAT (24-bit reduction); each decoded
+        // sample must equal the spec reduction of the source value.
+        let w = 16;
+        let h = 16;
+        let samples = make_image(w, h);
+        let bytes =
+            encode_exr_tiled_rgba_float_with(w, h, &samples, Compression::Pxr24, 8, 8).unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert_eq!(img.width(), w);
+        assert_eq!(img.height(), h);
+        let (wi, hi) = (w as usize, h as usize);
+        let a = &img.planes[0].samples;
+        let b = &img.planes[1].samples;
+        let g = &img.planes[2].samples;
+        let r = &img.planes[3].samples;
+        for y in 0..hi {
+            for x in 0..wi {
+                let off = y * wi + x;
+                assert_eq!(r[off], pxr24_reduce(samples[off * 4]), "R ({x},{y})");
+                assert_eq!(g[off], pxr24_reduce(samples[off * 4 + 1]), "G ({x},{y})");
+                assert_eq!(b[off], pxr24_reduce(samples[off * 4 + 2]), "B ({x},{y})");
+                assert_eq!(a[off], pxr24_reduce(samples[off * 4 + 3]), "A ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn tiled_pxr24_edge_tiles_roundtrip_4x4_in_12x9() {
+        // Partial edge tiles (right column / bottom row smaller than the
+        // tile size) must still reduce exactly per the PXR24 spec.
+        let w = 12;
+        let h = 9;
+        let samples = make_image(w, h);
+        let bytes =
+            encode_exr_tiled_rgba_float_with(w, h, &samples, Compression::Pxr24, 4, 4).unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let (wi, hi) = (w as usize, h as usize);
+        let r = &img.planes[3].samples;
+        for y in 0..hi {
+            for x in 0..wi {
+                let off = y * wi + x;
+                assert_eq!(r[off], pxr24_reduce(samples[off * 4]), "R ({x},{y})");
+            }
+        }
+    }
+
+    /// Build a single-HALF-channel tiled file (channel "Y") so the B44 HALF
+    /// block packing is actually exercised (FLOAT/UINT channels are copied
+    /// raw under B44).
+    fn half_channel() -> Vec<Channel> {
+        vec![Channel {
+            name: "Y".to_string(),
+            pixel_type: PixelType::Half,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        }]
+    }
+
+    #[test]
+    fn tiled_b44_half_roundtrip_is_fixed_point() {
+        // B44 HALF packing is lossy; encoding the decoded values again must
+        // reproduce the same decoded image (a fixed point), which proves the
+        // tile decode path inverts the tile encode path bit-for-bit.
+        let w = 16;
+        let h = 16;
+        let chs = half_channel();
+        let mut plane = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                plane.push(((x as f32) * 0.1 + (y as f32) * 0.05).sin() * 4.0);
+            }
+        }
+        let bytes = encode_exr_tiled(w, h, &chs, &[&plane], Compression::B44, 8, 8).unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let decoded: Vec<f32> = img.planes[0].samples.clone();
+
+        // Re-encode the decoded samples and decode again.
+        let bytes2 = encode_exr_tiled(w, h, &chs, &[&decoded], Compression::B44, 8, 8).unwrap();
+        let img2 = parse_exr(&bytes2).unwrap();
+        assert_eq!(
+            decoded, img2.planes[0].samples,
+            "B44 tile decode must be a fixed point of the tile encode"
+        );
+    }
+
+    #[test]
+    fn tiled_b44a_flat_block_roundtrips_constant() {
+        // A constant HALF image collapses to B44A 3-byte flat blocks; the
+        // decode must recover the exact constant for every pixel.
+        let w = 16;
+        let h = 16;
+        let chs = half_channel();
+        // HALF-representable constant (0.5 is exact in binary16).
+        let plane = vec![0.5_f32; (w * h) as usize];
+        let bytes = encode_exr_tiled(w, h, &chs, &[&plane], Compression::B44a, 8, 8).unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        for (i, &v) in img.planes[0].samples.iter().enumerate() {
+            assert_eq!(v, 0.5, "B44A flat block pixel {i}");
+        }
+    }
+
+    #[test]
+    fn tiled_b44_edge_tiles_roundtrip_4x4_in_10x7() {
+        // Partial edge tiles with the 4×4 B44 block edge-replication: the
+        // decoded image must be a fixed point under re-encode.
+        let w = 10;
+        let h = 7;
+        let chs = half_channel();
+        let mut plane = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                plane.push((x as f32) * 0.3 - (y as f32) * 0.2);
+            }
+        }
+        let bytes = encode_exr_tiled(w, h, &chs, &[&plane], Compression::B44, 4, 4).unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let decoded: Vec<f32> = img.planes[0].samples.clone();
+        let bytes2 = encode_exr_tiled(w, h, &chs, &[&decoded], Compression::B44, 4, 4).unwrap();
+        let img2 = parse_exr(&bytes2).unwrap();
+        assert_eq!(decoded, img2.planes[0].samples, "B44 edge-tile fixed point");
     }
 
     #[test]

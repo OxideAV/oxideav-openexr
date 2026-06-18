@@ -807,6 +807,25 @@ pub(crate) fn scatter_tile_into_planes(
         .sum();
     let uncompressed_size = tw * th * bpp;
 
+    // B44 / B44A regroup the tile into per-channel planes rather than the
+    // interleaved native stream, so they scatter directly into the tile
+    // rectangle (observer-spec §2). Tiled files are constrained to 1×1
+    // sampling (enforced by the tiled parsers), so a tile is a self-contained
+    // `tw × th` block with no vertical-subsampling row gaps.
+    if matches!(compression, Compression::B44 | Compression::B44a) {
+        return scatter_b44_tile_into_planes(
+            payload,
+            sorted_channels,
+            planes,
+            width,
+            x0,
+            y0,
+            tw,
+            th,
+            uncompressed_size,
+        );
+    }
+
     let uncompressed: Vec<u8> = match compression {
         Compression::None => {
             if payload.len() != uncompressed_size {
@@ -820,6 +839,18 @@ pub(crate) fn scatter_tile_into_planes(
         }
         Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
         Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
+        Compression::Pxr24 => decode_pxr24_payload(
+            payload,
+            // A tile is a single self-contained block: full width = `tw`,
+            // block origin row 0, `th` rows, all present (1×1 sampling).
+            &Pxr24RowSpec {
+                sorted_channels,
+                width: tw as u32,
+                block_y0: 0,
+                lines_in_block: th,
+            },
+            uncompressed_size,
+        )?,
         _ => {
             return Err(ExrError::unsupported(format!(
                 "compression {compression:?} not yet implemented for tiled files (tile {tile_idx})"
@@ -857,6 +888,106 @@ pub(crate) fn scatter_tile_into_planes(
             "tile {tile_idx} consumed {p} of {} payload bytes",
             uncompressed.len()
         )));
+    }
+    Ok(())
+}
+
+/// Decode one B44 / B44A tile payload and scatter it into the per-channel
+/// image planes (observer-spec §2). The tile is a self-contained
+/// `tw × th` block at pixel offset `(x0, y0)`; tiled files use 1×1
+/// sampling so there is no vertical-subsampling row gap.
+///
+/// `uncompressed_size` is the interleaved-native-stream size of the tile,
+/// used to detect the shared raw fallback (compressed length ==
+/// uncompressed length ⇒ payload is the raw interleaved bytes and no B44
+/// transform applies).
+#[allow(clippy::too_many_arguments)]
+fn scatter_b44_tile_into_planes(
+    payload: &[u8],
+    sorted_channels: &[Channel],
+    planes: &mut [ExrPlane],
+    width: u32,
+    x0: u32,
+    y0: u32,
+    tw: usize,
+    th: usize,
+    uncompressed_size: usize,
+) -> Result<()> {
+    // Shared raw fallback: an encoder that couldn't shrink the tile stores
+    // the interleaved uncompressed stream verbatim (channel-interleaved,
+    // row-major over the tile rectangle).
+    if payload.len() == uncompressed_size {
+        let mut p = 0usize;
+        for line in 0..th {
+            let dst_y = y0 as usize + line;
+            for (ch_idx, ch) in sorted_channels.iter().enumerate() {
+                let plane = &mut planes[ch_idx].samples;
+                for x in 0..tw {
+                    let dst_x = x0 as usize + x;
+                    let v = match ch.pixel_type {
+                        PixelType::Half => {
+                            let bits = u16::from_le_bytes(payload[p..p + 2].try_into().unwrap());
+                            crate::half::half_to_f32(bits)
+                        }
+                        PixelType::Float => {
+                            f32::from_le_bytes(payload[p..p + 4].try_into().unwrap())
+                        }
+                        PixelType::Uint => {
+                            let bits = u32::from_le_bytes(payload[p..p + 4].try_into().unwrap());
+                            bits as f32
+                        }
+                    };
+                    plane[dst_y * width as usize + dst_x] = v;
+                    p += ch.pixel_type.bytes_per_sample();
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Each channel's tile-local plane is the full tile rectangle (1×1
+    // sampling).
+    let extents: Vec<crate::b44::B44ChannelExtent> = sorted_channels
+        .iter()
+        .map(|_| crate::b44::B44ChannelExtent { pw: tw, ph: th })
+        .collect();
+
+    let decoded = crate::b44::decode_b44_chunk(payload, sorted_channels, &extents)?;
+
+    for (ch_idx, ch) in sorted_channels.iter().enumerate() {
+        let plane = &mut planes[ch_idx].samples;
+        match &decoded[ch_idx] {
+            crate::b44::B44Plane::Half(codes) => {
+                for ty in 0..th {
+                    let dst_y = y0 as usize + ty;
+                    let row = &codes[ty * tw..ty * tw + tw];
+                    for (tx, &code) in row.iter().enumerate() {
+                        let dst_x = x0 as usize + tx;
+                        plane[dst_y * width as usize + dst_x] = crate::half::half_to_f32(code);
+                    }
+                }
+            }
+            crate::b44::B44Plane::Raw(bytes) => {
+                let bps = ch.pixel_type.bytes_per_sample();
+                for ty in 0..th {
+                    let dst_y = y0 as usize + ty;
+                    for tx in 0..tw {
+                        let off = (ty * tw + tx) * bps;
+                        let v = match ch.pixel_type {
+                            PixelType::Float => {
+                                f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
+                            }
+                            PixelType::Uint => {
+                                u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as f32
+                            }
+                            PixelType::Half => unreachable!("HALF handled as B44Plane::Half"),
+                        };
+                        let dst_x = x0 as usize + tx;
+                        plane[dst_y * width as usize + dst_x] = v;
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1167,7 +1298,13 @@ pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> 
     }
     if !matches!(
         req.compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
             "tiled multilevel: compression {:?} not yet implemented",
@@ -1703,7 +1840,13 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
         let req = extract_required(&part.attributes)?;
         if !matches!(
             req.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Pxr24
+                | Compression::B44
+                | Compression::B44a
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled part {part_idx}: compression {:?} not yet implemented",
@@ -2023,7 +2166,13 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
         let req = extract_required(&part.attributes)?;
         if !matches!(
             req.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Pxr24
+                | Compression::B44
+                | Compression::B44a
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled multilevel part {part_idx}: compression {:?} not yet implemented",

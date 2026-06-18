@@ -168,7 +168,7 @@ fn pxr24_channel_bytes(pt: PixelType) -> usize {
 /// the reorganised bytes themselves when deflate did not shrink them. The
 /// caller distinguishes the two by comparing the returned length against
 /// the uncompressed (native) block size, exactly as the decoder does.
-fn build_pxr24_block_payload(
+pub(crate) fn build_pxr24_block_payload(
     channels: &[Channel],
     planes: &[&[f32]],
     width: u32,
@@ -257,7 +257,7 @@ fn build_pxr24_block_payload(
 /// row-major HALF code words and are block-packed; FLOAT / UINT channels
 /// are copied verbatim into the little-endian raw form. Returns the
 /// concatenated chunk payload (before the shared raw-fallback decision).
-fn build_b44_block_payload(
+pub(crate) fn build_b44_block_payload(
     channels: &[Channel],
     planes: &[&[f32]],
     width: u32,
