@@ -352,6 +352,7 @@
 //! public spec); HDR pixel-format integration with `oxideav-core`;
 //! mixed-with-deep + mixed-multi-level multi-part files.
 
+pub mod b44;
 pub mod decoder;
 pub mod deep;
 pub mod encoder;

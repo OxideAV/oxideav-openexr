@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-331 **B44 / B44A decompression (single-part scanline)**: the
+  fixed-ratio lossy HALF compressor and its flat-block variant are now
+  decoded (`src/b44.rs`). A B44 chunk is regrouped into per-channel
+  contiguous planes; each HALF plane is tiled into 4×4 blocks (14-byte
+  packed, or B44A 3-byte flat marked by `b[2] >= 0x34`) with right-column
+  / bottom-row edge replication, then the 2-D differencing tree rooted at
+  `t[0]` is prefix-summed back and the monotone sign-magnitude remap
+  inverted (observer-spec §2.2–2.5). `pLinear` HALF channels additionally
+  pass through an inverse "log" (to-linear) dequantisation LUT, which is
+  *computed* from the documented closed form
+  (`float_to_half(8·log(half_to_float(x)))` with the §2.3 sentinel
+  clamps) using this crate's bit-exact binary16 conversions — verified
+  bit-exact against all 65 536 entries of the staged
+  `tables/b44-log-table.csv`. FLOAT / UINT channels are copied raw and
+  the shared raw-fallback (compressed length == uncompressed length) is
+  honoured. Validated bit-exact against the reference's own B44 decode
+  via `exrmetrics -z b44`/`b44a` re-conversion across single-block,
+  odd-size edge-replication, flat-block, and non-linear cases
+  (`tests/b44_decode_validation.rs`). Note OpenEXR 3.4.x's B44A decoder
+  zeroes pLinear channels (its plain-B44 decoder of identical data does
+  not), so pLinear validation runs on the self-consistent plain-B44 path;
+  our decoder follows the observer-spec uniformly. Tiled / multi-part B44
+  decode and all B44 encode remain follow-ups.
 - Round-326 **PXR24 compression / encode (single-part scanline)**: the
   lossy 24-bit FLOAT compressor can now be written, completing the PXR24
   read+write pair for scanline images. `encode_exr_scanline` /

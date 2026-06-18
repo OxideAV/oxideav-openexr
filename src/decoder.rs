@@ -11,10 +11,10 @@
 //! then concatenated per-part offset tables, then chunks prefixed with
 //! a 4-byte part number. Use [`parse_exr_multipart`] to parse them.
 //!
-//! Compression coverage: NONE, ZIP, ZIPS, RLE, and PXR24 (PXR24 decode
-//! for single-part scanline images — see [`decode_pxr24_payload`]).
-//! PIZ / B44 / B44A / DWAA / DWAB: header-parsed and rejected on parse
-//! with a clear unsupported message.
+//! Compression coverage: NONE, ZIP, ZIPS, RLE, PXR24, and B44 / B44A
+//! (PXR24 + B44/B44A decode for single-part scanline images — see
+//! [`decode_pxr24_payload`] and [`crate::b44`]). PIZ / DWAA / DWAB:
+//! header-parsed and rejected on parse with a clear unsupported message.
 //!
 //! ZIP-family compression pre-applies two reversible transforms
 //! documented in the OpenEXR file-format spec:
@@ -445,6 +445,104 @@ fn scatter_block_into_planes(
     Ok(())
 }
 
+/// Decode one B44 / B44A scanline-chunk payload and scatter it directly
+/// into the per-channel image planes (observer-spec §2).
+///
+/// Unlike the ZIP / RLE / PXR24 path, B44 regroups the chunk into
+/// per-channel contiguous planes rather than the interleaved scanline
+/// stream, so it bypasses [`scatter_block_into_planes`] and writes each
+/// recovered sample straight into the target plane. `uncompressed_size`
+/// is the interleaved-stream size used to detect the shared raw fallback
+/// (compressed length == uncompressed length ⇒ payload is the raw
+/// interleaved bytes and no B44 transform applies).
+#[allow(clippy::too_many_arguments)]
+fn scatter_b44_block_into_planes(
+    payload: &[u8],
+    sorted_channels: &[Channel],
+    planes: &mut [ExrPlane],
+    width: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+    uncompressed_size: usize,
+) -> Result<()> {
+    // Shared raw fallback: an encoder that couldn't shrink the chunk
+    // stores the interleaved uncompressed stream verbatim.
+    if payload.len() == uncompressed_size {
+        return scatter_block_into_planes(
+            payload,
+            sorted_channels,
+            planes,
+            width,
+            0,
+            block_y0,
+            lines_in_block,
+        );
+    }
+
+    // Per-channel sub-sampled extents within this chunk: width is the
+    // channel's sub-sampled image width; height is the count of image rows
+    // in the chunk that survive the channel's vertical subsampling.
+    let extents: Vec<crate::b44::B44ChannelExtent> = sorted_channels
+        .iter()
+        .map(|ch| {
+            let ys = ch.y_sampling as u32;
+            let ph = (0..lines_in_block as u32)
+                .filter(|&l| (block_y0 + l) % ys == 0)
+                .count();
+            let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
+            crate::b44::B44ChannelExtent { pw, ph }
+        })
+        .collect();
+
+    let decoded = crate::b44::decode_b44_chunk(payload, sorted_channels, &extents)?;
+
+    for (ch_idx, ch) in sorted_channels.iter().enumerate() {
+        let ys = ch.y_sampling as u32;
+        let xs = ch.x_sampling as u32;
+        let pw = subsampled_dim(width, xs) as usize;
+        let plane = &mut planes[ch_idx].samples;
+        // Map the chunk-local row index (0..ph) back to the channel's
+        // sub-sampled image row. The chunk's present rows are exactly the
+        // image rows in [block_y0, block_y0+lines_in_block) divisible by
+        // y_sampling; their sub-sampled indices are contiguous.
+        let mut chunk_row = 0usize;
+        for l in 0..lines_in_block as u32 {
+            let dst_y = block_y0 + l;
+            if dst_y % ys != 0 {
+                continue;
+            }
+            let dst_y_sub = (dst_y / ys) as usize;
+            match &decoded[ch_idx] {
+                crate::b44::B44Plane::Half(codes) => {
+                    let row = &codes[chunk_row * pw..chunk_row * pw + pw];
+                    for (x, &code) in row.iter().enumerate() {
+                        plane[dst_y_sub * pw + x] = crate::half::half_to_f32(code);
+                    }
+                }
+                crate::b44::B44Plane::Raw(bytes) => {
+                    let bps = ch.pixel_type.bytes_per_sample();
+                    let base = chunk_row * pw * bps;
+                    for x in 0..pw {
+                        let off = base + x * bps;
+                        let v = match ch.pixel_type {
+                            PixelType::Float => {
+                                f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
+                            }
+                            PixelType::Uint => {
+                                u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as f32
+                            }
+                            PixelType::Half => unreachable!("HALF handled as B44Plane::Half"),
+                        };
+                        plane[dst_y_sub * pw + x] = v;
+                    }
+                }
+            }
+            chunk_row += 1;
+        }
+    }
+    Ok(())
+}
+
 /// Parse a single-part EXR file (scanline OR tiled) from a byte slice.
 ///
 /// For multi-part files use [`parse_exr_multipart`] instead; this
@@ -587,6 +685,23 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
                 lines * ch.pixel_type.bytes_per_sample() * pw
             })
             .sum();
+
+        // B44 / B44A do not produce the standard interleaved scanline
+        // stream; they decode into per-channel planes and scatter
+        // directly. The shared raw fallback (compressed == uncompressed)
+        // is handled inside the B44 branch.
+        if matches!(req.compression, Compression::B44 | Compression::B44a) {
+            scatter_b44_block_into_planes(
+                payload,
+                &sorted_channels,
+                &mut planes,
+                width,
+                block_y0,
+                lines_in_block,
+                uncompressed_size,
+            )?;
+            continue;
+        }
 
         let uncompressed: Vec<u8> = match req.compression {
             Compression::None => {
