@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-339 **PXR24 + B44 / B44A for tiled and multi-part files**: the
+  PXR24 and B44/B44A compressors now decode and encode beyond single-part
+  scanline — through single-part tiled (ONE_LEVEL / MIPMAP / RIPMAP),
+  multi-part tiled (single- and multi-level), and multi-part scanline
+  files. A tile is treated as a self-contained `tw × th` block (origin
+  row 0, 1×1 sampling), reusing the scanline block builders/decoders via
+  a tile-shaped row spec; B44/B44A gain a dedicated per-channel-plane
+  tile scatter mirroring the scanline path, with the shared raw-fallback
+  applied per tile / per chunk. The tiled and multi-part scanline
+  encoders gain matching emit support by reusing the (now `pub(crate)`)
+  `build_pxr24_block_payload` / `build_b44_block_payload`. New roundtrip
+  tests cover PXR24 FLOAT (exact vs the spec 24-bit reduction, incl.
+  partial edge tiles), B44 HALF fixed-point self-roundtrip (incl. edge
+  tiles), and B44A flat-block constant recovery, for both the tiled and
+  multi-part paths. Transforms follow `openexr-observer-spec.md` §§1–2.
+
 - Round-335 **B44 / B44A compression / encode (single-part scanline)**:
   the scanline encoder now emits `B44` and `B44A` (`src/b44.rs`
   `encode_b44_chunk` + `src/encoder.rs` `build_b44_block_payload`). A
