@@ -1,4 +1,4 @@
-//! B44 / B44A pixel-data decompression (observer-spec §2).
+//! B44 / B44A pixel-data compression and decompression (observer-spec §2).
 //!
 //! B44 is a fixed-ratio (32:14) lossy compressor for `HALF` channels;
 //! `FLOAT` and `UINT` channels are copied byte-for-byte. B44A is identical
@@ -70,6 +70,48 @@ fn log_table() -> &'static [u16] {
     use std::sync::OnceLock;
     static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
     TABLE.get_or_init(build_log_table)
+}
+
+/// Build the forward "exp" (from-linear) quantisation LUT applied at
+/// encode time for `pLinear` HALF channels (observer-spec §2.3).
+///
+/// `exp[x]`:
+/// * HALF infinity / NaN (exponent field all ones) → `0x0000`.
+/// * positive HALF code words `>= 0x558c` (HALF value ≥ 88.75, the
+///   smallest HALF at/above `8·ln(HALF_MAX)`) → `0x7bff` (clamp to
+///   `HALF_MAX`).
+/// * otherwise `float_to_half(exp(half_to_float(x) / 8))`.
+fn build_exp_table() -> Vec<u16> {
+    let mut table = vec![0u16; 65536];
+    for (x, slot) in table.iter_mut().enumerate() {
+        let x = x as u16;
+        // inf / NaN: exponent field all ones.
+        if x & 0x7c00 == 0x7c00 {
+            *slot = 0x0000;
+            continue;
+        }
+        // Positive code words at/above the clamp threshold map to HALF_MAX.
+        // (A negative HALF has its sign bit set, so its code word is
+        // >= 0x8000 > 0x558c only when negative — but those large code
+        // words are negative values, which the documented closed form
+        // handles via the general exp branch below. The `>= 0x558c` clamp
+        // is specifically the *positive* clamp, so we restrict it to the
+        // non-negative half of the code space, x < 0x8000.)
+        if (0x558c..0x8000).contains(&x) {
+            *slot = 0x7bff;
+            continue;
+        }
+        let f = half_to_f32(x);
+        *slot = f32_to_half((f / 8.0).exp());
+    }
+    table
+}
+
+/// Lazily-built forward exp table, shared across encode calls.
+fn exp_table() -> &'static [u16] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
+    TABLE.get_or_init(build_exp_table)
 }
 
 /// Unpack one 14-byte B44 block into its 16 HALF code words `s[0..15]`,
@@ -278,6 +320,211 @@ pub(crate) fn decode_b44_chunk(
     Ok(planes)
 }
 
+/// Map a HALF code word `s` to the monotone "sign-magnitude → ordered
+/// integer" form `t` used by the block packer (observer-spec §2.4):
+/// inf/NaN → `0x8000`; negative → `~s`; non-negative → `s | 0x8000`.
+fn s_to_t(s: u16) -> u16 {
+    if s & 0x7c00 == 0x7c00 {
+        // inf / NaN (exponent field all ones).
+        0x8000
+    } else if s & 0x8000 != 0 {
+        !s
+    } else {
+        s | 0x8000
+    }
+}
+
+/// `round(x / 2^sh)` with round-half-to-even tie-breaking
+/// (observer-spec §2.4 `shiftAndRound`). `x` is non-negative.
+fn shift_and_round(x: u32, sh: u32) -> u32 {
+    if sh == 0 {
+        return x;
+    }
+    let half = 1u32 << (sh - 1);
+    let q = x >> sh;
+    let rem = x & ((1u32 << sh) - 1);
+    if rem > half {
+        q + 1
+    } else if rem < half {
+        q
+    } else {
+        // Exact half: round to even.
+        q + (q & 1)
+    }
+}
+
+/// Pack one 4×4 HALF block (`s[0..15]`, already exp-quantised for pLinear
+/// channels) into the 14-byte form (observer-spec §2.4). `exactmax`
+/// selects the non-linear-channel `t[0]` correction. Returns the 14 bytes.
+fn pack14(s: &[u16; 16], exactmax: bool) -> [u8; 14] {
+    let mut t = [0u16; 16];
+    for i in 0..16 {
+        t[i] = s_to_t(s[i]);
+    }
+    let t_max = *t.iter().max().unwrap();
+
+    // The 15 difference edges of the 2-D tree (parent, child), in r-index
+    // order, mirroring the §2.4 table and the decoder's `step` calls.
+    const EDGES: [(usize, usize); 15] = [
+        (0, 4),
+        (4, 8),
+        (8, 12),
+        (0, 1),
+        (4, 5),
+        (8, 9),
+        (12, 13),
+        (1, 2),
+        (5, 6),
+        (9, 10),
+        (13, 14),
+        (2, 3),
+        (6, 7),
+        (10, 11),
+        (14, 15),
+    ];
+
+    // Find the smallest shift such that every biased difference fits in
+    // [0, 63]. `d[i] = shiftAndRound(t_max - t[i], shift)`, and each
+    // r = d[parent] - d[child] + 32 (bias 0x20).
+    let mut shift = 0u32;
+    let mut d = [0u32; 16];
+    let mut r = [0i32; 15];
+    loop {
+        for i in 0..16 {
+            d[i] = shift_and_round((t_max - t[i]) as u32, shift);
+        }
+        let mut ok = true;
+        for (k, &(p, c)) in EDGES.iter().enumerate() {
+            let v = d[p] as i32 - d[c] as i32 + 0x20;
+            r[k] = v;
+            if !(0..=63).contains(&v) {
+                ok = false;
+            }
+        }
+        if ok {
+            break;
+        }
+        shift += 1;
+        // shift can never legitimately reach 13 (the 0xfc flat marker is
+        // 0xfc >> 2 = 0x3f shift, far past any real value), but guard the
+        // loop so a pathological input can't spin forever.
+        debug_assert!(shift < 32, "B44 shift search diverged");
+    }
+
+    // Non-linear (`exactmax`) channel correction: make t[0] reproduce
+    // t_max as closely as possible.
+    let t0 = if exactmax {
+        t_max.wrapping_sub((d[0] << shift) as u16)
+    } else {
+        t[0]
+    };
+
+    let r = r.map(|v| v as u32 & 0x3f);
+    let mut b = [0u8; 14];
+    b[0] = (t0 >> 8) as u8;
+    b[1] = (t0 & 0xff) as u8;
+    b[2] = ((shift << 2) | (r[0] >> 4)) as u8;
+    b[3] = ((r[0] << 4) | (r[1] >> 2)) as u8;
+    b[4] = ((r[1] << 6) | r[2]) as u8;
+    b[5] = ((r[3] << 2) | (r[4] >> 4)) as u8;
+    b[6] = ((r[4] << 4) | (r[5] >> 2)) as u8;
+    b[7] = ((r[5] << 6) | r[6]) as u8;
+    b[8] = ((r[7] << 2) | (r[8] >> 4)) as u8;
+    b[9] = ((r[8] << 4) | (r[9] >> 2)) as u8;
+    b[10] = ((r[9] << 6) | r[10]) as u8;
+    b[11] = ((r[11] << 2) | (r[12] >> 4)) as u8;
+    b[12] = ((r[12] << 4) | (r[13] >> 2)) as u8;
+    b[13] = ((r[13] << 6) | r[14]) as u8;
+    b
+}
+
+/// Pack a constant 4×4 block into the 3-byte flat form (observer-spec
+/// §2.5): `t[0]` big-endian followed by the `0xfc` out-of-range marker.
+fn pack3(s0: u16) -> [u8; 3] {
+    let t0 = s_to_t(s0);
+    [(t0 >> 8) as u8, (t0 & 0xff) as u8, 0xfc]
+}
+
+/// Encode one HALF channel plane (`pw` × `ph` samples, row-major HALF code
+/// words in `plane`) into the B44 block stream, appending to `out`.
+///
+/// Blocks tile the plane left-to-right then top-to-bottom; partial edge
+/// blocks replicate the rightmost column / bottom row (observer-spec §2.2).
+/// `p_linear` selects whether the forward exp table is applied to each
+/// sample before packing; non-linear channels also set `exactmax` so the
+/// block packer corrects `t[0]`. When `flat` (B44A) is on, a block whose
+/// 16 samples are all equal is emitted as a 3-byte flat block.
+fn encode_half_plane(
+    plane: &[u16],
+    pw: usize,
+    ph: usize,
+    p_linear: bool,
+    flat: bool,
+    out: &mut Vec<u8>,
+) {
+    let exp = if p_linear { Some(exp_table()) } else { None };
+    let exactmax = !p_linear;
+    let mut by = 0usize;
+    while by < ph {
+        let mut bx = 0usize;
+        while bx < pw {
+            // Gather the 4×4 block, replicating the rightmost column /
+            // bottom row when the block overhangs the plane edge.
+            let mut s = [0u16; 16];
+            for r in 0..4 {
+                let py = (by + r).min(ph - 1);
+                for c in 0..4 {
+                    let px = (bx + c).min(pw - 1);
+                    let mut code = plane[py * pw + px];
+                    if let Some(tbl) = exp {
+                        code = tbl[code as usize];
+                    }
+                    s[r * 4 + c] = code;
+                }
+            }
+            // Flat-block special case (B44A): all 16 samples identical.
+            if flat && s.iter().all(|&v| v == s[0]) {
+                out.extend_from_slice(&pack3(s[0]));
+            } else {
+                out.extend_from_slice(&pack14(&s, exactmax));
+            }
+            bx += 4;
+        }
+        by += 4;
+    }
+}
+
+/// Encode a whole B44 / B44A chunk into its packed payload (observer-spec
+/// §2.1): per-channel contiguous planes in `channels` order — HALF
+/// channels block-packed, FLOAT / UINT channels copied verbatim — with no
+/// zlib back-end. `planes[i]` carries the i-th channel's chunk data:
+/// `B44Plane::Half` (row-major HALF code words, `pw*ph`) for HALF channels,
+/// `B44Plane::Raw` (little-endian sample bytes, `pw*ph*bps`) otherwise.
+/// `flat` enables the B44A 3-byte flat block.
+///
+/// Returns the concatenated payload. The caller applies the shared
+/// raw-fallback rule (store the interleaved uncompressed stream when this
+/// payload would not be smaller).
+pub(crate) fn encode_b44_chunk(
+    planes: &[B44Plane],
+    channels: &[Channel],
+    extents: &[B44ChannelExtent],
+    flat: bool,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for ((ch, ext), plane) in channels.iter().zip(extents).zip(planes) {
+        match plane {
+            B44Plane::Half(codes) => {
+                encode_half_plane(codes, ext.pw, ext.ph, ch.p_linear, flat, &mut out);
+            }
+            B44Plane::Raw(bytes) => {
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +556,65 @@ mod tests {
         let s = unpack3(&blk);
         for v in s {
             assert_eq!(v, 0x3c00, "flat block should recover HALF 1.0");
+        }
+    }
+
+    #[test]
+    fn exp_table_sentinels() {
+        let exp = build_exp_table();
+        // observer-spec §2.3 sentinel facts.
+        assert_eq!(exp[0x0000], 0x3c00, "exp[+0.0] should be HALF 1.0");
+        assert_eq!(
+            exp[0x558c], 0x7bff,
+            "exp[clamp threshold] should be HALF_MAX"
+        );
+        // inf / NaN clamp to 0.
+        assert_eq!(exp[0x7c00], 0x0000, "exp[+inf] should clamp to 0");
+        assert_eq!(exp[0x7e00], 0x0000, "exp[NaN] should clamp to 0");
+        // A code word just below the clamp threshold is not clamped.
+        assert_ne!(exp[0x558b], 0x7bff, "exp just below threshold not clamped");
+    }
+
+    #[test]
+    fn pack14_unpack14_roundtrip_nonlinear() {
+        // Non-linear (exactmax) pack of a varied 4×4 block must unpack back
+        // to the same 16 HALF code words (the quantisation is exact when
+        // the block fits with shift 0). Use small magnitudes so no shift.
+        let s: [u16; 16] = [
+            0x3c00, 0x4000, 0x4200, 0x4400, 0x3800, 0x3a00, 0x3e00, 0x4100, 0x3000, 0x3400, 0x3600,
+            0x3c80, 0x2800, 0x2c00, 0x3200, 0x3d00,
+        ];
+        let packed = pack14(&s, true);
+        let got = unpack14(&packed);
+        // The block max round-trips exactly (exactmax correction); other
+        // pixels round to the quantisation lattice. Re-packing the unpacked
+        // block must be a fixed point.
+        let packed2 = pack14(&got, true);
+        let got2 = unpack14(&packed2);
+        assert_eq!(got, got2, "pack/unpack must be a fixed point");
+    }
+
+    #[test]
+    fn pack3_unpack3_roundtrip() {
+        // Flat block: pack a constant HALF value, unpack, recover it for all
+        // 16 pixels.
+        for &v in &[0x3c00u16, 0x0000, 0xbc00, 0x4900] {
+            let blk = pack3(v);
+            assert_eq!(blk[2], 0xfc, "flat marker must be 0xfc");
+            let s = unpack3(&blk);
+            for &got in &s {
+                assert_eq!(got, v, "flat block must recover {v:#06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn s_to_t_monotone_roundtrip() {
+        // The monotone remap must be invertible by the decoder's inverse.
+        for &s in &[0x0000u16, 0x3c00, 0x7bff, 0x8000, 0xbc00, 0xfbff] {
+            let t = s_to_t(s);
+            let back = if t & 0x8000 != 0 { t & 0x7fff } else { !t };
+            assert_eq!(back, s, "s_to_t inverse must recover {s:#06x}");
         }
     }
 

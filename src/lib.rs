@@ -346,11 +346,12 @@
 //! order, with mixed per-part compression, and on edge-tile (13×9)
 //! tiled-part-after-scanline-part layouts.
 //!
-//! Round-4+ followups still open: PIZ / B44 / B44A / DWAA / DWAB / Pxr24
-//! compression (PIZ blocked on a clean-room wavelet+Huffman trace doc;
-//! B44 / Pxr24 documented at high-level only, byte layout not in the
-//! public spec); HDR pixel-format integration with `oxideav-core`;
-//! mixed-with-deep + mixed-multi-level multi-part files.
+//! Round-4+ followups still open: PIZ / DWAA / DWAB compression (PIZ
+//! blocked on a clean-room wavelet+Huffman trace doc; DWA on the DCT/
+//! gamma trace); PXR24 and B44 / B44A encode + decode have landed for
+//! single-part scanline images via the observer-spec, with tiled +
+//! multi-part PXR24/B44 still to do; HDR pixel-format integration with
+//! `oxideav-core`; mixed-with-deep + mixed-multi-level multi-part files.
 
 pub mod b44;
 pub mod decoder;

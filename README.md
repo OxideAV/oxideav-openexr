@@ -16,7 +16,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Compression: `ZIPS` (1 line/blk)    | parse + write (zlib)                             |
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
 | Compression: `PXR24` (16 lines/blk) | **parse + write** (single-part scanline) — encode: FLOAT→24-bit reduction (round mantissa to 15 bits) + byte-plane horizontal-delta + zlib deflate with raw fallback; decode: zlib inflate + prefix-sum + 24-bit reconstruction. HALF/UINT lossless. Decode validated bit-exact vs `exrmetrics -z pxr24`; encode round-trips through our decoder AND is accepted + decoded identically by reference `exrmetrics` |
-| Compression: `B44` / `B44A` (32 lines/blk) | **decode** (single-part scanline) — per-channel planes; HALF 4×4 blocks (14-byte packed + B44A 3-byte flat), edge replication, optional pLinear inverse-log dequantisation (table computed bit-exact vs staged 65 536-entry CSV); FLOAT/UINT copied raw; shared raw fallback. Validated bit-exact vs the reference's own B44 decode (`exrmetrics -z b44`/`b44a`). Encode is a follow-up |
+| Compression: `B44` / `B44A` (32 lines/blk) | **parse + write** (single-part scanline) — per-channel planes; HALF 4×4 blocks (14-byte packed + B44A 3-byte flat), edge replication, optional pLinear exp/log quantisation (tables computed bit-exact vs staged 65 536-entry CSVs); FLOAT/UINT copied raw; shared raw fallback. Encode searches the smallest 6-bit shift, applies the non-linear `exactmax` `t[0]` correction, and emits 3-byte flat blocks for B44A. Decode validated bit-exact vs the reference's own B44 decode; encode round-trips through our decoder AND is accepted + decoded identically by reference `exrmetrics` (`-z b44`/`b44a`) |
 | Single-part scanline                | parse + write                                    |
 | Single-part tiled (`ONE_LEVEL`)     | parse + write                                    |
 | Tiled `MIPMAP_LEVELS`               | parse + write — full pyramid via `parse_exr_tiled_multilevel`; NONE / ZIP / ZIPS / RLE. `parse_exr` returns level-0 only |
@@ -33,14 +33,13 @@ Clean-room from the public OpenEXR file-format specification.
 ## What this crate does NOT yet cover
 
 * Compression types `PIZ`, `DWAA`, `DWAB` — recognised in the type enum
-  but rejected on parse. (`PXR24` decode + encode and `B44`/`B44A` decode
-  have landed for single-part scanline images; tiled/multi-part PXR24 and
-  B44 encode/decode are follow-ups. PIZ/DWAA/DWAB remain DOCS-GAPPED.)
-* `B44`/`B44A` are **decode-only**; the encoder still emits NONE / ZIP /
-  ZIPS / RLE / PXR24. B44 decode is single-part scanline only (tiled +
+  but rejected on parse. (`PXR24` and `B44`/`B44A` decode + encode have
+  landed for single-part scanline images; tiled/multi-part PXR24 and B44
+  are follow-ups. PIZ/DWAA/DWAB remain DOCS-GAPPED.)
+* `B44`/`B44A` encode + decode are single-part scanline only (tiled +
   multi-part are follow-ups). The reference OpenEXR 3.4.x B44A decoder
   zeroes pLinear channels (its plain-B44 decoder of identical data does
-  not); our decoder follows the observer-spec, so pLinear validation runs
+  not); our codec follows the observer-spec, so pLinear validation runs
   on the self-consistent plain-B44 path.
 * `ZIP_COMPRESSION` is rejected for deep data (the format validators
   reject deep ZIP files even though the spec page text lists ZIP as

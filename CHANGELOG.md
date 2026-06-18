@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-335 **B44 / B44A compression / encode (single-part scanline)**:
+  the scanline encoder now emits `B44` and `B44A` (`src/b44.rs`
+  `encode_b44_chunk` + `src/encoder.rs` `build_b44_block_payload`). A
+  chunk is regrouped into per-channel contiguous planes; each HALF plane
+  is tiled into 4×4 blocks with right-column / bottom-row edge
+  replication. `pLinear` HALF channels pass through a forward "exp"
+  (from-linear) quantisation LUT — *computed* from the documented closed
+  form (`float_to_half(exp(half_to_float(x)/8))` with the §2.3 clamp at
+  code word `0x558c → 0x7bff`) using this crate's bit-exact binary16
+  conversions, not embedded from any array. Each block is packed by the
+  monotone sign-magnitude remap, a smallest-6-bit-`shift` search with
+  round-half-to-even `shiftAndRound`, the 2-D differencing tree (bias
+  `0x20`), and — for non-linear channels — the `exactmax` `t[0]`
+  correction (observer-spec §2.4). B44A additionally emits the 3-byte
+  flat block (marker `0xfc`) for constant 4×4 regions (§2.5). The shared
+  raw-fallback stores the interleaved uncompressed stream when the packed
+  chunk would not be smaller. Validated by a self round-trip through our
+  decoder (pixel-level fixed-point on non-linear channels), a reference
+  cross-check (`exrmetrics` transcodes our B44/B44A bytes to NONE and the
+  reference decode bit-matches ours, pLinear included), and ratio sanity
+  checks (`tests/b44_encode_validation.rs`). The encoder's supported set
+  is now NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A.
 - Round-331 **B44 / B44A decompression (single-part scanline)**: the
   fixed-ratio lossy HALF compressor and its flat-block variant are now
   decoded (`src/b44.rs`). A B44 chunk is regrouped into per-channel

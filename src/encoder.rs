@@ -252,6 +252,73 @@ fn build_pxr24_block_payload(
     })
 }
 
+/// Gather one B44 / B44A chunk's per-channel planes from the f32 source
+/// planes and pack them (observer-spec §2). HALF channels become
+/// row-major HALF code words and are block-packed; FLOAT / UINT channels
+/// are copied verbatim into the little-endian raw form. Returns the
+/// concatenated chunk payload (before the shared raw-fallback decision).
+fn build_b44_block_payload(
+    channels: &[Channel],
+    planes: &[&[f32]],
+    width: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+    flat: bool,
+) -> Vec<u8> {
+    // Per-channel chunk extents: sub-sampled width, and the count of
+    // image rows in this chunk that survive the channel's y subsampling.
+    let mut b44_planes: Vec<crate::b44::B44Plane> = Vec::with_capacity(channels.len());
+    let mut extents: Vec<crate::b44::B44ChannelExtent> = Vec::with_capacity(channels.len());
+    for (ch_idx, ch) in channels.iter().enumerate() {
+        let ys = ch.y_sampling as u32;
+        let xs = ch.x_sampling as u32;
+        let pw = subsampled_dim(width, xs) as usize;
+        // Present chunk rows in source-plane (sub-sampled) coordinates.
+        let present_rows: Vec<usize> = (0..lines_in_block as u32)
+            .filter(|&l| (block_y0 + l) % ys == 0)
+            .map(|l| ((block_y0 + l) / ys) as usize)
+            .collect();
+        let ph = present_rows.len();
+        extents.push(crate::b44::B44ChannelExtent { pw, ph });
+        let plane = planes[ch_idx];
+        match ch.pixel_type {
+            PixelType::Half => {
+                let mut codes = vec![0u16; pw * ph];
+                for (chunk_row, &src_y) in present_rows.iter().enumerate() {
+                    for x in 0..pw {
+                        codes[chunk_row * pw + x] = crate::half::f32_to_half(plane[src_y * pw + x]);
+                    }
+                }
+                b44_planes.push(crate::b44::B44Plane::Half(codes));
+            }
+            PixelType::Float | PixelType::Uint => {
+                let mut bytes = Vec::with_capacity(pw * ph * ch.pixel_type.bytes_per_sample());
+                for &src_y in &present_rows {
+                    for x in 0..pw {
+                        let v = plane[src_y * pw + x];
+                        match ch.pixel_type {
+                            PixelType::Float => bytes.extend_from_slice(&v.to_le_bytes()),
+                            PixelType::Uint => {
+                                let u = if v.is_nan() || v < 0.0 {
+                                    0u32
+                                } else if v >= (u32::MAX as f32) {
+                                    u32::MAX
+                                } else {
+                                    (v + 0.5) as u32
+                                };
+                                bytes.extend_from_slice(&u.to_le_bytes());
+                            }
+                            PixelType::Half => unreachable!(),
+                        }
+                    }
+                }
+                b44_planes.push(crate::b44::B44Plane::Raw(bytes));
+            }
+        }
+    }
+    crate::b44::encode_b44_chunk(&b44_planes, channels, &extents, flat)
+}
+
 /// Encode a width × height RGBA-float scanline EXR with the requested
 /// compression. `samples` is `width * height * 4` long, in `R, G, B, A`
 /// pixel order.
@@ -286,9 +353,11 @@ pub fn encode_exr_scanline_rgba_float_with(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24; PIZ/B44 read-only or deferred)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + B44/B44A; PIZ/DWA read-only or deferred)"
         )));
     }
 
@@ -378,9 +447,11 @@ pub fn encode_exr_scanline(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + B44/B44A)"
         )));
     }
 
@@ -466,6 +537,24 @@ pub fn encode_exr_scanline(
                 // the planes (a different layout from the native `raw`
                 // stream), then zlib-deflates with a raw fallback.
                 build_pxr24_block_payload(channels, planes, width, row0, lines_in_block)?
+            }
+            Compression::B44 | Compression::B44a => {
+                // B44/B44A regroup the chunk into per-channel contiguous
+                // planes (HALF channels block-packed, FLOAT/UINT copied
+                // raw), with no zlib stage. The chunk-local planes are
+                // gathered straight from the f32 source planes.
+                let flat = matches!(compression, Compression::B44a);
+                let packed =
+                    build_b44_block_payload(channels, planes, width, row0, lines_in_block, flat);
+                // Shared raw fallback (observer-spec §0): if the packed
+                // chunk is not smaller than the interleaved uncompressed
+                // stream, store the raw bytes. The decoder detects this by
+                // `payload.len() == raw.len()`.
+                if packed.len() >= raw.len() {
+                    raw
+                } else {
+                    packed
+                }
             }
             _ => unreachable!("filtered above"),
         };
