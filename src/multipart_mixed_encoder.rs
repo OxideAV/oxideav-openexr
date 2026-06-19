@@ -1,8 +1,8 @@
 //! Multi-part EXR encoder + reader for **mixed** part types — a single
 //! file carrying any combination of `type="scanlineimage"` (flat
-//! scanline), `type="tiledimage"` (flat tiled, ONE_LEVEL),
-//! `type="deepscanline"` (deep scanline) and `type="deeptile"` (deep
-//! tiled, ONE_LEVEL) parts.
+//! scanline), `type="tiledimage"` (flat tiled — ONE_LEVEL, MIPMAP, or
+//! RIPMAP), `type="deepscanline"` (deep scanline) and `type="deeptile"`
+//! (deep tiled, ONE_LEVEL) parts.
 //!
 //! Round-232 surface, generalised to deep parts in round 282. Until
 //! round 232 every multi-part entry point ([`crate::encode_exr_multipart`]
@@ -35,10 +35,14 @@
 //!   `type` attribute, exactly as a homogeneous reader would.
 //! ```
 //!
-//! ONE_LEVEL only for tiled and deep-tiled parts (multi-level tiled
-//! parts in a mixed file is a followup; pure multi-level multi-part
-//! files keep using [`crate::parse_exr_multipart_tiled_multilevel`] and
-//! the deep multi-level readers). Compression per part: NONE / ZIP /
+//! Flat tiled parts may be ONE_LEVEL, MIPMAP, or RIPMAP (the level mode
+//! travels in each part's `tiles[tiledesc]` byte; multi-level tile
+//! chunks carry their real `(lvlx, lvly)` indices in the 24-byte tiled
+//! chunk header). Deep-tiled parts remain ONE_LEVEL only in a mixed
+//! file — deep multi-level files keep using the dedicated deep readers
+//! ([`crate::parse_exr_multipart_deep_tiled_mipmap`] /
+//! [`crate::parse_exr_multipart_deep_tiled_ripmap`]). Compression per
+//! part: NONE / ZIP /
 //! ZIPS / RLE for flat parts, NONE / ZIPS / RLE for deep parts (deep
 //! ZIP is rejected to match the deep writers elsewhere in this crate).
 //! Per-part payload layouts are identical to the homogeneous writers —
@@ -50,7 +54,8 @@
 
 use crate::decoder::{
     apply_zip_interleave, apply_zip_predictor, extract_required, find_chunk_count, find_part_type,
-    scatter_tile_into_planes, subsampled_dim, RequiredAttrs,
+    mipmap_level_count, mipmap_level_dim, scatter_tile_into_planes, subsampled_dim,
+    MultilevelTiledPart, RequiredAttrs, TiledLevel,
 };
 use crate::deep::{
     compress_buffer, cumulative_inclusive, decompress_buffer, find_string_attr,
@@ -59,6 +64,9 @@ use crate::deep::{
 use crate::error::{ExrError, Result};
 use crate::header::{encode_attribute_value, parse_multipart_headers, VersionField};
 use crate::image::{ExrImage, ExrPlane};
+use crate::mipmap_encoder::{
+    mipmap_level_count_round_down, ripmap_level_counts_round_down, MipmapLevel,
+};
 use crate::tiled::tiledesc_from_attribute;
 use crate::types::{
     Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
@@ -102,6 +110,46 @@ pub enum MultipartMixedPart<'a> {
         channels: Vec<Channel>,
         /// One `width * height` f32 slice per channel.
         planes: Vec<&'a [f32]>,
+        compression: Compression,
+    },
+    /// Multi-level **MIPMAP** flat tiled part (`type="tiledimage"`,
+    /// `tiles[tiledesc, level_mode=1]`, ROUND_DOWN). Carries a full
+    /// ROUND_DOWN mipmap pyramid (one entry per level in level-index
+    /// order; pyramid length must equal
+    /// `mipmap_level_count_round_down(level0_w, level0_h)`). Channels
+    /// must be alphabetical with 1×1 sampling. Each level's
+    /// `planes.len()` equals `channels.len()`; each plane is
+    /// `level_w * level_h` long. The full-resolution dimensions are
+    /// taken from `pyramid[0]`.
+    TiledMipmap {
+        /// Unique non-empty part name.
+        name: String,
+        /// Tile size (both > 0). Edge tiles at every level store only
+        /// their valid pixel rectangle.
+        tile_x: u32,
+        tile_y: u32,
+        /// Channels in alphabetical order (1×1 sampling).
+        channels: Vec<Channel>,
+        /// Full ROUND_DOWN mipmap pyramid (`pyramid[0]` = full res).
+        pyramid: Vec<MipmapLevel>,
+        compression: Compression,
+    },
+    /// Multi-level **RIPMAP** flat tiled part (`type="tiledimage"`,
+    /// `tiles[tiledesc, level_mode=2]`, ROUND_DOWN). Carries the full
+    /// 2-D ROUND_DOWN reduction grid (`grid[lvly][lvlx]`); the grid
+    /// must be `ripmap_level_counts_round_down(level0_w, level0_h)`
+    /// shaped, where the full-resolution dimensions come from
+    /// `grid[0][0]`. Channels must be alphabetical with 1×1 sampling.
+    TiledRipmap {
+        /// Unique non-empty part name.
+        name: String,
+        /// Tile size (both > 0).
+        tile_x: u32,
+        tile_y: u32,
+        /// Channels in alphabetical order (1×1 sampling).
+        channels: Vec<Channel>,
+        /// Full ROUND_DOWN ripmap grid (`grid[lvly][lvlx]`).
+        grid: Vec<Vec<MipmapLevel>>,
         compression: Compression,
     },
     /// Deep scanline part (`type="deepscanline"`). Compression NONE /
@@ -151,6 +199,8 @@ impl MultipartMixedPart<'_> {
         match self {
             Self::Scanline { name, .. }
             | Self::Tiled { name, .. }
+            | Self::TiledMipmap { name, .. }
+            | Self::TiledRipmap { name, .. }
             | Self::DeepScanline { name, .. }
             | Self::DeepTiled { name, .. } => name,
         }
@@ -168,6 +218,12 @@ impl MultipartMixedPart<'_> {
 pub enum MultipartMixedImage {
     Scanline(ExrImage),
     Tiled(ExrImage),
+    /// Multi-level MIPMAP flat tiled part; carries every decoded
+    /// pyramid level (`level_mode == 1`).
+    TiledMipmap(MultilevelTiledPart),
+    /// Multi-level RIPMAP flat tiled part; carries the full decoded
+    /// reduction grid (`level_mode == 2`).
+    TiledRipmap(MultilevelTiledPart),
     DeepScanline(DeepScanlinePart),
     DeepTiled(DeepTiledPart),
 }
@@ -217,6 +273,22 @@ impl MultipartMixedImage {
     /// True for deep tiled parts (`type="deeptile"`).
     pub fn is_deep_tiled(&self) -> bool {
         matches!(self, Self::DeepTiled(_))
+    }
+    /// Borrow the decoded multi-level (MIPMAP or RIPMAP) flat tiled
+    /// part (`None` for every other part type).
+    pub fn multilevel_tiled(&self) -> Option<&MultilevelTiledPart> {
+        match self {
+            Self::TiledMipmap(p) | Self::TiledRipmap(p) => Some(p),
+            _ => None,
+        }
+    }
+    /// True for multi-level MIPMAP flat tiled parts.
+    pub fn is_tiled_mipmap(&self) -> bool {
+        matches!(self, Self::TiledMipmap(_))
+    }
+    /// True for multi-level RIPMAP flat tiled parts.
+    pub fn is_tiled_ripmap(&self) -> bool {
+        matches!(self, Self::TiledRipmap(_))
     }
 }
 
@@ -291,9 +363,96 @@ fn validate_deep_part(
     Ok(())
 }
 
+/// Validate one flat tiled level's plane shape against `level_w ×
+/// level_h` (the shape rule shared by MIPMAP and RIPMAP parts).
+fn validate_tiled_level(
+    name: &str,
+    label: &str,
+    channels: &[Channel],
+    lvl: &MipmapLevel,
+    want_w: u32,
+    want_h: u32,
+) -> Result<()> {
+    if lvl.width != want_w || lvl.height != want_h {
+        return Err(ExrError::invalid(format!(
+            "mixed multi-part {label} part '{name}': level is {}×{}, ROUND_DOWN spec \
+             requires {want_w}×{want_h}",
+            lvl.width, lvl.height
+        )));
+    }
+    if lvl.planes.len() != channels.len() {
+        return Err(ExrError::invalid(format!(
+            "mixed multi-part {label} part '{name}': level has {} planes but {} channels \
+             declared",
+            lvl.planes.len(),
+            channels.len()
+        )));
+    }
+    let need = (lvl.width as usize) * (lvl.height as usize);
+    for (ch, plane) in channels.iter().zip(lvl.planes.iter()) {
+        if plane.len() != need {
+            return Err(ExrError::invalid(format!(
+                "mixed multi-part {label} part '{name}': level channel '{}' plane length \
+                 {} != {}×{} = {need}",
+                ch.name,
+                plane.len(),
+                lvl.width,
+                lvl.height
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the channel + compression + tile-size rules common to every
+/// flat tiled part variant (ONE_LEVEL, MIPMAP, RIPMAP).
+fn validate_tiled_common(
+    name: &str,
+    label: &str,
+    tile_x: u32,
+    tile_y: u32,
+    channels: &[Channel],
+    compression: Compression,
+) -> Result<()> {
+    if !matches!(
+        compression,
+        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+    ) {
+        return Err(ExrError::unsupported(format!(
+            "mixed multi-part {label} part '{name}': compression {compression:?} \
+             (encoder supports NONE/ZIP/ZIPS/RLE)"
+        )));
+    }
+    if tile_x == 0 || tile_y == 0 {
+        return Err(ExrError::invalid(format!(
+            "mixed multi-part {label} part '{name}': tile size {tile_x}×{tile_y} must both be > 0"
+        )));
+    }
+    for win in channels.windows(2) {
+        if win[0].name >= win[1].name {
+            return Err(ExrError::invalid(format!(
+                "mixed multi-part {label} part '{name}': channels not alphabetical: \
+                 '{}' >= '{}'",
+                win[0].name, win[1].name
+            )));
+        }
+    }
+    for ch in channels {
+        if ch.x_sampling != 1 || ch.y_sampling != 1 {
+            return Err(ExrError::unsupported(format!(
+                "mixed multi-part {label} part '{name}': sub-sampled channel '{}' \
+                 (tiled parts require 1×1 sampling)",
+                ch.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Encode a multi-part EXR file whose parts may freely mix
-/// `type="scanlineimage"`, `type="tiledimage"` (ONE_LEVEL),
-/// `type="deepscanline"` and `type="deeptile"` (ONE_LEVEL). Validation,
+/// `type="scanlineimage"`, `type="tiledimage"` (ONE_LEVEL, MIPMAP,
+/// RIPMAP), `type="deepscanline"` and `type="deeptile"` (ONE_LEVEL).
+/// Validation,
 /// attribute layout, and chunk-body emission per part mirror the
 /// homogeneous writers exactly; this entry only adds the dispatch on
 /// [`MultipartMixedPart`] variant. The version field sets the
@@ -447,6 +606,101 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                     }
                 }
             }
+            MultipartMixedPart::TiledMipmap {
+                tile_x,
+                tile_y,
+                channels,
+                pyramid,
+                compression,
+                ..
+            } => {
+                validate_tiled_common(
+                    name,
+                    "mipmap tiled",
+                    *tile_x,
+                    *tile_y,
+                    channels,
+                    *compression,
+                )?;
+                if pyramid.is_empty() {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part mipmap tiled part '{name}': empty pyramid"
+                    )));
+                }
+                let width = pyramid[0].width;
+                let height = pyramid[0].height;
+                if width == 0 || height == 0 {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part mipmap tiled part '{name}': level-0 dataWindow \
+                         {width}×{height} must be > 0"
+                    )));
+                }
+                let want_levels = mipmap_level_count_round_down(width, height);
+                if pyramid.len() as u32 != want_levels {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part mipmap tiled part '{name}': pyramid has {} levels, \
+                         expected {want_levels} for {width}×{height} ROUND_DOWN",
+                        pyramid.len()
+                    )));
+                }
+                for (l, lvl) in pyramid.iter().enumerate() {
+                    let want_w = mipmap_level_dim(width, l as u32, false);
+                    let want_h = mipmap_level_dim(height, l as u32, false);
+                    validate_tiled_level(name, "mipmap tiled", channels, lvl, want_w, want_h)?;
+                }
+            }
+            MultipartMixedPart::TiledRipmap {
+                tile_x,
+                tile_y,
+                channels,
+                grid,
+                compression,
+                ..
+            } => {
+                validate_tiled_common(
+                    name,
+                    "ripmap tiled",
+                    *tile_x,
+                    *tile_y,
+                    channels,
+                    *compression,
+                )?;
+                if grid.is_empty() || grid[0].is_empty() {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part ripmap tiled part '{name}': empty grid"
+                    )));
+                }
+                let width = grid[0][0].width;
+                let height = grid[0][0].height;
+                if width == 0 || height == 0 {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part ripmap tiled part '{name}': level-0 dataWindow \
+                         {width}×{height} must be > 0"
+                    )));
+                }
+                let (nx, ny) = ripmap_level_counts_round_down(width, height);
+                if grid.len() as u32 != ny {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part ripmap tiled part '{name}': grid has {} rows, \
+                         expected {ny} y-levels for {width}×{height} ROUND_DOWN",
+                        grid.len()
+                    )));
+                }
+                for (ly, row) in grid.iter().enumerate() {
+                    if row.len() as u32 != nx {
+                        return Err(ExrError::invalid(format!(
+                            "mixed multi-part ripmap tiled part '{name}': grid row {ly} has {} \
+                             cells, expected {nx} x-levels",
+                            row.len()
+                        )));
+                    }
+                    let want_h = mipmap_level_dim(height, ly as u32, false);
+                    for (lx, lvl) in row.iter().enumerate() {
+                        let want_w = mipmap_level_dim(width, lx as u32, false);
+                        validate_tiled_level(name, "ripmap tiled", channels, lvl, want_w, want_h)?;
+                    }
+                }
+            }
             MultipartMixedPart::DeepScanline {
                 width,
                 height,
@@ -527,6 +781,25 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                 tile_y,
                 ..
             } => width.div_ceil(*tile_x) * height.div_ceil(*tile_y),
+            MultipartMixedPart::TiledMipmap {
+                tile_x,
+                tile_y,
+                pyramid,
+                ..
+            } => pyramid
+                .iter()
+                .map(|lvl| lvl.width.div_ceil(*tile_x) * lvl.height.div_ceil(*tile_y))
+                .sum(),
+            MultipartMixedPart::TiledRipmap {
+                tile_x,
+                tile_y,
+                grid,
+                ..
+            } => grid
+                .iter()
+                .flat_map(|row| row.iter())
+                .map(|lvl| lvl.width.div_ceil(*tile_x) * lvl.height.div_ceil(*tile_y))
+                .sum(),
         };
         chunk_counts.push(cc);
     }
@@ -535,26 +808,20 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
     // Every part of a multi-part file must carry the SAME displayWindow
     // (the reference `exrheader` refuses files whose parts disagree);
     // dataWindow stays per-part. Use the union of the part data windows.
-    let disp_w = parts
-        .iter()
-        .map(|p| match p {
-            MultipartMixedPart::Scanline { width, .. }
-            | MultipartMixedPart::Tiled { width, .. }
-            | MultipartMixedPart::DeepScanline { width, .. }
-            | MultipartMixedPart::DeepTiled { width, .. } => *width,
-        })
-        .max()
-        .unwrap();
-    let disp_h = parts
-        .iter()
-        .map(|p| match p {
-            MultipartMixedPart::Scanline { height, .. }
-            | MultipartMixedPart::Tiled { height, .. }
-            | MultipartMixedPart::DeepScanline { height, .. }
-            | MultipartMixedPart::DeepTiled { height, .. } => *height,
-        })
-        .max()
-        .unwrap();
+    let part_dims = |p: &MultipartMixedPart| -> (u32, u32) {
+        match p {
+            MultipartMixedPart::Scanline { width, height, .. }
+            | MultipartMixedPart::Tiled { width, height, .. }
+            | MultipartMixedPart::DeepScanline { width, height, .. }
+            | MultipartMixedPart::DeepTiled { width, height, .. } => (*width, *height),
+            MultipartMixedPart::TiledMipmap { pyramid, .. } => {
+                (pyramid[0].width, pyramid[0].height)
+            }
+            MultipartMixedPart::TiledRipmap { grid, .. } => (grid[0][0].width, grid[0][0].height),
+        }
+    };
+    let disp_w = parts.iter().map(|p| part_dims(p).0).max().unwrap();
+    let disp_h = parts.iter().map(|p| part_dims(p).1).max().unwrap();
     let display_window = Box2i {
         x_min: 0,
         y_min: 0,
@@ -596,6 +863,44 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                 display_window,
                 *tile_x,
                 *tile_y,
+                channels,
+                *compression,
+                chunk_counts[i] as i32,
+            ),
+            MultipartMixedPart::TiledMipmap {
+                name,
+                tile_x,
+                tile_y,
+                channels,
+                pyramid,
+                compression,
+            } => build_multilevel_tiled_part_attrs(
+                name,
+                pyramid[0].width,
+                pyramid[0].height,
+                display_window,
+                *tile_x,
+                *tile_y,
+                1, // MIPMAP_LEVELS
+                channels,
+                *compression,
+                chunk_counts[i] as i32,
+            ),
+            MultipartMixedPart::TiledRipmap {
+                name,
+                tile_x,
+                tile_y,
+                channels,
+                grid,
+                compression,
+            } => build_multilevel_tiled_part_attrs(
+                name,
+                grid[0][0].width,
+                grid[0][0].height,
+                display_window,
+                *tile_x,
+                *tile_y,
+                2, // RIPMAP_LEVELS
                 channels,
                 *compression,
                 chunk_counts[i] as i32,
@@ -678,6 +983,8 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
         Tile {
             tx: u32,
             ty: u32,
+            lvl_x: u32,
+            lvl_y: u32,
             payload: Vec<u8>,
         },
         DeepScanline {
@@ -765,7 +1072,95 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                             }
                         }
                         let payload = compress_block(raw, *compression)?;
-                        all_chunks.push((part_idx as u32, ChunkPayload::Tile { tx, ty, payload }));
+                        all_chunks.push((
+                            part_idx as u32,
+                            ChunkPayload::Tile {
+                                tx,
+                                ty,
+                                lvl_x: 0,
+                                lvl_y: 0,
+                                payload,
+                            },
+                        ));
+                    }
+                }
+            }
+            MultipartMixedPart::TiledMipmap {
+                tile_x,
+                tile_y,
+                channels,
+                pyramid,
+                compression,
+                ..
+            } => {
+                // Levels outer (diagonal lvlx==lvly==level), ty-outer
+                // tx-inner within each level (INCREASING_Y row-major).
+                for (l, lvl) in pyramid.iter().enumerate() {
+                    let lvl_idx = l as u32;
+                    let txc = lvl.width.div_ceil(*tile_x);
+                    let tyc = lvl.height.div_ceil(*tile_y);
+                    for ty in 0..tyc {
+                        for tx in 0..txc {
+                            let payload = compress_tiled_level_tile(
+                                lvl,
+                                channels,
+                                *tile_x,
+                                *tile_y,
+                                tx,
+                                ty,
+                                *compression,
+                            )?;
+                            all_chunks.push((
+                                part_idx as u32,
+                                ChunkPayload::Tile {
+                                    tx,
+                                    ty,
+                                    lvl_x: lvl_idx,
+                                    lvl_y: lvl_idx,
+                                    payload,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+            MultipartMixedPart::TiledRipmap {
+                tile_x,
+                tile_y,
+                channels,
+                grid,
+                compression,
+                ..
+            } => {
+                // lvly outer, lvlx inner; within each cell ty-outer
+                // tx-inner (INCREASING_Y row-major).
+                for (ly, row) in grid.iter().enumerate() {
+                    for (lx, lvl) in row.iter().enumerate() {
+                        let txc = lvl.width.div_ceil(*tile_x);
+                        let tyc = lvl.height.div_ceil(*tile_y);
+                        for ty in 0..tyc {
+                            for tx in 0..txc {
+                                let payload = compress_tiled_level_tile(
+                                    lvl,
+                                    channels,
+                                    *tile_x,
+                                    *tile_y,
+                                    tx,
+                                    ty,
+                                    *compression,
+                                )?;
+                                all_chunks.push((
+                                    part_idx as u32,
+                                    ChunkPayload::Tile {
+                                        tx,
+                                        ty,
+                                        lvl_x: lx as u32,
+                                        lvl_y: ly as u32,
+                                        payload,
+                                    },
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -961,11 +1356,17 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                 out.extend_from_slice(&(payload.len() as i32).to_le_bytes());
                 out.extend_from_slice(&payload);
             }
-            ChunkPayload::Tile { tx, ty, payload } => {
+            ChunkPayload::Tile {
+                tx,
+                ty,
+                lvl_x,
+                lvl_y,
+                payload,
+            } => {
                 out.extend_from_slice(&(tx as i32).to_le_bytes());
                 out.extend_from_slice(&(ty as i32).to_le_bytes());
-                out.extend_from_slice(&0i32.to_le_bytes()); // lvlx
-                out.extend_from_slice(&0i32.to_le_bytes()); // lvly
+                out.extend_from_slice(&(lvl_x as i32).to_le_bytes());
+                out.extend_from_slice(&(lvl_y as i32).to_le_bytes());
                 out.extend_from_slice(&(payload.len() as i32).to_le_bytes());
                 out.extend_from_slice(&payload);
             }
@@ -1031,6 +1432,18 @@ enum PartState {
         tx_count: u32,
         ty_count: u32,
     },
+    /// Multi-level (MIPMAP / RIPMAP) flat tiled part. Holds one
+    /// [`TiledLevel`] slot per expected level in spec iteration order;
+    /// tile chunks scatter into the matching `(lvlx, lvly)` slot.
+    MultilevelTiled {
+        req: RequiredAttrs,
+        sorted_channels: Vec<Channel>,
+        tile_x: u32,
+        tile_y: u32,
+        level_mode: u8,
+        round_mode: u8,
+        levels: Vec<TiledLevel>,
+    },
     DeepScanline {
         name: String,
         req: RequiredAttrs,
@@ -1053,14 +1466,15 @@ enum PartState {
 }
 
 /// Parse a multi-part EXR whose parts may freely mix
-/// `type="scanlineimage"`, `type="tiledimage"` (ONE_LEVEL),
-/// `type="deepscanline"` and `type="deeptile"` (ONE_LEVEL).
+/// `type="scanlineimage"`, `type="tiledimage"` (ONE_LEVEL, MIPMAP, or
+/// RIPMAP), `type="deepscanline"` and `type="deeptile"` (ONE_LEVEL).
 ///
-/// Companion to [`encode_exr_multipart_mixed`]. Multi-level tiled parts
-/// (`tiles[tiledesc].level_mode != 0`, flat or deep) are rejected with
-/// pointers at the dedicated entries — call
-/// [`crate::parse_exr_multipart_tiled_multilevel`],
-/// [`crate::parse_exr_multipart_deep_tiled_mipmap`], or
+/// Companion to [`encode_exr_multipart_mixed`]. Flat multi-level tiled
+/// parts are decoded inline (surfaced as
+/// [`MultipartMixedImage::TiledMipmap`] / `TiledRipmap`). Multi-level
+/// *deep* tiled parts are still rejected with a pointer at the
+/// dedicated entries — call
+/// [`crate::parse_exr_multipart_deep_tiled_mipmap`] or
 /// [`crate::parse_exr_multipart_deep_tiled_ripmap`] for those shapes.
 ///
 /// Like the other multi-part readers we walk chunks by linear scan
@@ -1214,17 +1628,89 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         )));
                     }
                 }
-                let (tile_x, tile_y, tx_count, ty_count) = tile_geometry("tiled")?;
-                let planes = make_flat_planes(&sorted_channels, width, height);
-                state.push(PartState::Tiled {
-                    req,
-                    sorted_channels,
-                    planes,
-                    tile_x,
-                    tile_y,
-                    tx_count,
-                    ty_count,
-                });
+                // Inspect the tiledesc level mode directly so flat
+                // multi-level (MIPMAP / RIPMAP) parts are decoded inline
+                // rather than rejected.
+                let tdesc_attr = part
+                    .attributes
+                    .iter()
+                    .find(|a| a.name == "tiles")
+                    .ok_or_else(|| {
+                        ExrError::invalid(format!(
+                            "mixed multi-part tiled part {part_idx} missing required \
+                             'tiles' attribute"
+                        ))
+                    })?;
+                let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
+                if tdesc.x_size == 0 || tdesc.y_size == 0 {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part tiled part {part_idx}: tile size {}×{} \
+                         must both be > 0",
+                        tdesc.x_size, tdesc.y_size
+                    )));
+                }
+                if tdesc.level_mode == 0 {
+                    let txc = width.div_ceil(tdesc.x_size);
+                    let tyc = height.div_ceil(tdesc.y_size);
+                    let expected = (txc as usize) * (tyc as usize);
+                    if chunk_counts[part_idx] != expected {
+                        return Err(ExrError::invalid(format!(
+                            "mixed multi-part tiled part {part_idx}: chunkCount={} but \
+                             tile grid {txc}×{tyc} expects {expected}",
+                            chunk_counts[part_idx]
+                        )));
+                    }
+                    let planes = make_flat_planes(&sorted_channels, width, height);
+                    state.push(PartState::Tiled {
+                        req,
+                        sorted_channels,
+                        planes,
+                        tile_x: tdesc.x_size,
+                        tile_y: tdesc.y_size,
+                        tx_count: txc,
+                        ty_count: tyc,
+                    });
+                } else if tdesc.level_mode <= 2 {
+                    // MIPMAP (1) or RIPMAP (2): enumerate the expected
+                    // levels in spec iteration order and allocate planes.
+                    let round_up = tdesc.round_mode != 0;
+                    let levels = enumerate_tiled_levels(
+                        tdesc.level_mode,
+                        width,
+                        height,
+                        round_up,
+                        &sorted_channels,
+                    );
+                    let expected: usize = levels
+                        .iter()
+                        .map(|l| {
+                            l.width.div_ceil(tdesc.x_size) as usize
+                                * l.height.div_ceil(tdesc.y_size) as usize
+                        })
+                        .sum();
+                    if chunk_counts[part_idx] != expected {
+                        return Err(ExrError::invalid(format!(
+                            "mixed multi-part multi-level tiled part {part_idx}: \
+                             chunkCount={} but level grid expects {expected}",
+                            chunk_counts[part_idx]
+                        )));
+                    }
+                    state.push(PartState::MultilevelTiled {
+                        req,
+                        sorted_channels,
+                        tile_x: tdesc.x_size,
+                        tile_y: tdesc.y_size,
+                        level_mode: tdesc.level_mode,
+                        round_mode: tdesc.round_mode,
+                        levels,
+                    });
+                } else {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part tiled part {part_idx}: tiledesc level_mode={} \
+                         unknown (expected 0/1/2)",
+                        tdesc.level_mode
+                    )));
+                }
             }
             "deepscanline" => {
                 check_deep_sampling()?;
@@ -1435,6 +1921,84 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     th,
                     req.compression,
                     (ty * *tx_count + tx) as usize,
+                )?;
+                scan_pos = pl_end;
+            }
+            PartState::MultilevelTiled {
+                req,
+                sorted_channels,
+                tile_x,
+                tile_y,
+                levels,
+                ..
+            } => {
+                // 24-byte tiled chunk header: tx, ty, lvlx, lvly, size.
+                if scan_pos + 24 > bytes.len() {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part multi-level tiled chunk at {scan_pos}: \
+                         header runs past EOF"
+                    )));
+                }
+                let h_tx =
+                    i32::from_le_bytes(bytes[scan_pos + 4..scan_pos + 8].try_into().unwrap());
+                let h_ty =
+                    i32::from_le_bytes(bytes[scan_pos + 8..scan_pos + 12].try_into().unwrap());
+                let lvl_x =
+                    i32::from_le_bytes(bytes[scan_pos + 12..scan_pos + 16].try_into().unwrap());
+                let lvl_y =
+                    i32::from_le_bytes(bytes[scan_pos + 16..scan_pos + 20].try_into().unwrap());
+                let payload_size =
+                    i32::from_le_bytes(bytes[scan_pos + 20..scan_pos + 24].try_into().unwrap());
+                if payload_size < 0 || h_tx < 0 || h_ty < 0 || lvl_x < 0 || lvl_y < 0 {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part multi-level tiled chunk at {scan_pos}: bad header \
+                         tx={h_tx} ty={h_ty} lvlx={lvl_x} lvly={lvl_y} size={payload_size}"
+                    )));
+                }
+                let pl_start = scan_pos + 24;
+                let pl_end = pl_start + payload_size as usize;
+                if pl_end > bytes.len() {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part multi-level tiled chunk at {scan_pos}: \
+                         payload runs past EOF"
+                    )));
+                }
+                let level = levels
+                    .iter_mut()
+                    .find(|l| l.level_x as i32 == lvl_x && l.level_y as i32 == lvl_y)
+                    .ok_or_else(|| {
+                        ExrError::invalid(format!(
+                            "mixed multi-part multi-level tiled chunk at {scan_pos}: \
+                             unknown level ({lvl_x},{lvl_y}) on part {part_idx}"
+                        ))
+                    })?;
+                let tx = h_tx as u32;
+                let ty = h_ty as u32;
+                let x0 = tx * *tile_x;
+                let y0 = ty * *tile_y;
+                if x0 >= level.width || y0 >= level.height {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part multi-level tiled chunk at {scan_pos}: tile \
+                         ({tx},{ty}) outside level ({lvl_x},{lvl_y}) dims {}×{}",
+                        level.width, level.height
+                    )));
+                }
+                let x1 = (x0 + *tile_x).min(level.width);
+                let y1 = (y0 + *tile_y).min(level.height);
+                let tw = (x1 - x0) as usize;
+                let th = (y1 - y0) as usize;
+                let payload = &bytes[pl_start..pl_end];
+                scatter_tile_into_planes(
+                    payload,
+                    sorted_channels,
+                    &mut level.planes,
+                    level.width,
+                    x0,
+                    y0,
+                    tw,
+                    th,
+                    req.compression,
+                    0,
                 )?;
                 scan_pos = pl_end;
             }
@@ -1700,6 +2264,33 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 planes,
                 part.attributes.clone(),
             )),
+            PartState::MultilevelTiled {
+                req,
+                sorted_channels,
+                tile_x,
+                tile_y,
+                level_mode,
+                round_mode,
+                levels,
+            } => {
+                let mlt = MultilevelTiledPart {
+                    level_mode,
+                    round_mode,
+                    tile_x,
+                    tile_y,
+                    data_window: req.data_window,
+                    display_window: req.display_window,
+                    channels: sorted_channels,
+                    compression: req.compression,
+                    levels,
+                    attributes: part.attributes.clone(),
+                };
+                if level_mode == 2 {
+                    MultipartMixedImage::TiledRipmap(mlt)
+                } else {
+                    MultipartMixedImage::TiledMipmap(mlt)
+                }
+            }
             PartState::DeepScanline {
                 name,
                 req,
@@ -1817,6 +2408,57 @@ fn make_flat_planes(sorted_channels: &[Channel], width: u32, height: u32) -> Vec
         .collect()
 }
 
+/// Enumerate the expected decode-target levels (allocated zeroed) for a
+/// flat multi-level tiled part, in the spec's chunk iteration order:
+/// MIPMAP = diagonal `lvlx == lvly == n`; RIPMAP = `lvly` outer, `lvlx`
+/// inner.
+fn enumerate_tiled_levels(
+    level_mode: u8,
+    width: u32,
+    height: u32,
+    round_up: bool,
+    sorted_channels: &[Channel],
+) -> Vec<TiledLevel> {
+    match level_mode {
+        1 => {
+            let n = mipmap_level_count(width.max(height), round_up);
+            (0..n)
+                .map(|l| {
+                    let lw = mipmap_level_dim(width, l, round_up);
+                    let lh = mipmap_level_dim(height, l, round_up);
+                    TiledLevel {
+                        level_x: l,
+                        level_y: l,
+                        width: lw,
+                        height: lh,
+                        planes: make_flat_planes(sorted_channels, lw, lh),
+                    }
+                })
+                .collect()
+        }
+        2 => {
+            let nx = mipmap_level_count(width, round_up);
+            let ny = mipmap_level_count(height, round_up);
+            let mut v = Vec::with_capacity((nx * ny) as usize);
+            for ly in 0..ny {
+                let lh = mipmap_level_dim(height, ly, round_up);
+                for lx in 0..nx {
+                    let lw = mipmap_level_dim(width, lx, round_up);
+                    v.push(TiledLevel {
+                        level_x: lx,
+                        level_y: ly,
+                        width: lw,
+                        height: lh,
+                        planes: make_flat_planes(sorted_channels, lw, lh),
+                    });
+                }
+            }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Wrap decoded flat planes into an [`ExrImage`].
 fn make_exr_image(
     req: RequiredAttrs,
@@ -1928,6 +2570,40 @@ fn compress_block(raw: Vec<u8>, compression: Compression) -> Result<Vec<u8>> {
         }
         _ => unreachable!("filtered above"),
     })
+}
+
+/// Gather + compress one tile of a flat multi-level [`MipmapLevel`].
+/// Edge tiles emit only their valid pixel rectangle. The raw byte
+/// layout (per row: every channel's row segment, channel order) and the
+/// compression back-end are identical to the ONE_LEVEL tiled path.
+fn compress_tiled_level_tile(
+    lvl: &MipmapLevel,
+    channels: &[Channel],
+    tile_x: u32,
+    tile_y: u32,
+    tx: u32,
+    ty: u32,
+    compression: Compression,
+) -> Result<Vec<u8>> {
+    let x0 = tx * tile_x;
+    let y0 = ty * tile_y;
+    let x1 = (x0 + tile_x).min(lvl.width);
+    let y1 = (y0 + tile_y).min(lvl.height);
+    let tw = (x1 - x0) as usize;
+    let th = (y1 - y0) as usize;
+    let mut raw: Vec<u8> = Vec::new();
+    for line in 0..th {
+        let dst_y = y0 as usize + line;
+        for (ch_idx, ch) in channels.iter().enumerate() {
+            let plane = &lvl.planes[ch_idx];
+            for xx in 0..tw {
+                let dst_x = x0 as usize + xx;
+                let v = plane[dst_y * lvl.width as usize + dst_x];
+                push_pixel(&mut raw, v, ch.pixel_type);
+            }
+        }
+    }
+    compress_block(raw, compression)
 }
 
 /// Decompress one scanline block (mirrors the helper used inside
@@ -2114,6 +2790,99 @@ fn build_tiled_part_attrs(
     tiledesc.extend_from_slice(&tile_x.to_le_bytes());
     tiledesc.extend_from_slice(&tile_y.to_le_bytes());
     tiledesc.push(0x00); // ONE_LEVEL + ROUND_DOWN
+
+    vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(channels.to_vec()),
+        },
+        Attribute {
+            name: "chunkCount".to_string(),
+            value: AttributeValue::Other {
+                type_name: "int".to_string(),
+                data: chunk_count.to_le_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(display),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "name".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: name.as_bytes().to_vec(),
+            },
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "tiles".to_string(),
+            value: AttributeValue::Other {
+                type_name: "tiledesc".to_string(),
+                data: tiledesc,
+            },
+        },
+        Attribute {
+            name: "type".to_string(),
+            value: AttributeValue::Other {
+                type_name: "string".to_string(),
+                data: b"tiledimage".to_vec(),
+            },
+        },
+    ]
+}
+
+/// Per-part attribute set for a multi-level flat tiled part. Identical
+/// to [`build_tiled_part_attrs`] except the `tiles[tiledesc]` mode byte
+/// carries the level mode (`1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS`) in
+/// its low nibble, ROUND_DOWN (high nibble 0) as the rest of this crate
+/// emits. `type` is `tiledimage`.
+#[allow(clippy::too_many_arguments)]
+fn build_multilevel_tiled_part_attrs(
+    name: &str,
+    width: u32,
+    height: u32,
+    display: Box2i,
+    tile_x: u32,
+    tile_y: u32,
+    level_mode: u8,
+    channels: &[Channel],
+    compression: Compression,
+    chunk_count: i32,
+) -> Vec<Attribute> {
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (width - 1) as i32,
+        y_max: (height - 1) as i32,
+    };
+    let mut tiledesc = Vec::with_capacity(9);
+    tiledesc.extend_from_slice(&tile_x.to_le_bytes());
+    tiledesc.extend_from_slice(&tile_y.to_le_bytes());
+    tiledesc.push(level_mode & 0x0F); // ROUND_DOWN (high nibble 0) + level_mode
 
     vec![
         Attribute {

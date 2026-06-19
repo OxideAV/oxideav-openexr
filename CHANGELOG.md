@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-344 **Mixed multi-part files now carry multi-level (MIPMAP /
+  RIPMAP) flat tiled parts**: `encode_exr_multipart_mixed` /
+  `parse_exr_multipart_mixed` gain two new `MultipartMixedPart` variants
+  — `TiledMipmap { pyramid }` and `TiledRipmap { grid }` — so a single
+  mixed file may now freely interleave `scanlineimage`, ONE_LEVEL
+  `tiledimage`, MIPMAP `tiledimage`, RIPMAP `tiledimage`, `deepscanline`
+  and ONE_LEVEL `deeptile` parts in any order. The flat tiled level mode
+  travels in the per-part `tiles[tiledesc]` byte (`1` = MIPMAP, `2` =
+  RIPMAP, ROUND_DOWN); multi-level tile chunks carry their real
+  `(lvlx, lvly)` indices in the 24-byte tiled chunk header (levels-outer
+  for MIPMAP's diagonal, `lvly`-outer/`lvlx`-inner for RIPMAP's 2-D
+  grid). Decoded multi-level parts surface as
+  `MultipartMixedImage::TiledMipmap` / `TiledRipmap` wrapping a
+  `MultilevelTiledPart` (every pyramid/grid level recovered
+  sample-for-sample). Compression per part stays NONE / ZIP / ZIPS / RLE;
+  lossy PXR24/B44 and multi-level *deep* tiled parts are still rejected
+  in the mixed path (deep multi-level keeps its dedicated readers). New
+  tests cover per-compression MIPMAP + RIPMAP self-roundtrips, edge
+  tiles, a six-part-kind file (scanline + ONE_LEVEL + MIPMAP + RIPMAP +
+  deep scanline + deep tiled) round-tripping in one file, validation
+  rejects, and a reference EXR validator binary accepting the mixed
+  multi-level file. Resolves the README "mixed multi-part with
+  multi-level tiled parts" gap.
+
 - Round-339 **PXR24 + B44 / B44A for tiled and multi-part files**: the
   PXR24 and B44/B44A compressors now decode and encode beyond single-part
   scanline — through single-part tiled (ONE_LEVEL / MIPMAP / RIPMAP),
