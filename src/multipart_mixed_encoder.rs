@@ -1557,13 +1557,16 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 })?;
             let tdesc = tiledesc_from_attribute(&tdesc_attr.value)?;
             if tdesc.level_mode != 0 {
+                // Flat multi-level tiled parts are decoded inline (see the
+                // `tiledimage` arm); this closure only serves deep tiled
+                // parts, where multi-level files keep their dedicated
+                // readers.
                 return Err(ExrError::unsupported(format!(
                     "mixed multi-part {label} part {part_idx}: tiledesc level_mode={} \
-                     (parse_exr_multipart_mixed only handles ONE_LEVEL tiled parts — \
-                     call parse_exr_multipart_tiled_multilevel(), \
-                     parse_exr_multipart_deep_tiled_mipmap(), or \
-                     parse_exr_multipart_deep_tiled_ripmap() for multi-level \
-                     multi-part files)",
+                     (parse_exr_multipart_mixed handles multi-level only for flat \
+                     tiled parts — call parse_exr_multipart_deep_tiled_mipmap() or \
+                     parse_exr_multipart_deep_tiled_ripmap() for multi-level deep \
+                     tiled multi-part files)",
                     tdesc.level_mode
                 )));
             }
