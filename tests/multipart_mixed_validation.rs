@@ -1092,20 +1092,28 @@ fn mixed_mipmap_rejects_wrong_pyramid_length() {
 }
 
 #[test]
-fn mixed_multilevel_rejects_pxr24_compression() {
-    // Multi-level mixed parts share the flat-tiled NONE/ZIP/ZIPS/RLE
-    // restriction — lossy PXR24 is rejected at encode time.
+fn mixed_multilevel_pxr24_roundtrips() {
+    // Round-370: multi-level mixed flat tiled parts now carry PXR24 (and
+    // B44/B44A). A FLOAT MIPMAP pyramid carried PXR24 must round-trip; the
+    // detailed per-level fixed-point assertions live in
+    // tests/multipart_mixed_lossy_validation.rs.
     let (a, b, g, r) = make_planes(16, 16, 0.0);
     let pyramid = build_box_filter_pyramid(16, 16, &[a, b, g, r]);
-    let res = encode_exr_multipart_mixed(&[MultipartMixedPart::TiledMipmap {
-        name: "bad".to_string(),
+    let levels = pyramid.len();
+    let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::TiledMipmap {
+        name: "mip".to_string(),
         tile_x: 8,
         tile_y: 8,
         channels: rgba_channels(),
         pyramid,
         compression: Compression::Pxr24,
-    }]);
-    assert!(res.is_err());
+    }])
+    .unwrap();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert!(imgs[0].is_tiled_mipmap());
+    let mlt = imgs[0].multilevel_tiled().unwrap();
+    assert_eq!(mlt.compression, Compression::Pxr24);
+    assert_eq!(mlt.levels.len(), levels);
 }
 
 #[test]

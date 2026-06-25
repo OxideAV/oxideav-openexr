@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-370 **PXR24 / B44 / B44A for multi-level (MIPMAP / RIPMAP) flat
+  tiled parts in the mixed path**: extends the previous entry from
+  ONE_LEVEL to the full pyramid/grid. `compress_tiled_level_tile` now
+  delegates to the shared `compress_one_level_tile`, so each pyramid /
+  RIPMAP-grid level's tiles reorganise through the same PXR24 byte-plane
+  / B44 4×4-block builders (with the per-tile §0 raw-fallback); the
+  multi-level reader already routed every level's tiles through the
+  shared PXR24/B44-aware `scatter_tile_into_planes`, so decode needed no
+  change. The earlier "multi-level mixed parts reject lossy" guards
+  (encode `validate_tiled_common` + the reader) are lifted; only **deep**
+  mixed parts still restrict to NONE / ZIP / ZIPS / RLE. New tests cover
+  a MIPMAP-PXR24 and edge-tile RIPMAP-PXR24 round-trip plus a MIPMAP-B44
+  HALF fixed-point check; the obsolete `mixed_multilevel_rejects_pxr24_*`
+  test is rewritten as a round-trip assertion.
+
 - Round-370 **PXR24 / B44 / B44A in the mixed multi-part path** (flat
   `scanlineimage` + ONE_LEVEL `tiledimage` parts): a mixed file may now
   carry `PXR24`, `B44` and `B44A` on its flat scanline and ONE_LEVEL

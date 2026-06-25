@@ -417,11 +417,17 @@ fn validate_tiled_common(
 ) -> Result<()> {
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
             "mixed multi-part {label} part '{name}': compression {compression:?} \
-             (encoder supports NONE/ZIP/ZIPS/RLE)"
+             (encoder supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)"
         )));
     }
     if tile_x == 0 || tile_y == 0 {
@@ -1724,23 +1730,11 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         ty_count: tyc,
                     });
                 } else if tdesc.level_mode <= 2 {
-                    // MIPMAP (1) or RIPMAP (2): the per-level tile decoder
-                    // for the mixed multi-level path is NONE/ZIP/ZIPS/RLE
-                    // only — lossy schemes are accepted solely for ONE_LEVEL
-                    // tiled + scanline parts.
-                    if !matches!(
-                        req.compression,
-                        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
-                    ) {
-                        return Err(ExrError::unsupported(format!(
-                            "mixed multi-part multi-level tiled part {part_idx}: \
-                             compression {:?} (multi-level tiled parts accept only \
-                             NONE/ZIP/ZIPS/RLE)",
-                            req.compression
-                        )));
-                    }
                     // MIPMAP (1) or RIPMAP (2): enumerate the expected
                     // levels in spec iteration order and allocate planes.
+                    // The per-level tile decoder is the shared
+                    // `scatter_tile_into_planes`, which handles
+                    // NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A.
                     let round_up = tdesc.round_mode != 0;
                     let levels = enumerate_tiled_levels(
                         tdesc.level_mode,
@@ -2805,9 +2799,11 @@ fn compress_block(raw: Vec<u8>, compression: Compression) -> Result<Vec<u8>> {
 }
 
 /// Gather + compress one tile of a flat multi-level [`MipmapLevel`].
-/// Edge tiles emit only their valid pixel rectangle. The raw byte
-/// layout (per row: every channel's row segment, channel order) and the
-/// compression back-end are identical to the ONE_LEVEL tiled path.
+/// Edge tiles emit only their valid pixel rectangle. Delegates to
+/// [`compress_one_level_tile`] against the level's own `width × height`
+/// planes — so NONE/ZIP/ZIPS/RLE consume the interleaved native tile and
+/// PXR24/B44/B44A reorganise the tile as a self-contained block, exactly
+/// as the ONE_LEVEL tiled path does.
 fn compress_tiled_level_tile(
     lvl: &MipmapLevel,
     channels: &[Channel],
@@ -2823,19 +2819,17 @@ fn compress_tiled_level_tile(
     let y1 = (y0 + tile_y).min(lvl.height);
     let tw = (x1 - x0) as usize;
     let th = (y1 - y0) as usize;
-    let mut raw: Vec<u8> = Vec::new();
-    for line in 0..th {
-        let dst_y = y0 as usize + line;
-        for (ch_idx, ch) in channels.iter().enumerate() {
-            let plane = &lvl.planes[ch_idx];
-            for xx in 0..tw {
-                let dst_x = x0 as usize + xx;
-                let v = plane[dst_y * lvl.width as usize + dst_x];
-                push_pixel(&mut raw, v, ch.pixel_type);
-            }
-        }
-    }
-    compress_block(raw, compression)
+    let plane_refs: Vec<&[f32]> = lvl.planes.iter().map(|p| p.as_slice()).collect();
+    compress_one_level_tile(
+        channels,
+        &plane_refs,
+        lvl.width,
+        x0,
+        y0,
+        tw,
+        th,
+        compression,
+    )
 }
 
 /// Decompress one scanline block (mirrors the helper used inside

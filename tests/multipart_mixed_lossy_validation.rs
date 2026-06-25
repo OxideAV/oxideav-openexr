@@ -381,46 +381,123 @@ fn mixed_pxr24_and_b44_and_zip_in_one_file() {
 }
 
 // ---------------------------------------------------------------------------
-// Rejections that still hold: multi-level tiled lossy parts.
+// Multi-level (MIPMAP / RIPMAP) flat tiled parts now carry PXR24 / B44.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn mixed_mipmap_tiled_lossy_still_rejected() {
-    use oxideav_openexr::MipmapLevel;
-    // A 16×16 ONE-channel MIPMAP pyramid; PXR24 in a *multi-level* tiled
-    // part is still rejected (only ONE_LEVEL tiled + scanline got lossy).
-    let chans = vec![Channel {
-        name: "Y".to_string(),
-        pixel_type: PixelType::Float,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
-    let mut pyramid = Vec::new();
-    let mut dim = 16u32;
-    while dim >= 1 {
-        pyramid.push(MipmapLevel {
-            width: dim,
-            height: dim,
-            planes: vec![vec![0.0f32; (dim * dim) as usize]],
-        });
-        if dim == 1 {
-            break;
+use oxideav_openexr::{build_box_filter_pyramid, build_box_filter_ripmap, MultipartMixedImage};
+
+/// Re-encode each decoded level through the given scheme via the ONE_LEVEL
+/// tiled path and decode again; the decoded levels are on the quantisation
+/// lattice so the second pass must be bit-stable.
+fn multilevel_fixed_point(img: &MultipartMixedImage, channels: &[Channel], scheme: Compression) {
+    let mlt = img.multilevel_tiled().unwrap();
+    for lvl in &mlt.levels {
+        let refs: Vec<&[f32]> = lvl.planes.iter().map(|p| p.samples.as_slice()).collect();
+        let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::Tiled {
+            name: "p".to_string(),
+            width: lvl.width,
+            height: lvl.height,
+            tile_x: lvl.width.max(1),
+            tile_y: lvl.height.max(1),
+            channels: channels.to_vec(),
+            planes: refs,
+            compression: scheme,
+        }])
+        .unwrap();
+        let re = parse_exr_multipart_mixed(&bytes).unwrap();
+        let rimg = re[0].image().unwrap();
+        for (ci, plane) in rimg.planes.iter().enumerate() {
+            for (off, &got) in plane.samples.iter().enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    lvl.planes[ci].samples[off].to_bits(),
+                    "multi-level {scheme:?} fixed-point level {}x{} ch{ci}[{off}]",
+                    lvl.width,
+                    lvl.height
+                );
+            }
         }
-        dim /= 2;
     }
-    let r = encode_exr_multipart_mixed(&[MultipartMixedPart::TiledMipmap {
+}
+
+#[test]
+fn mixed_mipmap_pxr24_roundtrips() {
+    let p = float_ramp(16, 16, 0.0);
+    let pyramid = build_box_filter_pyramid(
+        16,
+        16,
+        &[p[0].clone(), p[1].clone(), p[2].clone(), p[3].clone()],
+    );
+    let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::TiledMipmap {
         name: "mip".to_string(),
         tile_x: 8,
         tile_y: 8,
-        channels: chans,
+        channels: float_channels(),
         pyramid,
         compression: Compression::Pxr24,
-    }]);
-    assert!(
-        r.is_err(),
-        "lossy multi-level tiled in mixed path must be rejected"
+    }])
+    .unwrap();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert!(imgs[0].is_tiled_mipmap());
+    let mlt = imgs[0].multilevel_tiled().unwrap();
+    assert_eq!(mlt.compression, Compression::Pxr24);
+    // Each decoded FLOAT level equals the 24-bit reduction of the box-
+    // filtered source level (the encoder fed each level through PXR24).
+    multilevel_fixed_point(&imgs[0], &float_channels(), Compression::Pxr24);
+}
+
+#[test]
+fn mixed_ripmap_pxr24_roundtrips_edge_tiles() {
+    // 13×9 forces edge tiles at multiple grid cells.
+    let p = float_ramp(13, 9, 0.2);
+    let grid = build_box_filter_ripmap(
+        13,
+        9,
+        &[p[0].clone(), p[1].clone(), p[2].clone(), p[3].clone()],
+    )
+    .grid;
+    let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::TiledRipmap {
+        name: "rip".to_string(),
+        tile_x: 4,
+        tile_y: 3,
+        channels: float_channels(),
+        grid,
+        compression: Compression::Pxr24,
+    }])
+    .unwrap();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert!(imgs[0].is_tiled_ripmap());
+    assert_eq!(
+        imgs[0].multilevel_tiled().unwrap().compression,
+        Compression::Pxr24
     );
+    multilevel_fixed_point(&imgs[0], &float_channels(), Compression::Pxr24);
+}
+
+#[test]
+fn mixed_mipmap_b44_roundtrips() {
+    // HALF MIPMAP carried B44 — each level decode is a pixel fixed point.
+    let p = half_grad(16, 16, 0.0);
+    let pyramid = build_box_filter_pyramid(
+        16,
+        16,
+        &[p[0].clone(), p[1].clone(), p[2].clone(), p[3].clone()],
+    );
+    let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::TiledMipmap {
+        name: "mip".to_string(),
+        tile_x: 8,
+        tile_y: 8,
+        channels: half_channels(false),
+        pyramid,
+        compression: Compression::B44,
+    }])
+    .unwrap();
+    let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
+    assert!(imgs[0].is_tiled_mipmap());
+    let mlt = imgs[0].multilevel_tiled().unwrap();
+    assert_eq!(mlt.compression, Compression::B44);
+    // Re-encode each decoded HALF level with B44 and decode again: stable.
+    multilevel_fixed_point(&imgs[0], &half_channels(false), Compression::B44);
 }
 
 // ---------------------------------------------------------------------------
