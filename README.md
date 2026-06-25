@@ -54,9 +54,11 @@ Clean-room from the public OpenEXR file-format specification.
   deep tiled) — deep parts stay NONE / ZIP / ZIPS / RLE. (All **flat**
   mixed parts — scanline + ONE_LEVEL / MIPMAP / RIPMAP tiled — now carry
   the lossy schemes; see the capability matrix.)
-* HDR pixel-format integration with `oxideav-core` — the
-  `Decoder` / `Encoder` shims clamp to `Rgba` 8-bit pending an
-  `Rgba128Float`-style pixel format addition to core.
+* True-HDR pixel-format integration with `oxideav-core` — the
+  `Decoder` / `Encoder` shims now clamp to `Rgba64Le` (16-bit per
+  channel) for previews, which keeps far more tonal precision than the
+  earlier 8-bit path but still tone-maps to [0, 1]. Full floating-point
+  HDR awaits an `Rgba128Float`-style pixel format in core.
 
 ## Standalone vs registry-integrated
 

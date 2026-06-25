@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-370 **Framework `Decoder` / `Encoder` shim now uses 16-bit RGBA
+  (`Rgba64Le`)** instead of 8-bit `Rgba`. The decode shim clamps each
+  HDR sample to [0, 1] and quantises to a little-endian `u16` per channel
+  (8 bytes/pixel, `RR GG BB AA`); the encode shim reads `Rgba64Le` and
+  inflates back to FLOAT in [0, 1]. This preserves far more of the EXR's
+  tonal precision for the preview/thumbnail use case while keeping the
+  same clamp-to-unit behaviour pending a true float pixel format in
+  `oxideav-core`. The registered capability advertises `Rgba64Le`, and
+  the encoder rejects other formats (including the old `Rgba`). New
+  registry tests cover the 16-bit decode quantisation, a `Rgba64Le`
+  encode round-trip through `parse_exr`, and the 8-bit reject.
+
 ### Added
 
 - Round-370 **PXR24 / B44 / B44A for multi-level (MIPMAP / RIPMAP) flat
