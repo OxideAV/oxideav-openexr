@@ -53,9 +53,10 @@
 //! in arbitrary order.
 
 use crate::decoder::{
-    apply_zip_interleave, apply_zip_predictor, extract_required, find_chunk_count, find_part_type,
-    mipmap_level_count, mipmap_level_dim, scatter_tile_into_planes, subsampled_dim,
-    MultilevelTiledPart, RequiredAttrs, TiledLevel,
+    apply_zip_interleave, apply_zip_predictor, decode_pxr24_payload, extract_required,
+    find_chunk_count, find_part_type, mipmap_level_count, mipmap_level_dim,
+    scatter_b44_block_into_planes, scatter_tile_into_planes, subsampled_dim, MultilevelTiledPart,
+    Pxr24RowSpec, RequiredAttrs, TiledLevel,
 };
 use crate::deep::{
     compress_buffer, cumulative_inclusive, decompress_buffer, find_string_attr,
@@ -492,11 +493,17 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
             } => {
                 if !matches!(
                     compression,
-                    Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+                    Compression::None
+                        | Compression::Zip
+                        | Compression::Zips
+                        | Compression::Rle
+                        | Compression::Pxr24
+                        | Compression::B44
+                        | Compression::B44a
                 ) {
                     return Err(ExrError::unsupported(format!(
                         "mixed multi-part part '{name}': compression {compression:?} \
-                         (encoder supports NONE/ZIP/ZIPS/RLE)"
+                         (scanline supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)"
                     )));
                 }
                 if *width == 0 || *height == 0 {
@@ -553,11 +560,17 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
             } => {
                 if !matches!(
                     compression,
-                    Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+                    Compression::None
+                        | Compression::Zip
+                        | Compression::Zips
+                        | Compression::Rle
+                        | Compression::Pxr24
+                        | Compression::B44
+                        | Compression::B44a
                 ) {
                     return Err(ExrError::unsupported(format!(
                         "mixed multi-part part '{name}': compression {compression:?} \
-                         (encoder supports NONE/ZIP/ZIPS/RLE)"
+                         (ONE_LEVEL tiled supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)"
                     )));
                 }
                 if *width == 0 || *height == 0 {
@@ -1014,28 +1027,59 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
             } => {
                 let block_h = compression.scanlines_per_block();
                 let cc = chunk_counts[part_idx] as usize;
+                let plane_refs: Vec<&[f32]> = planes.to_vec();
                 for block_idx in 0..cc {
                     let row0 = block_idx as u32 * block_h;
                     let lines_in_block = (height - row0).min(block_h) as usize;
-                    let mut raw: Vec<u8> = Vec::new();
-                    for line in 0..lines_in_block {
-                        let y = row0 as usize + line;
-                        for (ch_idx, ch) in channels.iter().enumerate() {
-                            let ys = ch.y_sampling as u32;
-                            if (y as u32) % ys != 0 {
-                                continue;
-                            }
-                            let xs = ch.x_sampling as u32;
-                            let pw = subsampled_dim(*width, xs) as usize;
-                            let plane_y = y / ys as usize;
-                            let plane = planes[ch_idx];
-                            for x in 0..pw {
-                                let v = plane[plane_y * pw + x];
-                                push_pixel(&mut raw, v, ch.pixel_type);
+                    // PXR24 / B44 / B44A reorganise the whole chunk (byte
+                    // planes / per-channel 4×4 blocks) directly from the
+                    // f32 source planes; the shared block builders apply the
+                    // §0 raw-fallback internally.
+                    let payload = match *compression {
+                        Compression::Pxr24 => crate::encoder::build_pxr24_block_payload(
+                            channels,
+                            &plane_refs,
+                            *width,
+                            row0,
+                            lines_in_block,
+                        )?,
+                        Compression::B44 | Compression::B44a => {
+                            let flat = matches!(*compression, Compression::B44a);
+                            let raw_len =
+                                scanline_block_raw_len(channels, *width, row0, lines_in_block);
+                            let packed = crate::encoder::build_b44_block_payload(
+                                channels,
+                                &plane_refs,
+                                *width,
+                                row0,
+                                lines_in_block,
+                                flat,
+                            );
+                            if packed.len() >= raw_len {
+                                // §0 raw fallback: store the interleaved
+                                // native chunk uncompressed.
+                                scanline_block_raw(
+                                    channels,
+                                    &plane_refs,
+                                    *width,
+                                    row0,
+                                    lines_in_block,
+                                )
+                            } else {
+                                packed
                             }
                         }
-                    }
-                    let payload = compress_block(raw, *compression)?;
+                        _ => {
+                            let raw = scanline_block_raw(
+                                channels,
+                                &plane_refs,
+                                *width,
+                                row0,
+                                lines_in_block,
+                            );
+                            compress_block(raw, *compression)?
+                        }
+                    };
                     all_chunks.push((part_idx as u32, ChunkPayload::Scanline { y: row0, payload }));
                 }
             }
@@ -1059,19 +1103,16 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                         let y1 = (y0 + tile_y).min(*height);
                         let tw = (x1 - x0) as usize;
                         let th = (y1 - y0) as usize;
-                        let mut raw: Vec<u8> = Vec::new();
-                        for line in 0..th {
-                            let dst_y = y0 as usize + line;
-                            for (ch_idx, ch) in channels.iter().enumerate() {
-                                let plane = planes[ch_idx];
-                                for xx in 0..tw {
-                                    let dst_x = x0 as usize + xx;
-                                    let v = plane[dst_y * (*width as usize) + dst_x];
-                                    push_pixel(&mut raw, v, ch.pixel_type);
-                                }
-                            }
-                        }
-                        let payload = compress_block(raw, *compression)?;
+                        let payload = compress_one_level_tile(
+                            channels,
+                            planes,
+                            *width,
+                            x0,
+                            y0,
+                            tw,
+                            th,
+                            *compression,
+                        )?;
                         all_chunks.push((
                             part_idx as u32,
                             ChunkPayload::Tile {
@@ -1533,8 +1574,17 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
             }
         } else if !matches!(
             req.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Pxr24
+                | Compression::B44
+                | Compression::B44a
         ) {
+            // PXR24 / B44 / B44A are accepted for flat scanline + ONE_LEVEL
+            // tiled parts; the multi-level tiled reader below rejects them
+            // separately (its per-level tile decoder is NONE/ZIP/ZIPS/RLE).
             return Err(ExrError::unsupported(format!(
                 "mixed multi-part part {part_idx}: compression {:?} not yet implemented",
                 req.compression
@@ -1674,6 +1724,21 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         ty_count: tyc,
                     });
                 } else if tdesc.level_mode <= 2 {
+                    // MIPMAP (1) or RIPMAP (2): the per-level tile decoder
+                    // for the mixed multi-level path is NONE/ZIP/ZIPS/RLE
+                    // only — lossy schemes are accepted solely for ONE_LEVEL
+                    // tiled + scanline parts.
+                    if !matches!(
+                        req.compression,
+                        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+                    ) {
+                        return Err(ExrError::unsupported(format!(
+                            "mixed multi-part multi-level tiled part {part_idx}: \
+                             compression {:?} (multi-level tiled parts accept only \
+                             NONE/ZIP/ZIPS/RLE)",
+                            req.compression
+                        )));
+                    }
                     // MIPMAP (1) or RIPMAP (2): enumerate the expected
                     // levels in spec iteration order and allocate planes.
                     let round_up = tdesc.round_mode != 0;
@@ -1842,15 +1907,56 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     })
                     .sum();
                 let payload = &bytes[pl_start..pl_end];
-                let uncompressed = decompress_block(payload, uncompressed_size, req.compression)?;
-                scatter_scanline_block_into_planes(
-                    &uncompressed,
-                    sorted_channels,
-                    planes,
-                    width,
-                    block_y0,
-                    lines_in_block,
-                )?;
+                match req.compression {
+                    Compression::B44 | Compression::B44a => {
+                        // B44 regroups the chunk into per-channel planes and
+                        // scatters directly (observer-spec §2).
+                        scatter_b44_block_into_planes(
+                            payload,
+                            sorted_channels,
+                            planes,
+                            width,
+                            block_y0,
+                            lines_in_block,
+                            uncompressed_size,
+                        )?;
+                    }
+                    Compression::Pxr24 => {
+                        // PXR24 inflates + reverses byte-plane delta to the
+                        // interleaved native stream (or the raw fallback),
+                        // then scatters like the other interleaved schemes.
+                        let uncompressed = decode_pxr24_payload(
+                            payload,
+                            &Pxr24RowSpec {
+                                sorted_channels,
+                                width,
+                                block_y0,
+                                lines_in_block,
+                            },
+                            uncompressed_size,
+                        )?;
+                        scatter_scanline_block_into_planes(
+                            &uncompressed,
+                            sorted_channels,
+                            planes,
+                            width,
+                            block_y0,
+                            lines_in_block,
+                        )?;
+                    }
+                    _ => {
+                        let uncompressed =
+                            decompress_block(payload, uncompressed_size, req.compression)?;
+                        scatter_scanline_block_into_planes(
+                            &uncompressed,
+                            sorted_channels,
+                            planes,
+                            width,
+                            block_y0,
+                            lines_in_block,
+                        )?;
+                    }
+                }
                 scan_pos = pl_end;
             }
             PartState::Tiled {
@@ -2544,6 +2650,129 @@ fn push_pixel(raw: &mut Vec<u8>, v: f32, pixel_type: PixelType) {
             raw.extend_from_slice(&u.to_le_bytes());
         }
     }
+}
+
+/// Build the interleaved native byte stream of one scanline chunk (rows
+/// top-to-bottom; within a row each present channel's sub-sampled samples
+/// in channel order). This is the form ZIP / ZIPS / RLE preprocess and
+/// the form the B44 raw-fallback stores.
+fn scanline_block_raw(
+    channels: &[Channel],
+    plane_refs: &[&[f32]],
+    width: u32,
+    row0: u32,
+    lines_in_block: usize,
+) -> Vec<u8> {
+    let mut raw: Vec<u8> = Vec::new();
+    for line in 0..lines_in_block {
+        let y = row0 as usize + line;
+        for (ch_idx, ch) in channels.iter().enumerate() {
+            let ys = ch.y_sampling as u32;
+            if (y as u32) % ys != 0 {
+                continue;
+            }
+            let xs = ch.x_sampling as u32;
+            let pw = subsampled_dim(width, xs) as usize;
+            let plane_y = y / ys as usize;
+            let plane = plane_refs[ch_idx];
+            for x in 0..pw {
+                let v = plane[plane_y * pw + x];
+                push_pixel(&mut raw, v, ch.pixel_type);
+            }
+        }
+    }
+    raw
+}
+
+/// Uncompressed byte length of one scanline chunk (the §0 raw-fallback
+/// threshold for B44, computed without materialising the bytes).
+fn scanline_block_raw_len(
+    channels: &[Channel],
+    width: u32,
+    row0: u32,
+    lines_in_block: usize,
+) -> usize {
+    let mut total = 0usize;
+    for line in 0..lines_in_block as u32 {
+        let y = row0 + line;
+        for ch in channels {
+            let ys = ch.y_sampling as u32;
+            if y % ys != 0 {
+                continue;
+            }
+            let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
+            total += ch.pixel_type.bytes_per_sample() * pw;
+        }
+    }
+    total
+}
+
+/// Compress one ONE_LEVEL flat tile. NONE/ZIP/ZIPS/RLE consume the
+/// interleaved native tile stream (per row: every channel's row segment);
+/// PXR24/B44/B44A treat the tile as a self-contained `tw × th` block
+/// (origin row 0, 1×1 sampling) and reorganise it from tile-local f32
+/// sub-planes via the shared block builders (observer-spec §§1–2).
+#[allow(clippy::too_many_arguments)]
+fn compress_one_level_tile(
+    channels: &[Channel],
+    planes: &[&[f32]],
+    width: u32,
+    x0: u32,
+    y0: u32,
+    tw: usize,
+    th: usize,
+    compression: Compression,
+) -> Result<Vec<u8>> {
+    // Interleaved native tile stream (also the §0 raw-fallback form).
+    let mut raw: Vec<u8> = Vec::new();
+    for line in 0..th {
+        let dst_y = y0 as usize + line;
+        for (ch_idx, ch) in channels.iter().enumerate() {
+            let plane = planes[ch_idx];
+            for xx in 0..tw {
+                let dst_x = x0 as usize + xx;
+                let v = plane[dst_y * (width as usize) + dst_x];
+                push_pixel(&mut raw, v, ch.pixel_type);
+            }
+        }
+    }
+
+    if matches!(
+        compression,
+        Compression::Pxr24 | Compression::B44 | Compression::B44a
+    ) {
+        // Gather each channel's tile-local `tw × th` sub-plane row-major.
+        let mut sub: Vec<Vec<f32>> = Vec::with_capacity(channels.len());
+        for &plane in planes.iter().take(channels.len()) {
+            let mut s = Vec::with_capacity(tw * th);
+            for line in 0..th {
+                let dst_y = y0 as usize + line;
+                let base = dst_y * (width as usize) + x0 as usize;
+                s.extend_from_slice(&plane[base..base + tw]);
+            }
+            sub.push(s);
+        }
+        let sub_refs: Vec<&[f32]> = sub.iter().map(|p| p.as_slice()).collect();
+        return Ok(match compression {
+            Compression::Pxr24 => {
+                crate::encoder::build_pxr24_block_payload(channels, &sub_refs, tw as u32, 0, th)?
+            }
+            Compression::B44 | Compression::B44a => {
+                let flat = matches!(compression, Compression::B44a);
+                let packed = crate::encoder::build_b44_block_payload(
+                    channels, &sub_refs, tw as u32, 0, th, flat,
+                );
+                if packed.len() >= raw.len() {
+                    raw
+                } else {
+                    packed
+                }
+            }
+            _ => unreachable!(),
+        });
+    }
+
+    compress_block(raw, compression)
 }
 
 fn compress_block(raw: Vec<u8>, compression: Compression) -> Result<Vec<u8>> {

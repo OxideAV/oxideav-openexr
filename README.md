@@ -26,7 +26,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write                  |
 | Deep scanline (`deepscanline`)      | parse + write — NONE / RLE / ZIPS; single- and multi-part |
 | Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part |
-| Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL) in any order. Multi-level flat tiled parts carry their full pyramid/grid; multi-level **deep** tiled parts still use the dedicated deep readers |
+| Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL) in any order. Multi-level flat tiled parts carry their full pyramid/grid; multi-level **deep** tiled parts still use the dedicated deep readers. Flat `scanlineimage` and ONE_LEVEL `tiledimage` parts now also carry `PXR24` / `B44` / `B44A` (alongside NONE / ZIP / ZIPS / RLE), reusing the shared block builders + decoders; multi-level tiled + deep parts stay NONE / ZIP / ZIPS / RLE |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact `< 2^24`)     |
 
@@ -50,6 +50,11 @@ Clean-room from the public OpenEXR file-format specification.
   matrix; deep multi-level files keep using
   `parse_exr_multipart_deep_tiled_mipmap` /
   `parse_exr_multipart_deep_tiled_ripmap`.)
+* Lossy `PXR24` / `B44` / `B44A` for **multi-level** (MIPMAP / RIPMAP)
+  flat tiled parts inside a mixed file, and for any **deep** part.
+  (Flat `scanlineimage` and ONE_LEVEL `tiledimage` mixed parts now
+  carry them — see the capability matrix.) Multi-level lossy in the
+  mixed path is rejected on both encode and decode.
 * HDR pixel-format integration with `oxideav-core` — the
   `Decoder` / `Encoder` shims clamp to `Rgba` 8-bit pending an
   `Rgba128Float`-style pixel format addition to core.

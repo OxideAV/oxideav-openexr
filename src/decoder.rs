@@ -259,11 +259,11 @@ fn decode_rle_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8
 /// out line-major then channel-major then byte-plane-major, so the
 /// decoder must replay the exact same visiting order to reconstruct the
 /// standard uncompressed little-endian sample stream.
-struct Pxr24RowSpec<'a> {
-    sorted_channels: &'a [Channel],
-    width: u32,
-    block_y0: u32,
-    lines_in_block: usize,
+pub(crate) struct Pxr24RowSpec<'a> {
+    pub(crate) sorted_channels: &'a [Channel],
+    pub(crate) width: u32,
+    pub(crate) block_y0: u32,
+    pub(crate) lines_in_block: usize,
 }
 
 /// Reduced on-the-wire byte width of a channel under PXR24: FLOAT is
@@ -297,7 +297,7 @@ fn pxr24_code_to_f32_bits(code24: u32) -> u32 {
 /// the reassembled per-sample delta, then writes the sample back in the
 /// channel's native pixel type (FLOAT reconstructed from the 24-bit
 /// code, HALF/UINT verbatim) as little-endian bytes.
-fn decode_pxr24_payload(
+pub(crate) fn decode_pxr24_payload(
     payload: &[u8],
     spec: &Pxr24RowSpec,
     uncompressed_size: usize,
@@ -456,7 +456,7 @@ fn scatter_block_into_planes(
 /// (compressed length == uncompressed length ⇒ payload is the raw
 /// interleaved bytes and no B44 transform applies).
 #[allow(clippy::too_many_arguments)]
-fn scatter_b44_block_into_planes(
+pub(crate) fn scatter_b44_block_into_planes(
     payload: &[u8],
     sorted_channels: &[Channel],
     planes: &mut [ExrPlane],

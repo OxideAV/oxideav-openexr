@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-370 **PXR24 / B44 / B44A in the mixed multi-part path** (flat
+  `scanlineimage` + ONE_LEVEL `tiledimage` parts): a mixed file may now
+  carry `PXR24`, `B44` and `B44A` on its flat scanline and ONE_LEVEL
+  tiled parts, alongside the existing NONE / ZIP / ZIPS / RLE. The
+  encoder routes each scanline chunk / ONE_LEVEL tile through the shared
+  `build_pxr24_block_payload` / `build_b44_block_payload` builders
+  (per-chunk 24-bit byte-plane delta for PXR24; per-channel 4×4 block
+  packing for B44/B44A, with the §0 raw-fallback per chunk / per tile);
+  the reader routes scanline chunks through `decode_pxr24_payload` /
+  `scatter_b44_block_into_planes` and ONE_LEVEL tiles through the
+  already-PXR24/B44-aware shared tile decoder. Chunk grouping follows
+  each scheme's lines-per-block (PXR24 = 16, B44/B44A = 32). Multi-level
+  (MIPMAP / RIPMAP) flat tiled parts and all deep parts keep
+  NONE / ZIP / ZIPS / RLE — lossy compression there is rejected on both
+  encode and decode with a precise message. New tests cover the PXR24
+  FLOAT 24-bit reduction (scanline + edge-tile tiled), the B44/B44A HALF
+  fixed-point property (scanline + edge-tile tiled), B44A flat-block
+  recovery, a three-part PXR24 + B44 + ZIP file, the multi-level lossy
+  reject, and an external EXR header reader accepting the mixed
+  PXR24+B44 wire format. Transforms follow `openexr-observer-spec.md`
+  §§1–2.
+
 - Round-344 **Mixed multi-part files now carry multi-level (MIPMAP /
   RIPMAP) flat tiled parts**: `encode_exr_multipart_mixed` /
   `parse_exr_multipart_mixed` gain two new `MultipartMixedPart` variants
