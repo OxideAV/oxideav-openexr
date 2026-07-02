@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.3...v0.0.4) - 2026-07-03
+
 ### Changed
 
 - Round-370 **Framework `Decoder` / `Encoder` shim now uses 16-bit RGBA
