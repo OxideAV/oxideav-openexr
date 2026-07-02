@@ -1969,6 +1969,26 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
     Ok(out)
 }
 
+/// Overflow-safe end offsets for a deep chunk's (offset-table, sample
+/// data) payloads. The two packed sizes come off the wire as `u64`
+/// fields; a hostile value near `u64::MAX` must yield an error, not a
+/// debug-build add-overflow panic. Returns `(table_end, data_end)` only
+/// when both sums fit and the payload ends within the file.
+fn deep_payload_bounds(
+    table_start: usize,
+    packed_table: usize,
+    packed_data: usize,
+    file_len: usize,
+    what: &str,
+) -> Result<(usize, usize)> {
+    let table_end = table_start.checked_add(packed_table);
+    let data_end = table_end.and_then(|te| te.checked_add(packed_data));
+    match (table_end, data_end) {
+        (Some(te), Some(de)) if de <= file_len => Ok((te, de)),
+        _ => Err(ExrError::invalid(format!("{what}: payload runs past EOF"))),
+    }
+}
+
 /// Per-tile decoded deep channel samples (tile extent + one `Vec<f32>`
 /// per channel, channel-major within the tile in pixel-scan order).
 struct TileDecoded {
@@ -2181,6 +2201,18 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
 
         match part_type.as_str() {
             "scanlineimage" => {
+                // Scanline parts accept sub-sampled channels, but a
+                // sampling factor of zero off the wire would divide by
+                // zero in the row/size math — reject it here.
+                for ch in &sorted_channels {
+                    if ch.x_sampling == 0 || ch.y_sampling == 0 {
+                        return Err(ExrError::invalid(format!(
+                            "mixed multi-part scanline part {part_idx}: channel '{}' \
+                             sampling {}×{} (both factors must be >= 1)",
+                            ch.name, ch.x_sampling, ch.y_sampling
+                        )));
+                    }
+                }
                 let planes = make_flat_planes(&sorted_channels, width, height);
                 state.push(PartState::Scanline {
                     req,
@@ -2713,14 +2745,13 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     u64::from_le_bytes(bytes[scan_pos + 24..scan_pos + 32].try_into().unwrap())
                         as usize;
                 let table_start = scan_pos + 32;
-                let table_end = table_start + packed_table;
-                let data_end = table_end + packed_data;
-                if data_end > bytes.len() {
-                    return Err(ExrError::invalid(format!(
-                        "mixed multi-part deep scanline chunk at {scan_pos}: \
-                         payload runs past EOF"
-                    )));
-                }
+                let (table_end, data_end) = deep_payload_bounds(
+                    table_start,
+                    packed_table,
+                    packed_data,
+                    bytes.len(),
+                    &format!("mixed multi-part deep scanline chunk at {scan_pos}"),
+                )?;
                 let width = req.data_window.width();
                 let height = req.data_window.height();
                 let row_in_image = (y_coord - req.data_window.y_min) as i64;
@@ -2839,16 +2870,15 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 let y1 = (y0 + *tile_y).min(height);
                 let tw = x1 - x0;
                 let th = y1 - y0;
-                let table_start = scan_pos + 44;
-                let table_end = table_start + packed_table;
-                let data_end = table_end + packed_data;
-                if data_end > bytes.len() {
-                    return Err(ExrError::invalid(format!(
-                        "mixed multi-part deep tiled part {part_idx} ('{name}'): \
-                         chunk payload runs past EOF"
-                    )));
-                }
                 let part_label = format!("mixed multi-part deep tiled part {part_idx} ('{name}')");
+                let table_start = scan_pos + 44;
+                let (table_end, data_end) = deep_payload_bounds(
+                    table_start,
+                    packed_table,
+                    packed_data,
+                    bytes.len(),
+                    &part_label,
+                )?;
                 let decoded = decode_deep_tile_body(
                     &bytes[table_start..table_end],
                     &bytes[table_end..data_end],
@@ -2938,19 +2968,18 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 let y1 = (y0 + *tile_y).min(level.height);
                 let tw = x1 - x0;
                 let th = y1 - y0;
-                let table_start = scan_pos + 44;
-                let table_end = table_start + packed_table;
-                let data_end = table_end + packed_data;
-                if data_end > bytes.len() {
-                    return Err(ExrError::invalid(format!(
-                        "mixed multi-part multi-level deep tiled part {part_idx} ('{name}'): \
-                         chunk payload runs past EOF"
-                    )));
-                }
                 let part_label = format!(
                     "mixed multi-part multi-level deep tiled part {part_idx} ('{name}') \
                      level ({lvl_x},{lvl_y})"
                 );
+                let table_start = scan_pos + 44;
+                let (table_end, data_end) = deep_payload_bounds(
+                    table_start,
+                    packed_table,
+                    packed_data,
+                    bytes.len(),
+                    &part_label,
+                )?;
                 let decoded = decode_deep_tile_body(
                     &bytes[table_start..table_end],
                     &bytes[table_end..data_end],
@@ -3162,11 +3191,20 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         attributes: part.attributes.clone(),
                     })
                 } else {
-                    // RIPMAP: reshape into grid[lvly][lvlx].
-                    let (nx, ny) = ripmap_level_counts_round_down(
-                        req.data_window.width(),
-                        req.data_window.height(),
-                    );
+                    // RIPMAP: reshape into grid[lvly][lvlx]. Derive the
+                    // grid shape from the enumerated levels themselves so
+                    // ROUND_UP files (whose level counts differ from the
+                    // ROUND_DOWN math) reshape correctly too.
+                    let ny = decoded_levels
+                        .iter()
+                        .map(|l| l.level_y + 1)
+                        .max()
+                        .unwrap_or(0);
+                    let nx = decoded_levels
+                        .iter()
+                        .map(|l| l.level_x + 1)
+                        .max()
+                        .unwrap_or(0);
                     let mut grid: Vec<Vec<DeepTiledRipmapCell>> =
                         (0..ny).map(|_| Vec::with_capacity(nx as usize)).collect();
                     // decoded_levels are in (lvly outer, lvlx inner) order.

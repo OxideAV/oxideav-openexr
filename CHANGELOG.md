@@ -21,7 +21,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registry tests cover the 16-bit decode quantisation, a `Rgba64Le`
   encode round-trip through `parse_exr`, and the 8-bit reject.
 
+### Fixed
+
+- Round-382 **Mixed-reader hardening** (found by new adversarial tests):
+  (1) the three deep chunk arms (`deepscanline`, ONE_LEVEL `deeptile`,
+  multi-level `deeptile`) computed payload bounds with unchecked `usize`
+  addition on wire-supplied `u64` size fields — a hostile value near
+  `u64::MAX` was a debug-build add-overflow panic; now routed through an
+  overflow-safe `deep_payload_bounds` helper that yields a precise EOF
+  error. (2) a scanline part whose channel list carried a sampling
+  factor of **zero** off the wire divided by zero in the chunk-size
+  math; sampling factors are now validated `>= 1` at part
+  classification. (3) the RIPMAP deep assembly derived its grid shape
+  from ROUND_DOWN math even for ROUND_UP wire files (whose level counts
+  differ), which could index out of bounds; the shape now derives from
+  the enumerated levels themselves. New `multipart_mixed_hardening`
+  suite: exhaustive truncation, exhaustive single-byte corruption (0xFF
+  and 0x00 at every offset), corrupt `chunkCount`, unknown / relabelled
+  tiledesc `level_mode`, hostile `u64` chunk sizes (max and half-max),
+  and duplicated deep tile coordinates.
+
 ### Added
+
+- Round-382 **Kitchen-sink mixed coverage + black-box acceptance**: a
+  round-trip test interleaving all eight supported mixed-part kinds in
+  one file (flat scanline, flat ONE_LEVEL / MIPMAP / RIPMAP tiled, deep
+  scanline, deep ONE_LEVEL / MIPMAP / RIPMAP tiled), plus external
+  EXR-inspector acceptance runs over mixed files carrying multi-level
+  deep parts (level modes reported correctly by two independent
+  header readers).
 
 - Round-382 **Multi-level (MIPMAP / RIPMAP) deep tiled parts in the mixed
   multi-part path**: `MultipartMixedPart` gains two new variants —
