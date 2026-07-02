@@ -272,3 +272,359 @@ fn mixed_deep_ripmap_rejects_subsampled_channel() {
     }]);
     assert!(r.is_err(), "sub-sampled deep channel must be rejected");
 }
+
+// ---------------------------------------------------------------------
+// Kitchen-sink: every part type in one file.
+// ---------------------------------------------------------------------
+
+/// One mixed file interleaving all eight supported part kinds — flat
+/// scanline, flat ONE_LEVEL tiled, flat MIPMAP tiled, flat RIPMAP tiled,
+/// deep scanline, deep ONE_LEVEL tiled, deep MIPMAP tiled and deep
+/// RIPMAP tiled — in an order that alternates flat and deep so the
+/// reader's per-part chunk-shape dispatch is exercised across every
+/// transition.
+#[test]
+fn mixed_kitchen_sink_all_eight_part_types() {
+    use oxideav_openexr::MipmapLevel;
+
+    let w = 16u32;
+    let h = 16u32;
+    let pixels = (w * h) as usize;
+
+    // Flat planes for the scanline + ONE_LEVEL tiled parts.
+    let flat_a: Vec<f32> = (0..pixels).map(|i| (i as f32) * 0.01).collect();
+    let flat_b: Vec<f32> = (0..pixels).map(|i| (i as f32) * 0.02).collect();
+    let flat_g: Vec<f32> = (0..pixels).map(|i| (i as f32) * 0.03).collect();
+    let flat_r: Vec<f32> = (0..pixels).map(|i| (i as f32) * 0.04).collect();
+    let flat_planes: Vec<&[f32]> = vec![&flat_a, &flat_b, &flat_g, &flat_r];
+
+    // Flat multi-level pyramids/grids (owned MipmapLevel data).
+    let n_levels = mipmap_level_count(w, h);
+    let flat_pyramid: Vec<MipmapLevel> = (0..n_levels)
+        .map(|l| {
+            let lw = level_dim(w, l);
+            let lh = level_dim(h, l);
+            let n = (lw * lh) as usize;
+            MipmapLevel {
+                width: lw,
+                height: lh,
+                planes: (0..4)
+                    .map(|c| (0..n).map(|i| (i + c) as f32 * 0.1 + l as f32).collect())
+                    .collect(),
+            }
+        })
+        .collect();
+    let flat_grid: Vec<Vec<MipmapLevel>> = (0..n_levels)
+        .map(|ly| {
+            (0..n_levels)
+                .map(|lx| {
+                    let lw = level_dim(w, lx);
+                    let lh = level_dim(h, ly);
+                    let n = (lw * lh) as usize;
+                    MipmapLevel {
+                        width: lw,
+                        height: lh,
+                        planes: (0..4)
+                            .map(|c| {
+                                (0..n)
+                                    .map(|i| (i + c) as f32 * 0.2 + (ly * 8 + lx) as f32)
+                                    .collect()
+                            })
+                            .collect(),
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Deep data.
+    let (ds_spp, ds_planes) = build_level(w, h, 100.0);
+    let (dt_spp, dt_planes) = build_level(w, h, 200.0);
+    let deep_pyr = build_mipmap_pyramid(w, h);
+    let deep_grid = build_ripmap_grid(w, h);
+
+    let parts = vec![
+        MultipartMixedPart::DeepTiledMipmap {
+            name: "deep_mip".to_string(),
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            pyramid: mipmap_inputs_with_dims(w, h, &deep_pyr),
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::Scanline {
+            name: "scan".to_string(),
+            width: w,
+            height: h,
+            channels: channels_rgba_float(),
+            planes: flat_planes.clone(),
+            compression: Compression::Zip,
+        },
+        MultipartMixedPart::DeepTiledRipmap {
+            name: "deep_rip".to_string(),
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            grid: ripmap_inputs_with_dims(w, h, &deep_grid),
+            compression: Compression::Rle,
+        },
+        MultipartMixedPart::TiledMipmap {
+            name: "flat_mip".to_string(),
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            pyramid: flat_pyramid.clone(),
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::DeepScanline {
+            name: "deep_scan".to_string(),
+            width: w,
+            height: h,
+            channels: channels_rgba_float(),
+            samples_per_pixel: &ds_spp,
+            channel_samples: vec![&ds_planes[0], &ds_planes[1], &ds_planes[2], &ds_planes[3]],
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::Tiled {
+            name: "flat_tile".to_string(),
+            width: w,
+            height: h,
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            planes: flat_planes.clone(),
+            compression: Compression::Rle,
+        },
+        MultipartMixedPart::DeepTiled {
+            name: "deep_tile".to_string(),
+            width: w,
+            height: h,
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            samples_per_pixel: &dt_spp,
+            channel_samples: vec![&dt_planes[0], &dt_planes[1], &dt_planes[2], &dt_planes[3]],
+            compression: Compression::None,
+        },
+        MultipartMixedPart::TiledRipmap {
+            name: "flat_rip".to_string(),
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            grid: flat_grid.clone(),
+            compression: Compression::Zip,
+        },
+    ];
+
+    let bytes = encode_exr_multipart_mixed(&parts).expect("kitchen-sink encode");
+    let imgs = parse_exr_multipart_mixed(&bytes).expect("kitchen-sink parse");
+    assert_eq!(imgs.len(), 8);
+
+    // Part 0: deep MIPMAP.
+    let p0 = imgs[0].deep_tiled_mipmap().expect("part 0 kind");
+    assert_eq!(p0.name, "deep_mip");
+    assert_eq!(p0.levels.len(), deep_pyr.len());
+    for (lvl, (spp, planes)) in p0.levels.iter().zip(deep_pyr.iter()) {
+        assert_eq!(&lvl.samples_per_pixel, spp);
+        for (got, want) in lvl.channel_samples.iter().zip(planes.iter()) {
+            assert_eq!(got, want);
+        }
+    }
+
+    // Part 1: flat scanline.
+    let p1 = imgs[1].image().expect("part 1 kind");
+    for (plane, want) in p1.planes.iter().zip([&flat_a, &flat_b, &flat_g, &flat_r]) {
+        assert_eq!(&plane.samples, want);
+    }
+
+    // Part 2: deep RIPMAP.
+    let p2 = imgs[2].deep_tiled_ripmap().expect("part 2 kind");
+    assert_eq!(p2.name, "deep_rip");
+    for (got_row, want_row) in p2.grid.iter().zip(deep_grid.iter()) {
+        for (cell, (spp, planes)) in got_row.iter().zip(want_row.iter()) {
+            assert_eq!(&cell.samples_per_pixel, spp);
+            for (g, w) in cell.channel_samples.iter().zip(planes.iter()) {
+                assert_eq!(g, w);
+            }
+        }
+    }
+
+    // Part 3: flat MIPMAP.
+    let p3 = imgs[3].multilevel_tiled().expect("part 3 kind");
+    assert_eq!(p3.levels.len(), flat_pyramid.len());
+    for (lvl, want) in p3.levels.iter().zip(flat_pyramid.iter()) {
+        for (got_plane, want_plane) in lvl.planes.iter().zip(want.planes.iter()) {
+            assert_eq!(&got_plane.samples, want_plane);
+        }
+    }
+
+    // Part 4: deep scanline.
+    let p4 = imgs[4].deep_scanline().expect("part 4 kind");
+    assert_eq!(p4.samples_per_pixel, ds_spp);
+    for (g, w) in p4.channel_samples.iter().zip(ds_planes.iter()) {
+        assert_eq!(g, w);
+    }
+
+    // Part 5: flat ONE_LEVEL tiled.
+    let p5 = imgs[5].image().expect("part 5 kind");
+    for (plane, want) in p5.planes.iter().zip([&flat_a, &flat_b, &flat_g, &flat_r]) {
+        assert_eq!(&plane.samples, want);
+    }
+
+    // Part 6: deep ONE_LEVEL tiled.
+    let p6 = imgs[6].deep_tiled().expect("part 6 kind");
+    assert_eq!(p6.samples_per_pixel, dt_spp);
+    for (g, w) in p6.channel_samples.iter().zip(dt_planes.iter()) {
+        assert_eq!(g, w);
+    }
+
+    // Part 7: flat RIPMAP.
+    let p7 = imgs[7].multilevel_tiled().expect("part 7 kind");
+    let flat_grid_linear: Vec<&MipmapLevel> = flat_grid.iter().flatten().collect();
+    assert_eq!(p7.levels.len(), flat_grid_linear.len());
+    for (lvl, want) in p7.levels.iter().zip(flat_grid_linear) {
+        for (got_plane, want_plane) in lvl.planes.iter().zip(want.planes.iter()) {
+            assert_eq!(&got_plane.samples, want_plane);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// External validator acceptance (black-box).
+// ---------------------------------------------------------------------
+
+fn tool_available(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--help")
+        .output()
+        .map(|o| o.status.code().is_some())
+        .unwrap_or(false)
+}
+
+fn tempdir() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("oxideav-openexr-mixed-ml-deep-{nanos}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.to_string_lossy().into_owned()
+}
+
+/// A mixed file whose parts are a flat scanline part + a deep MIPMAP
+/// tiled part + a deep RIPMAP tiled part must be accepted by an external
+/// EXR header reader, and the dump must report the deep parts' types and
+/// level modes.
+#[test]
+fn exrheader_accepts_mixed_file_with_multilevel_deep_parts() {
+    if !tool_available("exrheader") {
+        eprintln!("exrheader not available, skipping");
+        return;
+    }
+    let w = 16u32;
+    let h = 16u32;
+    let pixels = (w * h) as usize;
+    let flat: Vec<f32> = (0..pixels).map(|i| (i as f32) * 0.01).collect();
+    let deep_pyr = build_mipmap_pyramid(w, h);
+    let deep_grid = build_ripmap_grid(w, h);
+    let bytes = encode_exr_multipart_mixed(&[
+        MultipartMixedPart::Scanline {
+            name: "flat".to_string(),
+            width: w,
+            height: h,
+            channels: channels_rgba_float(),
+            planes: vec![&flat, &flat, &flat, &flat],
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::DeepTiledMipmap {
+            name: "dmip".to_string(),
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            pyramid: mipmap_inputs_with_dims(w, h, &deep_pyr),
+            compression: Compression::Zips,
+        },
+        MultipartMixedPart::DeepTiledRipmap {
+            name: "drip".to_string(),
+            tile_x: 8,
+            tile_y: 8,
+            channels: channels_rgba_float(),
+            grid: ripmap_inputs_with_dims(w, h, &deep_grid),
+            compression: Compression::Rle,
+        },
+    ])
+    .unwrap();
+    let dir = tempdir();
+    let path = format!("{dir}/mixed_ml_deep.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = std::process::Command::new("exrheader")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exrheader rejected our mixed multi-level-deep file:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("deeptile"),
+        "exrheader output didn't mention 'deeptile':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("scanlineimage"),
+        "exrheader output didn't mention 'scanlineimage':\n{stdout}"
+    );
+    assert!(
+        stdout.contains("mip-map") || stdout.contains("mipmap") || stdout.contains("MIPMAP"),
+        "exrheader output didn't indicate a mip-map level mode:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("rip-map") || stdout.contains("ripmap") || stdout.contains("RIPMAP"),
+        "exrheader output didn't indicate a rip-map level mode:\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// Same wire bytes through a second, independent external inspector.
+#[test]
+fn exrinfo_accepts_mixed_file_with_multilevel_deep_parts() {
+    if !tool_available("exrinfo") {
+        eprintln!("exrinfo not available, skipping");
+        return;
+    }
+    let w = 16u32;
+    let h = 16u32;
+    let deep_pyr = build_mipmap_pyramid(w, h);
+    let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::DeepTiledMipmap {
+        name: "dmip".to_string(),
+        tile_x: 8,
+        tile_y: 8,
+        channels: channels_rgba_float(),
+        pyramid: mipmap_inputs_with_dims(w, h, &deep_pyr),
+        compression: Compression::Zips,
+    }])
+    .unwrap();
+    let dir = tempdir();
+    let path = format!("{dir}/mixed_dmip.exr");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = std::process::Command::new("exrinfo")
+        .arg("-v")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exrinfo rejected our mixed deep-MIPMAP file:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("deeptile"),
+        "exrinfo output didn't mention 'deeptile':\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
