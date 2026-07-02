@@ -1114,6 +1114,16 @@ fn parse_tiled(
         let ty = h_ty as u32;
         let payload = &bytes[pl_start..pl_end];
 
+        // `h_tx`/`h_ty` come straight off the wire; hostile values must
+        // not underflow the edge-tile clip below.
+        let txc = width.div_ceil(tdesc.x_size);
+        let tyc = height.div_ceil(tdesc.y_size);
+        if h_tx < 0 || h_ty < 0 || tx >= txc || ty >= tyc {
+            return Err(ExrError::invalid(format!(
+                "tile {tile_idx} at ({h_tx},{h_ty}) outside tile grid {txc}×{tyc}"
+            )));
+        }
+
         let x0 = tx * tdesc.x_size;
         let y0 = ty * tdesc.y_size;
         let x1 = (x0 + tdesc.x_size).min(width);
@@ -1463,8 +1473,20 @@ pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> 
                 ))
             })?;
 
-        let x0 = (tx as u32) * tdesc.x_size;
-        let y0 = (ty as u32) * tdesc.y_size;
+        // `tx`/`ty` come straight off the wire; reject negatives before
+        // the `as u32` multiply (a hostile index must not overflow it),
+        // then bound against this level's dimensions.
+        let x0 = u32::try_from(tx)
+            .ok()
+            .and_then(|v| v.checked_mul(tdesc.x_size));
+        let y0 = u32::try_from(ty)
+            .ok()
+            .and_then(|v| v.checked_mul(tdesc.y_size));
+        let (Some(x0), Some(y0)) = (x0, y0) else {
+            return Err(ExrError::invalid(format!(
+                "tile {tile_idx} carries hostile tile index ({tx},{ty})"
+            )));
+        };
         if x0 >= level.width || y0 >= level.height {
             return Err(ExrError::invalid(format!(
                 "tile {tile_idx} at ({tx},{ty}) outside level ({lvl_x},{lvl_y}) dims {}×{}",
@@ -1624,6 +1646,18 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
 
         let mut sorted_channels = req.channels.clone();
         sorted_channels.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // A sampling factor of zero off the wire would divide by zero
+        // in the plane-shape and chunk-size math below.
+        for ch in &sorted_channels {
+            if ch.x_sampling <= 0 || ch.y_sampling <= 0 {
+                return Err(ExrError::invalid(format!(
+                    "multi-part part {part_idx}: channel '{}' has non-positive sampling \
+                     factor x={} y={}",
+                    ch.name, ch.x_sampling, ch.y_sampling
+                )));
+            }
+        }
 
         let planes: Vec<ExrPlane> = sorted_channels
             .iter()

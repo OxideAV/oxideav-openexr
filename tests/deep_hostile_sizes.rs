@@ -58,6 +58,10 @@ fn sweep<F: Fn(&[u8])>(bytes: &[u8], parse: F) {
         let mut m = bytes.to_vec();
         m[pos..pos + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         parse(&m);
+        // A zero window catches division-by-zero paths (tile sizes,
+        // sampling factors) that the all-ones window can't reach.
+        m[pos..pos + 8].copy_from_slice(&0u64.to_le_bytes());
+        parse(&m);
     }
 }
 

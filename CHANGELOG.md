@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Round-382 **Flat-reader hardening sweep**: extending the hostile
+  8-byte-window methodology (now both `0xFF` and `0x00` windows) to the
+  flat readers found three more decode-path defects, all fixed:
+  (1) the single-typed tiled reader's full-resolution scatter took the
+  wire `(tx, ty)` tile indices unvalidated — a hostile index put the
+  tile origin past the image and underflowed the edge-tile clip
+  (`x1 - x0`); indices are now bounded against the tile grid.
+  (2) the multi-level tiled reader multiplied `tx as u32 * tile_w`
+  before its bounds check — negative or huge indices could overflow the
+  multiply in debug builds; now `try_from` + `checked_mul` first.
+  (3) `parse_exr_multipart` (homogeneous scanline) accepted channel
+  sampling factors of zero off the wire and divided by zero in the
+  chunk-size math — the same class fixed in the mixed reader; the
+  single-part reader's `>= 1` validation is now applied per part. New
+  `flat_hostile_window` suite sweeps scanline, tiled ONE_LEVEL /
+  MIPMAP / RIPMAP, multi-part scanline and multi-part tiled files; the
+  deep sweep also gained the `0x00` window.
+
 - Round-382 **Dedicated deep-reader hardening sweep**: the same
   unchecked-arithmetic class fixed in the mixed reader existed across
   the dedicated deep readers — seven chunk walks (`deep multipart
