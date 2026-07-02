@@ -23,6 +23,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-382 **Multi-level (MIPMAP / RIPMAP) deep tiled parts in the mixed
+  multi-part path**: `MultipartMixedPart` gains two new variants —
+  `DeepTiledMipmap { pyramid }` and `DeepTiledRipmap { grid }` — so a
+  single `encode_exr_multipart_mixed` file may now freely interleave
+  multi-level **deep** tiled parts alongside flat `scanlineimage`,
+  flat `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline` and
+  ONE_LEVEL `deeptile` parts. The mixed writer emits each deep level's
+  tiles carrying their real `(lvlx, lvly)` indices in the 24-/44-byte
+  tiled chunk header (MIPMAP walks the diagonal `lvlx == lvly`; RIPMAP
+  walks `lvly`-outer / `lvlx`-inner), and the level mode travels in the
+  per-part `tiles[tiledesc]` byte (`1` = MIPMAP, `2` = RIPMAP,
+  ROUND_DOWN). `parse_exr_multipart_mixed` decodes these inline, surfaced
+  as `MultipartMixedImage::DeepTiledMipmap(DeepMipmapTiledPart)` /
+  `DeepTiledRipmap(DeepRipmapTiledPart)` (every pyramid level / grid cell
+  recovered sample-for-sample), with new accessors
+  `deep_tiled_mipmap()` / `deep_tiled_ripmap()` /
+  `is_deep_tiled_mipmap()` / `is_deep_tiled_ripmap()`. Compression per
+  deep part stays NONE / ZIPS / RLE (lossy PXR24 / B44 / B44A rejected on
+  both encode and decode). The shared per-tile deep builders
+  (`build_deep_tile_payload`) and decoders (`decode_deep_tile_body`,
+  `assemble_deep_tiled_level`) are factored so the ONE_LEVEL and
+  multi-level arms share one path. New tests cover MIPMAP + RIPMAP
+  self-roundtrips at every deep compression, edge tiles on non-power-of-
+  two images, and the lossy / short-pyramid / sub-sampled reject paths.
+  This closes the last mixed-path layout gap — a mixed file can now mix
+  **every** flat and deep, single- and multi-level part type in any
+  order. Transforms follow `openexr-observer-spec.md` §0 chunk framing.
+
 - Round-370 **PXR24 / B44 / B44A for multi-level (MIPMAP / RIPMAP) flat
   tiled parts in the mixed path**: extends the previous entry from
   ONE_LEVEL to the full pyramid/grid. `compress_tiled_level_tile` now

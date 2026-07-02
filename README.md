@@ -26,7 +26,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write                  |
 | Deep scanline (`deepscanline`)      | parse + write — NONE / RLE / ZIPS; single- and multi-part |
 | Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part |
-| Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL) in any order. Multi-level flat tiled parts carry their full pyramid/grid; multi-level **deep** tiled parts still use the dedicated deep readers. Flat `scanlineimage` and `tiledimage` parts (ONE_LEVEL, MIPMAP, RIPMAP) now also carry `PXR24` / `B44` / `B44A` (alongside NONE / ZIP / ZIPS / RLE), reusing the shared block builders + decoders; only **deep** parts stay NONE / ZIP / ZIPS / RLE |
+| Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL / MIPMAP / RIPMAP) in any order. Multi-level flat **and deep** tiled parts now carry their full pyramid/grid inline (`MultipartMixedPart::DeepTiledMipmap` / `DeepTiledRipmap`, surfaced as `MultipartMixedImage::DeepTiledMipmap` / `DeepTiledRipmap`). Flat `scanlineimage` and `tiledimage` parts (ONE_LEVEL, MIPMAP, RIPMAP) also carry `PXR24` / `B44` / `B44A` (alongside NONE / ZIP / ZIPS / RLE), reusing the shared block builders + decoders; **deep** parts (scanline, ONE_LEVEL / MIPMAP / RIPMAP tiled) stay NONE / ZIPS / RLE |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact `< 2^24`)     |
 
@@ -44,12 +44,12 @@ Clean-room from the public OpenEXR file-format specification.
 * `ZIP_COMPRESSION` is rejected for deep data (the format validators
   reject deep ZIP files even though the spec page text lists ZIP as
   permitted).
-* Mixed multi-part files that include multi-level (MIPMAP / RIPMAP)
-  **deep** tiled parts alongside other types. (Multi-level **flat**
-  tiled parts in a mixed file are now covered — see the capability
-  matrix; deep multi-level files keep using
+* (Resolved r382.) Mixed multi-part files may now include multi-level
+  (MIPMAP / RIPMAP) **deep** tiled parts alongside every other part type
+  — see the capability matrix. The dedicated
   `parse_exr_multipart_deep_tiled_mipmap` /
-  `parse_exr_multipart_deep_tiled_ripmap`.)
+  `parse_exr_multipart_deep_tiled_ripmap` readers remain available for
+  homogeneous deep multi-level files.
 * Lossy `PXR24` / `B44` / `B44A` for **deep** parts (deep scanline and
   deep tiled) — deep parts stay NONE / ZIP / ZIPS / RLE. (All **flat**
   mixed parts — scanline + ONE_LEVEL / MIPMAP / RIPMAP tiled — now carry
