@@ -77,6 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-382 **Hostile-window coverage completed across every reader**:
+  the flat sweep suite gains the homogeneous multi-part multi-level
+  reader (`parse_exr_multipart_tiled_multilevel`, MIPMAP + RIPMAP
+  fixtures) and a mixed-path deep-RIPMAP fixture, so every public parse
+  entry point now sits under an exhaustive 8-byte `0xFF`/`0x00` window
+  sweep. Post-fix fuzz sessions: `parse_multipart_mixed` 465 k further
+  runs and `parse_deep_scanline` 1.18 M runs, both clean; grown corpora
+  committed.
+
 - Round-382 **`parse_multipart_mixed` fuzz target**: a second
   coverage-guided `cargo-fuzz` harness attacking the mixed multi-part
   reader — raw byte slices plus an overlay mode that splices fuzz bytes
