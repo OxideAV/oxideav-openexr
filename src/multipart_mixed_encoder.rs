@@ -1981,12 +1981,8 @@ fn deep_payload_bounds(
     file_len: usize,
     what: &str,
 ) -> Result<(usize, usize)> {
-    let table_end = table_start.checked_add(packed_table);
-    let data_end = table_end.and_then(|te| te.checked_add(packed_data));
-    match (table_end, data_end) {
-        (Some(te), Some(de)) if de <= file_len => Ok((te, de)),
-        _ => Err(ExrError::invalid(format!("{what}: payload runs past EOF"))),
-    }
+    crate::deep::deep_chunk_bounds(table_start, packed_table, packed_data, file_len)
+        .ok_or_else(|| ExrError::invalid(format!("{what}: payload runs past EOF")))
 }
 
 /// Per-tile decoded deep channel samples (tile extent + one `Vec<f32>`

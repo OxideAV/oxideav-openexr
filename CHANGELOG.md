@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Round-382 **Dedicated deep-reader hardening sweep**: the same
+  unchecked-arithmetic class fixed in the mixed reader existed across
+  the dedicated deep readers — seven chunk walks (`deep multipart
+  scanline`, single-part `deeptile`, deep MIPMAP / RIPMAP tiled, and
+  their multi-part variants) summed `table_start + packed_table +
+  packed_data` with unchecked `usize` addition over wire-supplied `u64`
+  size fields, and three tiled walks bound-checked `block_off + 40`
+  with an offset-table entry that can sit near `usize::MAX` — all
+  debug-build add-overflow panics on hostile input. Every site now
+  routes through one shared overflow-safe `deep_chunk_bounds` helper
+  (the mixed reader's helper now delegates to it too) or an
+  overflow-free header bound check. New `deep_hostile_sizes` suite
+  slides an 8-byte `0xFF` window across every byte position of files
+  from all eight deep writers and asserts the corresponding reader
+  never panics.
+
 - Round-382 **Mixed-reader hardening** (found by new adversarial tests):
   (1) the three deep chunk arms (`deepscanline`, ONE_LEVEL `deeptile`,
   multi-level `deeptile`) computed payload bounds with unchecked `usize`

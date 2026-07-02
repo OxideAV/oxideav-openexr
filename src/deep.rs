@@ -120,6 +120,23 @@ pub(crate) fn cumulative_inclusive(spp: &[u32]) -> Vec<i32> {
     out
 }
 
+/// Overflow-safe `(table_end, data_end)` for a deep chunk whose packed
+/// offset-table / sample-data byte counts came off the wire as `u64`
+/// fields. A hostile value near `u64::MAX` must yield `None` (the
+/// caller reports EOF), not a debug-build add-overflow panic. Returns
+/// `Some` only when both sums fit in `usize` and the payload ends
+/// within the file.
+pub(crate) fn deep_chunk_bounds(
+    table_start: usize,
+    packed_table: usize,
+    packed_data: usize,
+    file_len: usize,
+) -> Option<(usize, usize)> {
+    let table_end = table_start.checked_add(packed_table)?;
+    let data_end = table_end.checked_add(packed_data)?;
+    (data_end <= file_len).then_some((table_end, data_end))
+}
+
 /// Convert a list of column-indexed cumulative offsets back to per-pixel
 /// sample counts. Inverse of [`cumulative_inclusive`] for one row.
 pub(crate) fn per_pixel_from_cumulative(cumulative: &[i32]) -> Result<Vec<u32>> {
@@ -455,14 +472,15 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
             )));
         }
         let table_start = scan_pos + 32;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "multi-part deep chunk at {scan_pos}: payload runs past EOF"
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "multi-part deep chunk at {scan_pos}: payload runs past EOF"
-            )));
-        }
 
         let part_idx = part_num as usize;
         let ps = &mut state[part_idx];
@@ -739,16 +757,10 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
         let unpacked_data =
             u64::from_le_bytes(bytes[block_off + 20..block_off + 28].try_into().unwrap()) as usize;
         let table_start = block_off + 28;
-        let data_end = table_start
-            .checked_add(packed_table)
-            .and_then(|table_end| table_end.checked_add(packed_data))
-            .filter(|&end| end <= bytes.len());
-        let Some(data_end) = data_end else {
-            return Err(ExrError::invalid(format!(
-                "deep block {block_idx} payload past EOF"
-            )));
-        };
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || ExrError::invalid(format!("deep block {block_idx} payload past EOF")),
+            )?;
         let data_start = table_end;
 
         let row_in_image = (y_coord - data_window.y_min) as i64;
@@ -2239,7 +2251,10 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
 
     for (chunk_idx, &block_off) in offsets.iter().enumerate() {
         // Chunk header: 4 i32 + 3 u64 = 40 bytes.
-        if block_off + 40 > bytes.len() {
+        // `block_off` is an offset-table entry read off the wire; a
+        // hostile value near `usize::MAX` must not overflow the header
+        // bound check.
+        if bytes.len() < 40 || block_off > bytes.len() - 40 {
             return Err(ExrError::invalid(format!(
                 "deep tile chunk {chunk_idx} header past EOF"
             )));
@@ -2298,14 +2313,15 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
         }
 
         let table_start = block_off + 40;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "deep tile chunk {chunk_idx}: payload runs past EOF"
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "deep tile chunk {chunk_idx}: payload runs past EOF"
-            )));
-        }
 
         let table_bytes = decompress_buffer(
             &bytes[table_start..table_end],
@@ -3282,15 +3298,16 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
         }
 
         let table_start = scan_pos + 44;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "multi-part deep tiled part {part_idx} ('{}'): chunk payload runs past EOF",
+                        ps.name
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "multi-part deep tiled part {part_idx} ('{}'): chunk payload runs past EOF",
-                ps.name
-            )));
-        }
 
         let table_bytes = decompress_buffer(
             &bytes[table_start..table_end],
@@ -4151,7 +4168,10 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
         .sum();
 
     for (chunk_idx, &block_off) in offsets.iter().enumerate() {
-        if block_off + 40 > bytes.len() {
+        // `block_off` is an offset-table entry read off the wire; a
+        // hostile value near `usize::MAX` must not overflow the header
+        // bound check.
+        if bytes.len() < 40 || block_off > bytes.len() - 40 {
             return Err(ExrError::invalid(format!(
                 "deep mipmap tile chunk {chunk_idx} header past EOF"
             )));
@@ -4211,14 +4231,15 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
         }
 
         let table_start = block_off + 40;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "deep mipmap tile chunk {chunk_idx}: payload runs past EOF"
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "deep mipmap tile chunk {chunk_idx}: payload runs past EOF"
-            )));
-        }
 
         let table_bytes = decompress_buffer(
             &bytes[table_start..table_end],
@@ -5126,7 +5147,10 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
         .sum();
 
     for (chunk_idx, &block_off) in offsets.iter().enumerate() {
-        if block_off + 40 > bytes.len() {
+        // `block_off` is an offset-table entry read off the wire; a
+        // hostile value near `usize::MAX` must not overflow the header
+        // bound check.
+        if bytes.len() < 40 || block_off > bytes.len() - 40 {
             return Err(ExrError::invalid(format!(
                 "deep ripmap tile chunk {chunk_idx} header past EOF"
             )));
@@ -5185,14 +5209,15 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
         }
 
         let table_start = block_off + 40;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "deep ripmap tile chunk {chunk_idx}: payload runs past EOF"
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "deep ripmap tile chunk {chunk_idx}: payload runs past EOF"
-            )));
-        }
 
         let table_bytes = decompress_buffer(
             &bytes[table_start..table_end],
@@ -6262,15 +6287,17 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
         }
 
         let table_start = scan_pos + 44;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "multi-part deep tiled MIPMAP part {part_idx} ('{}'): chunk payload \
+                         runs past EOF",
+                        ps.name
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "multi-part deep tiled MIPMAP part {part_idx} ('{}'): chunk payload runs past EOF",
-                ps.name
-            )));
-        }
 
         let table_bytes = decompress_buffer(
             &bytes[table_start..table_end],
@@ -7370,15 +7397,17 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
         }
 
         let table_start = scan_pos + 44;
-        let table_end = table_start + packed_table;
+        let (table_end, data_end) =
+            deep_chunk_bounds(table_start, packed_table, packed_data, bytes.len()).ok_or_else(
+                || {
+                    ExrError::invalid(format!(
+                        "multi-part deep tiled RIPMAP part {part_idx} ('{}'): chunk payload \
+                         runs past EOF",
+                        ps.name
+                    ))
+                },
+            )?;
         let data_start = table_end;
-        let data_end = data_start + packed_data;
-        if data_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "multi-part deep tiled RIPMAP part {part_idx} ('{}'): chunk payload runs past EOF",
-                ps.name
-            )));
-        }
 
         let table_bytes = decompress_buffer(
             &bytes[table_start..table_end],
