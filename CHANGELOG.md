@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-382 **`parse_multipart_mixed` fuzz target**: a second
+  coverage-guided `cargo-fuzz` harness attacking the mixed multi-part
+  reader — raw byte slices plus an overlay mode that splices fuzz bytes
+  over the offset-table + chunk region of a writer-produced two-part
+  file (flat scanline + multi-level deep MIPMAP tiled), so the fuzzer
+  reaches the per-part chunk-shape dispatch, level/tile coordinate
+  indexing and u64 deep chunk-size arithmetic without rediscovering a
+  valid multi-part header chain. Initial session: 270 k runs clean;
+  seed corpus committed.
+
 - Round-382 **Kitchen-sink mixed coverage + black-box acceptance**: a
   round-trip test interleaving all eight supported mixed-part kinds in
   one file (flat scanline, flat ONE_LEVEL / MIPMAP / RIPMAP tiled, deep

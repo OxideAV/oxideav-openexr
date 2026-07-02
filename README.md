@@ -84,11 +84,19 @@ let img = parse_exr(&bytes).unwrap();
 
 ## Fuzzing
 
-A coverage-guided `cargo-fuzz` target lives under `fuzz/`:
+Two coverage-guided `cargo-fuzz` targets live under `fuzz/`:
 
 ```sh
 cargo +nightly fuzz run parse_deep_scanline
+cargo +nightly fuzz run parse_multipart_mixed
 ```
+
+`parse_deep_scanline` attacks the deep scanline chunk walk.
+`parse_multipart_mixed` attacks the mixed multi-part reader — the
+per-part chunk-shape dispatch (flat scanline / flat + deep tiled at
+every level mode), the concatenated offset tables, the i32 tile/level
+coordinates, and the u64 deep chunk sizes — both raw and by splicing
+fuzz bytes over the chunk region of a writer-produced two-part file.
 
 The decode contract is that every byte slice returns `Ok` or `Err`,
 never panicking, integer-overflowing (debug build), indexing out of
@@ -96,7 +104,8 @@ bounds, or allocating an attacker-claimed length the input can't back.
 Offset-table entries (absolute `u64` byte positions read off the wire)
 are bounds-checked with overflow-safe arithmetic so a near-`usize::MAX`
 entry yields an error rather than wrapping past its EOF guard — see
-`tests/offset_table_overflow_hardening.rs`.
+`tests/offset_table_overflow_hardening.rs` and
+`tests/multipart_mixed_hardening.rs`.
 
 ## License
 

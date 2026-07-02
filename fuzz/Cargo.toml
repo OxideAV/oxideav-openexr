@@ -43,3 +43,16 @@ name = "parse_deep_scanline"
 path = "fuzz_targets/parse_deep_scanline.rs"
 test = false
 doc = false
+
+# `parse_multipart_mixed` drives `parse_exr_multipart_mixed` — the mixed
+# multi-part decode entry point (flat scanline / flat tiled ONE_LEVEL +
+# MIPMAP + RIPMAP / deep scanline / deep tiled ONE_LEVEL + MIPMAP +
+# RIPMAP). Its chunk walk dispatches the body shape on each part's
+# declared type and reads i32 coordinates + u64 sizes off the wire, so
+# the offset tables, per-part chunk headers and level/tile coordinate
+# indexing are all attacker-controlled surface.
+[[bin]]
+name = "parse_multipart_mixed"
+path = "fuzz_targets/parse_multipart_mixed.rs"
+test = false
+doc = false
