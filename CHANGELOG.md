@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-385 **sub-sampled (luminance/chroma) layouts through the lossy
+  compressors — validated**: new `tests/subsampled_lossy_validation.rs`
+  (13 tests) pins PXR24 / B44 / B44A on channel lists carrying
+  `xSampling` / `ySampling != 1` (the classic `Y` at 1×1 + `BY` / `RY`
+  at 2×2 layout, and FLOAT 4:2:0). PXR24 self-roundtrips are asserted
+  bit-exact against an independent in-test implementation of the
+  observer-spec §1.1 24-bit reduction (single-chunk, partial trailing
+  chunk, and odd ceil-sized chroma planes); B44 / B44A decodes are
+  asserted to be fixed points across chunk splits (the 32-line chunk
+  boundary lands mid-chroma-plane) and B44A's 3-byte flat blocks are
+  shown to shrink flat chroma below plain B44. Reference cross-checks:
+  `exrmetrics` transcodes our sub-sampled PXR24 / B44 (pLinear) / B44A
+  bytes to NONE and the reference decode bit-matches ours; `exrheader`
+  reports the 2×2 sampling factors. One reference constraint is pinned:
+  the reference reader refuses to open sub-sampled files whose
+  data-window extent is not a multiple of the sampling factor (our
+  reader stays a permissive ceil-sized superset).
+
 ### Fixed
 
 - Round-385 **release workflow unstuck — anchor the lockfile ignore to
