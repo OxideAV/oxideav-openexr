@@ -1,5 +1,7 @@
 # oxideav-openexr
 
+[![CI](https://github.com/OxideAV/oxideav-openexr/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-openexr/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-openexr.svg)](https://crates.io/crates/oxideav-openexr) [![docs.rs](https://docs.rs/oxideav-openexr/badge.svg)](https://docs.rs/oxideav-openexr) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust OpenEXR (HDR scanline + tiled image) reader/writer for [`oxideav`].
 
 Clean-room from the public OpenEXR file-format specification.
