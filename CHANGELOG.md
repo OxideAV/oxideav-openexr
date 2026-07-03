@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Bit-exactness pinned by the existing 460+ tests, which
   all pass unchanged.
 
+- Round-385 **the tile scatter gets the same hoisted-dispatch shape**
+  (`scatter_tile_into_planes`, the decode path for every flat tiled
+  tile at every level mode, and the tiled raw fallback): per-tile-row
+  single bounds check + type-dispatched exact-size chunk loops, with
+  precise truncation errors. A new `decode_tiled_{half,float}` bench
+  group (64×64 tiles) pins the result: tiled HALF NONE decode
+  2.51 GiB/s / FLOAT NONE 15.5 GiB/s — on par with the optimised
+  scanline path.
+
 ### Added
 
 - Round-385 **Criterion benchmark harness** (`benches/codec_benchmarks.rs`,

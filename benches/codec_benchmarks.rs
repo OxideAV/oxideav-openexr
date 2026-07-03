@@ -191,5 +191,32 @@ fn bench_half_primitives(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_decode, bench_encode, bench_half_primitives);
+fn bench_decode_tiled(c: &mut Criterion) {
+    // Tiled ONE_LEVEL decode (64×64 tiles): exercises the tile scatter
+    // path, which is distinct from the scanline block scatter.
+    let planes = make_planes(W, H);
+    for (pt_name, pt) in [("half", PixelType::Half), ("float", PixelType::Float)] {
+        let mut group = c.benchmark_group(format!("decode_tiled_{pt_name}"));
+        let raw_bytes = (W * H) as u64 * 4 * pt.bytes_per_sample() as u64;
+        group.throughput(Throughput::Bytes(raw_bytes));
+        for (name, scheme) in schemes() {
+            let chs = channels(pt);
+            let refs: Vec<&[f32]> = planes.iter().map(|v| v.as_slice()).collect();
+            let bytes =
+                oxideav_openexr::encode_exr_tiled(W, H, &chs, &refs, scheme, 64, 64).unwrap();
+            group.bench_function(name, |b| {
+                b.iter(|| parse_exr(black_box(&bytes)).unwrap());
+            });
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(
+    benches,
+    bench_decode,
+    bench_decode_tiled,
+    bench_encode,
+    bench_half_primitives
+);
 criterion_main!(benches);

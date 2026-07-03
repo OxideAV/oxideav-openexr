@@ -886,25 +886,45 @@ pub(crate) fn scatter_tile_into_planes(
     for line in 0..th {
         let dst_y = y0 as usize + line;
         for (ch_idx, ch) in sorted_channels.iter().enumerate() {
-            let plane = &mut planes[ch_idx].samples;
-            for x in 0..tw {
-                let dst_x = x0 as usize + x;
-                let v = match ch.pixel_type {
-                    PixelType::Half => {
-                        let bits = u16::from_le_bytes(uncompressed[p..p + 2].try_into().unwrap());
-                        crate::half::half_to_f32(bits)
+            // Same hoisted-dispatch shape as the scanline scatter
+            // (round-385): one bounds check per tile row per channel,
+            // then a type-dispatched tight loop over exact-size chunks.
+            let bps = ch.pixel_type.bytes_per_sample();
+            let span = tw * bps;
+            let src = uncompressed.get(p..p + span).ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "tile {tile_idx} truncated: channel '{}' row {line} needs {span} bytes",
+                    ch.name
+                ))
+            })?;
+            let row0 = dst_y * width as usize + x0 as usize;
+            let dst = planes[ch_idx]
+                .samples
+                .get_mut(row0..row0 + tw)
+                .ok_or_else(|| {
+                    ExrError::invalid(format!(
+                        "tile {tile_idx} row out of range: channel '{}' row {line}",
+                        ch.name
+                    ))
+                })?;
+            match ch.pixel_type {
+                PixelType::Half => {
+                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
+                        *d = crate::half::half_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     }
-                    PixelType::Float => {
-                        f32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap())
+                }
+                PixelType::Float => {
+                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                        *d = f32::from_le_bytes(c.try_into().unwrap());
                     }
-                    PixelType::Uint => {
-                        let bits = u32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap());
-                        bits as f32
+                }
+                PixelType::Uint => {
+                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                        *d = u32::from_le_bytes(c.try_into().unwrap()) as f32;
                     }
-                };
-                plane[dst_y * width as usize + dst_x] = v;
-                p += ch.pixel_type.bytes_per_sample();
+                }
             }
+            p += span;
         }
     }
     if p != uncompressed.len() {
