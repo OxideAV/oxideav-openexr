@@ -82,6 +82,14 @@ let bytes = encode_exr_scanline_rgba_float(width, height, &rgba_f32).unwrap();
 let img = parse_exr(&bytes).unwrap();
 ```
 
+## Benchmarks
+
+A Criterion harness (`benches/codec_benchmarks.rs`) measures decode /
+encode throughput across every compression scheme for HALF and FLOAT,
+scanline and tiled — see [`BENCHMARKS.md`](BENCHMARKS.md) for the
+current numbers (scanline HALF NONE decode 2.6 GiB/s, FLOAT NONE
+19.7 GiB/s, PXR24 1.1–2.4 GiB/s on Apple Silicon).
+
 ## Fuzzing
 
 Two coverage-guided `cargo-fuzz` targets live under `fuzz/`:
