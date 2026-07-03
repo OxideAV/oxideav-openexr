@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.4...v0.0.5) - 2026-07-03
+
+### Fixed
+
+- anchor .gitignore Cargo.lock to crate root so tracked fuzz/Cargo.lock is not ignored (unsticks release-plz)
+
+### Other
+
+- post-optimisation sessions (mixed 638k + deep 2.0M runs clean); grown corpora
+- BENCHMARKS.md with measured throughput tables + round-385 optimisation deltas
+- specialise PXR24 byte-plane loops per pixel type (+40-48% decode)
+- hoist pixel-type dispatch out of tile scatter; bench group for tiled decode
+- hoist pixel-type dispatch out of scanline scatter/gather inner loops (+90% HALF, +244% FLOAT NONE decode)
+- Criterion harness for scanline decode/encode across all compressions + half primitives
+- typed envmap / preview / floatvector / deepImageState, exrheader-validated layouts
+- sub-sampled luminance/chroma layouts through PXR24/B44/B44A, reference-validated
+
 ### Changed
 
 - Round-385 **hot-loop optimisation, bench-driven**: the interleaved
