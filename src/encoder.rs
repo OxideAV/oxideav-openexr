@@ -481,19 +481,27 @@ pub fn encode_exr_scanline(
                 let xs = ch.x_sampling as u32;
                 let pw = subsampled_dim(width, xs) as usize;
                 let plane_y = y / ys as usize;
-                let plane = planes[ch_idx];
-                for x in 0..pw {
-                    let v = plane[plane_y * pw + x];
-                    match ch.pixel_type {
-                        PixelType::Half => {
-                            raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes())
+                // Hoist the pixel-type dispatch out of the per-sample
+                // loop and walk the source row as one slice (round-385
+                // bench: the per-sample match dominated HALF encode).
+                let row = &planes[ch_idx][plane_y * pw..plane_y * pw + pw];
+                match ch.pixel_type {
+                    PixelType::Half => {
+                        for &v in row {
+                            raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes());
                         }
-                        PixelType::Float => raw.extend_from_slice(&v.to_le_bytes()),
-                        PixelType::Uint => {
-                            // Round to nearest, clamp to u32 range, then
-                            // emit as little-endian u32. NaN and negatives
-                            // both map to 0 (collapse the two clauses to
-                            // satisfy clippy::if_same_then_else).
+                    }
+                    PixelType::Float => {
+                        for &v in row {
+                            raw.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                    PixelType::Uint => {
+                        // Round to nearest, clamp to u32 range, then
+                        // emit as little-endian u32. NaN and negatives
+                        // both map to 0 (collapse the two clauses to
+                        // satisfy clippy::if_same_then_else).
+                        for &v in row {
                             let u = if v.is_nan() || v < 0.0 {
                                 0u32
                             } else if v >= (u32::MAX as f32) {

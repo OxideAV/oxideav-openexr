@@ -410,30 +410,54 @@ fn scatter_block_into_planes(
             let xs = ch.x_sampling as u32;
             let pw = subsampled_dim(width, xs) as usize;
             let dst_y_sub = dst_y / ys as usize;
-            let plane = &mut planes[ch_idx].samples;
-            for x in 0..pw {
-                let v = match ch.pixel_type {
-                    PixelType::Half => {
-                        let bits = u16::from_le_bytes(uncompressed[p..p + 2].try_into().unwrap());
-                        crate::half::half_to_f32(bits)
+            // One bounds check per channel/row span (instead of one per
+            // sample), then a type-dispatched tight loop over exact-size
+            // chunks. This is the hot path for every NONE / ZIP / ZIPS /
+            // RLE block: the round-385 bench showed HALF decode ~4x
+            // slower per byte than FLOAT before hoisting the per-sample
+            // dispatch out of the inner loop.
+            let bps = ch.pixel_type.bytes_per_sample();
+            let span = pw * bps;
+            let src = uncompressed.get(p..p + span).ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "block truncated: channel '{}' row {dst_y} needs {span} bytes",
+                    ch.name
+                ))
+            })?;
+            let row0 = dst_y_sub * pw;
+            let dst = planes[ch_idx]
+                .samples
+                .get_mut(row0..row0 + pw)
+                .ok_or_else(|| {
+                    ExrError::invalid(format!(
+                        "block row out of range: channel '{}' row {dst_y}",
+                        ch.name
+                    ))
+                })?;
+            match ch.pixel_type {
+                PixelType::Half => {
+                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
+                        *d = crate::half::half_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     }
-                    PixelType::Float => {
-                        f32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap())
+                }
+                PixelType::Float => {
+                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                        *d = f32::from_le_bytes(c.try_into().unwrap());
                     }
-                    PixelType::Uint => {
-                        // UINT decodes as a u32 → f32 view. Bit-exact
-                        // recovery up to 2^24; beyond that the f32
-                        // mantissa starts rounding. UINT producers are
-                        // typically integer ID/depth maps that fit in
-                        // 24 bits, so this matches the reference
-                        // encoder's "as float" behaviour.
-                        let bits = u32::from_le_bytes(uncompressed[p..p + 4].try_into().unwrap());
-                        bits as f32
+                }
+                PixelType::Uint => {
+                    // UINT decodes as a u32 → f32 view. Bit-exact
+                    // recovery up to 2^24; beyond that the f32
+                    // mantissa starts rounding. UINT producers are
+                    // typically integer ID/depth maps that fit in
+                    // 24 bits, so this matches the reference
+                    // encoder's "as float" behaviour.
+                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                        *d = u32::from_le_bytes(c.try_into().unwrap()) as f32;
                     }
-                };
-                plane[dst_y_sub * pw + x] = v;
-                p += ch.pixel_type.bytes_per_sample();
+                }
             }
+            p += span;
         }
     }
     if p != uncompressed.len() {

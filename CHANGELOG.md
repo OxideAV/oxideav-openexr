@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-385 **hot-loop optimisation, bench-driven**: the interleaved
+  scanline scatter (`scatter_block_into_planes`, the decode path for
+  every NONE / ZIP / ZIPS / RLE block and for the PXR24/B44 raw
+  fallback) re-dispatched on the channel's pixel type and re-checked
+  bounds for **every sample**. The pixel-type match is now hoisted out
+  of the inner loop and each channel/row is processed as one
+  bounds-checked span walked with exact-size chunks; the encoder's
+  symmetric gather loop gets the same hoist. Truncated payloads that
+  previously depended on caller-side size validation now yield a
+  precise error from the scatter itself. Measured on the new bench
+  (256×256×4ch): decode HALF NONE 1.40 → 2.68 GiB/s (+90%), decode
+  FLOAT NONE 5.5 → 19.4 GiB/s (+244%), decode ZIP +25%, RLE +23%,
+  PXR24 +24%, ZIPS +12%; encode NONE +6%. B44/B44A paths (own scatter)
+  unchanged. Bit-exactness pinned by the existing 460+ tests, which
+  all pass unchanged.
+
 ### Added
 
 - Round-385 **Criterion benchmark harness** (`benches/codec_benchmarks.rs`,
