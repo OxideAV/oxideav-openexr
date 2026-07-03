@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-385 **post-optimisation fuzz validation**: fresh
+  coverage-guided sessions over both targets after the scatter /
+  PXR24 hot-loop rewrites — `parse_multipart_mixed` 638 k runs and
+  `parse_deep_scanline` 2.02 M runs, both crash-free; grown corpora
+  committed. The rewritten paths' truncation handling now surfaces
+  precise errors from the scatter itself rather than relying solely on
+  caller-side size validation.
+
 - Round-385 **Criterion benchmark harness** (`benches/codec_benchmarks.rs`,
   new `criterion` dev-dependency): measures `parse_exr` decode and
   `encode_exr_scanline` encode throughput on a 256×256 four-channel
