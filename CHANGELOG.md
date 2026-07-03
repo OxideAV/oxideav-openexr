@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round-385 **release workflow unstuck — anchor the lockfile ignore to
+  the crate root**: the `.gitignore` line `Cargo.lock` was unanchored,
+  so it also matched the *committed* `fuzz/Cargo.lock` (the fuzz harness
+  is a binary crate, whose lockfile is tracked on purpose). A file that
+  is both tracked and ignored makes release-plz abort with "the working
+  directory of this project has uncommitted changes", which kept the
+  Release-plz workflow red on every push. The pattern is now
+  `/Cargo.lock` (crate-root only), which keeps the library lockfile
+  untracked while letting the fuzz lockfile stay tracked cleanly.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.3...v0.0.4) - 2026-07-03
 
 ### Changed
