@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Bit-exactness pinned by the existing 460+ tests, which
   all pass unchanged.
 
+- Round-385 **PXR24 byte-plane loops specialised per pixel type**: the
+  PXR24 decode prefix-sum walked `nbytes` byte planes with a per-sample
+  inner loop and per-sample type dispatch, and the encode builder wrote
+  each delta byte through recomputed `b·pw + x` indices. Both now split
+  the channel/row span into per-plane sub-slices once and run a
+  type-specialised zip loop (FLOAT 3-plane, HALF 2-plane, UINT
+  4-plane), with the decode output span bounds-checked once per
+  channel/row (precise error instead of relying on caller-side size
+  validation). Measured: PXR24 decode +40% HALF / +47% FLOAT (scanline
+  and tiled alike — now 1.09 / 2.35 GiB/s), PXR24 encode +6% / +9%.
+  Bit-exactness pinned by the PXR24 validation suites (spec-reduction
+  oracle + reference transcode), all passing unchanged.
+
 - Round-385 **the tile scatter gets the same hoisted-dispatch shape**
   (`scatter_tile_into_planes`, the decode path for every flat tiled
   tile at every level mode, and the tiled raw fallback): per-tile-row

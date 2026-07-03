@@ -346,30 +346,60 @@ pub(crate) fn decode_pxr24_payload(
             let nbytes = pxr24_channel_bytes(ch.pixel_type);
             // Read this channel/row's planes (most-significant first),
             // prefix-summing each sample's reassembled delta into a
-            // running 32-bit code.
+            // running 32-bit code. The pixel-type dispatch is hoisted
+            // out of the per-sample loop and each byte plane is walked
+            // as its own slice (round-385 perf pass).
             let planes = &reorg[rp..rp + nbytes * pw];
             rp += nbytes * pw;
+            let native_span = ch.pixel_type.bytes_per_sample() * pw;
+            let dst = out.get_mut(wp..wp + native_span).ok_or_else(|| {
+                ExrError::invalid(format!(
+                    "PXR24 output overrun: channel '{}' row {dst_y} needs {native_span} bytes",
+                    ch.name
+                ))
+            })?;
+            wp += native_span;
             let mut acc: u32 = 0;
-            for x in 0..pw {
-                let mut diff: u32 = 0;
-                for b in 0..nbytes {
-                    diff = (diff << 8) | u32::from(planes[b * pw + x]);
+            match ch.pixel_type {
+                PixelType::Float => {
+                    let (p0, rest) = planes.split_at(pw);
+                    let (p1, p2) = rest.split_at(pw);
+                    for (((d, &b0), &b1), &b2) in dst
+                        .chunks_exact_mut(4)
+                        .zip(p0.iter())
+                        .zip(p1.iter())
+                        .zip(p2.iter())
+                    {
+                        let diff = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+                        acc = acc.wrapping_add(diff);
+                        d.copy_from_slice(&pxr24_code_to_f32_bits(acc).to_le_bytes());
+                    }
                 }
-                acc = acc.wrapping_add(diff);
-                match ch.pixel_type {
-                    PixelType::Float => {
-                        let bits = pxr24_code_to_f32_bits(acc);
-                        out[wp..wp + 4].copy_from_slice(&bits.to_le_bytes());
-                        wp += 4;
+                PixelType::Half => {
+                    let (p0, p1) = planes.split_at(pw);
+                    for ((d, &b0), &b1) in dst.chunks_exact_mut(2).zip(p0.iter()).zip(p1.iter()) {
+                        let diff = (u32::from(b0) << 8) | u32::from(b1);
+                        acc = acc.wrapping_add(diff);
+                        d.copy_from_slice(&((acc & 0xffff) as u16).to_le_bytes());
                     }
-                    PixelType::Half => {
-                        let bits = (acc & 0xffff) as u16;
-                        out[wp..wp + 2].copy_from_slice(&bits.to_le_bytes());
-                        wp += 2;
-                    }
-                    PixelType::Uint => {
-                        out[wp..wp + 4].copy_from_slice(&acc.to_le_bytes());
-                        wp += 4;
+                }
+                PixelType::Uint => {
+                    let (p0, rest) = planes.split_at(pw);
+                    let (p1, rest) = rest.split_at(pw);
+                    let (p2, p3) = rest.split_at(pw);
+                    for ((((d, &b0), &b1), &b2), &b3) in dst
+                        .chunks_exact_mut(4)
+                        .zip(p0.iter())
+                        .zip(p1.iter())
+                        .zip(p2.iter())
+                        .zip(p3.iter())
+                    {
+                        let diff = (u32::from(b0) << 24)
+                            | (u32::from(b1) << 16)
+                            | (u32::from(b2) << 8)
+                            | u32::from(b3);
+                        acc = acc.wrapping_add(diff);
+                        d.copy_from_slice(&acc.to_le_bytes());
                     }
                 }
             }

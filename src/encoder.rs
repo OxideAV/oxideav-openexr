@@ -203,40 +203,62 @@ pub(crate) fn build_pxr24_block_payload(
             let pw = subsampled_dim(width, xs) as usize;
             let nbytes = pxr24_channel_bytes(ch.pixel_type);
             let plane_y = (dst_y / ys) as usize;
-            let plane = planes[ch_idx];
+            let row = &planes[ch_idx][plane_y * pw..plane_y * pw + pw];
 
             // Emit one byte-plane per reduced byte, most-significant
             // first, plane-major. `prev` is the previous sample's code on
             // this channel/row (resets to 0 at the row start), and the
             // delta is taken modulo 2^32 (wrapping), matching the
-            // decoder's running prefix-sum.
+            // decoder's running prefix-sum. The pixel-type dispatch is
+            // hoisted out of the per-sample loop and each byte plane is
+            // written through its own sub-slice (round-385 perf pass).
+            let span = &mut reorg[wp..wp + nbytes * pw];
+            wp += nbytes * pw;
             let mut prev: u32 = 0;
-            for x in 0..pw {
-                let v = plane[plane_y * pw + x];
-                let code = match ch.pixel_type {
-                    PixelType::Float => pxr24_f32_to_code24(v.to_bits()),
-                    PixelType::Half => u32::from(crate::half::f32_to_half(v)),
-                    PixelType::Uint => {
-                        if v.is_nan() || v < 0.0 {
+            match ch.pixel_type {
+                PixelType::Float => {
+                    let (o0, rest) = span.split_at_mut(pw);
+                    let (o1, o2) = rest.split_at_mut(pw);
+                    for (((&v, b0), b1), b2) in row.iter().zip(o0).zip(o1).zip(o2) {
+                        let code = pxr24_f32_to_code24(v.to_bits());
+                        let diff = code.wrapping_sub(prev);
+                        prev = code;
+                        *b0 = (diff >> 16) as u8;
+                        *b1 = (diff >> 8) as u8;
+                        *b2 = diff as u8;
+                    }
+                }
+                PixelType::Half => {
+                    let (o0, o1) = span.split_at_mut(pw);
+                    for ((&v, b0), b1) in row.iter().zip(o0).zip(o1) {
+                        let code = u32::from(crate::half::f32_to_half(v));
+                        let diff = code.wrapping_sub(prev);
+                        prev = code;
+                        *b0 = (diff >> 8) as u8;
+                        *b1 = diff as u8;
+                    }
+                }
+                PixelType::Uint => {
+                    let (o0, rest) = span.split_at_mut(pw);
+                    let (o1, rest) = rest.split_at_mut(pw);
+                    let (o2, o3) = rest.split_at_mut(pw);
+                    for ((((&v, b0), b1), b2), b3) in row.iter().zip(o0).zip(o1).zip(o2).zip(o3) {
+                        let code = if v.is_nan() || v < 0.0 {
                             0u32
                         } else if v >= (u32::MAX as f32) {
                             u32::MAX
                         } else {
                             (v + 0.5) as u32
-                        }
+                        };
+                        let diff = code.wrapping_sub(prev);
+                        prev = code;
+                        *b0 = (diff >> 24) as u8;
+                        *b1 = (diff >> 16) as u8;
+                        *b2 = (diff >> 8) as u8;
+                        *b3 = diff as u8;
                     }
-                };
-                let diff = code.wrapping_sub(prev);
-                prev = code;
-                // Most-significant reduced byte first. For FLOAT the code
-                // is 24-bit so bytes are diff>>16, diff>>8, diff; HALF is
-                // diff>>8, diff; UINT is diff>>24..diff.
-                for b in 0..nbytes {
-                    let shift = 8 * (nbytes - 1 - b);
-                    reorg[wp + b * pw + x] = (diff >> shift) as u8;
                 }
             }
-            wp += nbytes * pw;
         }
     }
     debug_assert_eq!(wp, reorg_size);
