@@ -26,6 +26,13 @@ oxideav-core = { version = "0.1", optional = true }
 # `oxideav-pdf` flate2 setup so workspace builds don't pull native zlib.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "codec_benchmarks"
+harness = false
+
 [features]
 default = ["registry"]
 

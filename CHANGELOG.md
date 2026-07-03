@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-385 **Criterion benchmark harness** (`benches/codec_benchmarks.rs`,
+  new `criterion` dev-dependency): measures `parse_exr` decode and
+  `encode_exr_scanline` encode throughput on a 256×256 four-channel
+  (A,B,G,R) image across every supported compression scheme
+  (NONE / RLE / ZIPS / ZIP / PXR24 / B44 / B44A) for HALF and FLOAT
+  pixel types, plus the binary16 conversion primitives on the HALF hot
+  path. Baseline (Apple Silicon, this machine): decode_half NONE
+  1.40 GiB/s, ZIP 540 MiB/s, PXR24 651 MiB/s, B44 1.06 GiB/s;
+  decode_float NONE 5.5 GiB/s; encode_half NONE ~970 MiB/s, ZIP
+  235 MiB/s, B44 ~430 MiB/s; `half_to_f32` / `f32_to_half`
+  ~1 Gelem/s. The ~4× per-byte gap between HALF and FLOAT NONE decode
+  flagged the per-sample scatter loop as the next optimisation target.
+
 - Round-385 **typed `envmap` / `preview` / `floatvector` /
   `deepImageState` attributes** — the last simple standard attribute
   types leave the `Other` passthrough. New `AttributeValue` variants:
