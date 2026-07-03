@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-385 **typed `envmap` / `preview` / `floatvector` /
+  `deepImageState` attributes** — the last simple standard attribute
+  types leave the `Other` passthrough. New `AttributeValue` variants:
+  `EnvMap(EnvMap)` (single-byte projection selector — `0` renders as
+  "latitude-longitude map", `1` as "cube-face map" in the `exrheader`
+  validator; other bytes round-trip via `EnvMap::Unknown`),
+  `Preview(Preview)` (two little-endian `u32` dimensions + `4·w·h`
+  pixel bytes; the validator renders "W by H pixels" and refuses
+  size/dimension mismatches, pinning the layout), `FloatVector(Vec<f32>)`
+  (little-endian `f32` sequence, count implied by the outer size — the
+  validator refuses non-multiple-of-4 payloads), and
+  `DeepImageState(u8)` (single byte, stored verbatim — the validator
+  refuses wider payloads). All layouts were derived and size-validated
+  empirically against the opaque `exrheader` process (round-273
+  methodology). The `preview` expected-size check runs 128-bit wide so
+  hostile `u32::MAX × u32::MAX` dimensions error instead of overflowing
+  (caught by the new hostile-dimensions test). New
+  `tests/envmap_preview_attribute_roundtrip.rs` (7 tests): algebraic +
+  full-file round-trips, on-disk layout pins, malformed-size rejection,
+  and `exrheader` interop rendering checks.
+
 - Round-385 **sub-sampled (luminance/chroma) layouts through the lossy
   compressors — validated**: new `tests/subsampled_lossy_validation.rs`
   (13 tests) pins PXR24 / B44 / B44A on channel lists carrying

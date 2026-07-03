@@ -9,7 +9,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Capability                          | Status                                           |
 | ----------------------------------- | ------------------------------------------------ |
 | Magic + version field               | parse + write (format-version 2)                 |
-| Attribute table                     | parse + write; eight required attributes typed, plus typed inspectors for `int` / `double` / `string` / `v2i` / `v2d` / `v3i` / `v3f` / `v3d` / `m33f` / `m44f` / `m33d` / `m44d` / `chromaticities` / `box2f` / `tiledesc` / `rational` / `timecode` (BCD time accessors) / `keycode` / `stringvector` |
+| Attribute table                     | parse + write; eight required attributes typed, plus typed inspectors for `int` / `double` / `string` / `v2i` / `v2d` / `v3i` / `v3f` / `v3d` / `m33f` / `m44f` / `m33d` / `m44d` / `chromaticities` / `box2f` / `tiledesc` / `rational` / `timecode` (BCD time accessors) / `keycode` / `stringvector` / `envmap` / `preview` / `floatvector` / `deepImageState` |
 | Channel list (`chlist`)             | parse + write — `HALF`, `FLOAT`, `UINT`          |
 | Compression: `NONE`                 | parse + write                                    |
 | Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib)                             |

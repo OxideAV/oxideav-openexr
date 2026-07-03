@@ -17,8 +17,8 @@
 use crate::error::{ExrError, Result};
 use crate::tiled::TileDesc;
 use crate::types::{
-    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, Keycode,
-    LineOrder, PixelType, Timecode, EXR_MAGIC,
+    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EnvMap, Keycode,
+    LineOrder, PixelType, Preview, Timecode, EXR_MAGIC,
 };
 
 /// Decoded version field flags.
@@ -615,6 +615,63 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
             }
             Ok(AttributeValue::StringVector(strings))
         }
+        "envmap" => {
+            if data.len() != 1 {
+                return Err(ExrError::invalid(format!(
+                    "envmap payload size {} != 1",
+                    data.len()
+                )));
+            }
+            Ok(AttributeValue::EnvMap(EnvMap::from_byte(data[0])))
+        }
+        "preview" => {
+            if data.len() < 8 {
+                return Err(ExrError::invalid(format!(
+                    "preview payload size {} < 8",
+                    data.len()
+                )));
+            }
+            let width = u32::from_le_bytes(data[0..4].try_into().unwrap());
+            let height = u32::from_le_bytes(data[4..8].try_into().unwrap());
+            // Expected pixel bytes = 4·w·h, computed 128-bit wide so
+            // hostile dimensions can't overflow (4·(2^32-1)^2 exceeds
+            // u64); the payload length (already bounded by the header
+            // parser) must match exactly.
+            let expected = 8u128 + 4u128 * u128::from(width) * u128::from(height);
+            if data.len() as u128 != expected {
+                return Err(ExrError::invalid(format!(
+                    "preview payload size {} != {expected} for {width}x{height}",
+                    data.len()
+                )));
+            }
+            Ok(AttributeValue::Preview(Preview {
+                width,
+                height,
+                rgba: data[8..].to_vec(),
+            }))
+        }
+        "floatvector" => {
+            if data.len() % 4 != 0 {
+                return Err(ExrError::invalid(format!(
+                    "floatvector payload size {} is not a multiple of 4",
+                    data.len()
+                )));
+            }
+            let values = data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            Ok(AttributeValue::FloatVector(values))
+        }
+        "deepImageState" => {
+            if data.len() != 1 {
+                return Err(ExrError::invalid(format!(
+                    "deepImageState payload size {} != 1",
+                    data.len()
+                )));
+            }
+            Ok(AttributeValue::DeepImageState(data[0]))
+        }
         _ => Ok(AttributeValue::Other {
             type_name: type_name.to_string(),
             data: data.to_vec(),
@@ -837,6 +894,22 @@ pub fn encode_attribute_value(value: &AttributeValue) -> (String, Vec<u8>) {
             }
             ("stringvector".to_string(), v)
         }
+        AttributeValue::EnvMap(e) => ("envmap".to_string(), vec![e.to_byte()]),
+        AttributeValue::Preview(p) => {
+            let mut v = Vec::with_capacity(8 + p.rgba.len());
+            v.extend_from_slice(&p.width.to_le_bytes());
+            v.extend_from_slice(&p.height.to_le_bytes());
+            v.extend_from_slice(&p.rgba);
+            ("preview".to_string(), v)
+        }
+        AttributeValue::FloatVector(values) => {
+            let mut v = Vec::with_capacity(values.len() * 4);
+            for f in values {
+                v.extend_from_slice(&f.to_le_bytes());
+            }
+            ("floatvector".to_string(), v)
+        }
+        AttributeValue::DeepImageState(s) => ("deepImageState".to_string(), vec![*s]),
         AttributeValue::Other { type_name, data } => (type_name.clone(), data.clone()),
     }
 }

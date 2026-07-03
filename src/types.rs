@@ -243,6 +243,20 @@ pub enum AttributeValue {
     /// bytes (no NUL terminator). The entry count is implied by the
     /// outer attribute size field.
     StringVector(Vec<String>),
+    /// `envmap` — see [`EnvMap`]. Single-byte payload.
+    EnvMap(EnvMap),
+    /// `preview` — see [`Preview`]. Two little-endian `u32` dimensions
+    /// followed by `4 * width * height` pixel bytes.
+    Preview(Preview),
+    /// `floatvector` — a sequence of little-endian `f32` values; the
+    /// element count is implied by the outer attribute size field
+    /// (which must be a multiple of 4 — the validator rejects files
+    /// whose `floatvector` payload is not).
+    FloatVector(Vec<f32>),
+    /// `deepImageState` — a single-byte enumeration describing how a
+    /// deep image's samples are sorted/overlapped. The byte is stored
+    /// verbatim so every state value round-trips.
+    DeepImageState(u8),
     /// Anything we don't model as a typed enum yet — preserved verbatim.
     Other {
         type_name: String,
@@ -319,6 +333,60 @@ pub struct Keycode {
     pub perfs_per_frame: i32,
     /// Number of perforations per count (20..=120).
     pub perfs_per_count: i32,
+}
+
+/// `envmap` attribute payload: a single byte selecting the
+/// environment-map projection carried by the image.
+///
+/// The two defined values (as rendered by the `exrheader` validator,
+/// invoked as an opaque process) are `0` — a latitude-longitude map —
+/// and `1` — a cube-face map. Any other byte value is preserved
+/// verbatim via [`EnvMap::Unknown`] so arbitrary headers round-trip
+/// bit-exactly (the validator accepts out-of-range bytes too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvMap {
+    /// Byte value `0`: latitude-longitude projection.
+    LatLong,
+    /// Byte value `1`: cube-face projection.
+    Cube,
+    /// Any other byte value, preserved verbatim.
+    Unknown(u8),
+}
+
+impl EnvMap {
+    /// Decode the single-byte on-disk value.
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0 => EnvMap::LatLong,
+            1 => EnvMap::Cube,
+            other => EnvMap::Unknown(other),
+        }
+    }
+
+    /// The single-byte on-disk value.
+    pub fn to_byte(self) -> u8 {
+        match self {
+            EnvMap::LatLong => 0,
+            EnvMap::Cube => 1,
+            EnvMap::Unknown(b) => b,
+        }
+    }
+}
+
+/// `preview` attribute payload: a small embedded preview image.
+///
+/// On disk: two little-endian `u32` values (`width`, `height`) followed
+/// by `4 * width * height` bytes of 8-bit pixel data (four bytes per
+/// pixel, RGBA order, row-major top-to-bottom). The `exrheader`
+/// validator renders the dimensions ("W by H pixels") and rejects files
+/// whose payload byte count does not match the dimensions, which pins
+/// the `8 + 4·w·h` sizing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub width: u32,
+    pub height: u32,
+    /// `4 * width * height` bytes, four per pixel.
+    pub rgba: Vec<u8>,
 }
 
 /// One header attribute (name + typed value).
