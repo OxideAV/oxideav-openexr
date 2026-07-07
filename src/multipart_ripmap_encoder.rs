@@ -220,10 +220,31 @@ pub fn encode_exr_multipart_tiled_ripmap(parts: &[MultipartRipmapTiledPart]) -> 
         chunk_counts.push(cc);
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow
+    // (a file-global concept); the reference reader refuses to open a
+    // file whose parts disagree. dataWindow stays per-part. Use the union
+    // (max extent) of the per-part full-resolution data windows.
+    let disp_w = parts
+        .iter()
+        .map(|p| p.pyramid.grid[0][0].width)
+        .max()
+        .unwrap();
+    let disp_h = parts
+        .iter()
+        .map(|p| p.pyramid.grid[0][0].height)
+        .max()
+        .unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Build per-part header byte blocks. ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
-        let attrs = build_ripmap_tiled_part_attrs(p, chunk_counts[i] as i32);
+        let attrs = build_ripmap_tiled_part_attrs(p, chunk_counts[i] as i32, display_window);
         header_byte_blocks.push(encode_part_header_attributes(&attrs));
     }
 
@@ -356,6 +377,7 @@ pub fn encode_exr_multipart_tiled_ripmap(parts: &[MultipartRipmapTiledPart]) -> 
 fn build_ripmap_tiled_part_attrs(
     part: &MultipartRipmapTiledPart,
     chunk_count: i32,
+    display_window: Box2i,
 ) -> Vec<Attribute> {
     let width = part.pyramid.grid[0][0].width;
     let height = part.pyramid.grid[0][0].height;
@@ -395,7 +417,7 @@ fn build_ripmap_tiled_part_attrs(
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),

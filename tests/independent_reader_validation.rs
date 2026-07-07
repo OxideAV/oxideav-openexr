@@ -20,8 +20,9 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline, encode_exr_scanline_rgba_float_with, parse_exr, Attribute, AttributeValue,
-    Box2i, Channel, Chromaticities, Compression, LineOrder, PixelType,
+    encode_exr_multipart, encode_exr_scanline, encode_exr_scanline_rgba_float_with,
+    encode_exr_tiled_rgba_float_with, parse_exr, Attribute, AttributeValue, Box2i, Channel,
+    Chromaticities, Compression, LineOrder, MultipartScanlinePart, PixelType,
 };
 
 fn tool_available(bin: &str) -> bool {
@@ -290,4 +291,81 @@ fn exr2aces_consumes_our_chromaticities() {
         "exr2aces produced no output file"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// exrinfo (OpenEXRCore) also drives a distinct tiled parser and a
+// distinct multi-part header-chain walker — validate those layouts
+// through it too, not just flat scanline.
+// ---------------------------------------------------------------------
+
+fn sample_tiled(z: Compression) -> Vec<u8> {
+    let w = 24u32;
+    let h = 20u32;
+    let samples: Vec<f32> = (0..(w * h * 4) as usize)
+        .map(|i| (i as f32) * 0.011)
+        .collect();
+    // 8x8 tiles → an edge column/row that is not a whole tile, exercising
+    // the reader's edge-tile clipping.
+    encode_exr_tiled_rgba_float_with(w, h, &samples, z, 8, 8).unwrap()
+}
+
+#[test]
+fn exrinfo_accepts_tiled_none() {
+    exrinfo_accepts(&sample_tiled(Compression::None), "tiled NONE");
+}
+
+#[test]
+fn exrinfo_accepts_tiled_zip() {
+    exrinfo_accepts(&sample_tiled(Compression::Zip), "tiled ZIP");
+}
+
+#[test]
+fn exrinfo_accepts_tiled_pxr24() {
+    exrinfo_accepts(&sample_tiled(Compression::Pxr24), "tiled PXR24");
+}
+
+#[test]
+fn exrinfo_accepts_tiled_b44() {
+    exrinfo_accepts(&sample_tiled(Compression::B44), "tiled B44");
+}
+
+#[test]
+fn exrinfo_accepts_multipart_scanline() {
+    // Two scanline parts of different sizes and compressions, so the
+    // OpenEXRCore multi-part header-chain walker sees a non-trivial
+    // chain and concatenated offset tables.
+    let w0 = 12u32;
+    let h0 = 10u32;
+    let w1 = 8u32;
+    let h1 = 6u32;
+    let g0: Vec<f32> = (0..(w0 * h0) as usize).map(|i| i as f32 * 0.02).collect();
+    let g1: Vec<f32> = (0..(w1 * h1) as usize).map(|i| i as f32 * 0.03).collect();
+    let ch = vec![Channel {
+        name: "Y".to_string(),
+        pixel_type: PixelType::Half,
+        p_linear: false,
+        x_sampling: 1,
+        y_sampling: 1,
+    }];
+    let parts = vec![
+        MultipartScanlinePart {
+            name: "left".to_string(),
+            width: w0,
+            height: h0,
+            channels: ch.clone(),
+            planes: vec![g0.as_slice()],
+            compression: Compression::Zip,
+        },
+        MultipartScanlinePart {
+            name: "right".to_string(),
+            width: w1,
+            height: h1,
+            channels: ch.clone(),
+            planes: vec![g1.as_slice()],
+            compression: Compression::Rle,
+        },
+    ];
+    let bytes = encode_exr_multipart(&parts).unwrap();
+    exrinfo_accepts(&bytes, "multipart scanline");
 }

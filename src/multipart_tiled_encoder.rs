@@ -157,10 +157,23 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
         ty_counts.push(tyc);
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow
+    // (a file-global concept); the reference reader refuses to open a
+    // file whose parts disagree. dataWindow stays per-part. Use the union
+    // (max extent) of the per-part data windows.
+    let disp_w = parts.iter().map(|p| p.width).max().unwrap();
+    let disp_h = parts.iter().map(|p| p.height).max().unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Build per-part header byte blocks. ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
-        let attrs = build_tiled_part_attrs(p, chunk_counts[i] as i32);
+        let attrs = build_tiled_part_attrs(p, chunk_counts[i] as i32, display_window);
         header_byte_blocks.push(encode_part_header_attributes(&attrs));
     }
 
@@ -278,7 +291,11 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
 /// Per-part attribute set for a multi-part flat tiled part: standard
 /// required attributes + `name` + `tiles[tiledesc]` (ONE_LEVEL +
 /// ROUND_DOWN) + `type[string="tiledimage"]` + `chunkCount`.
-fn build_tiled_part_attrs(part: &MultipartTiledPart, chunk_count: i32) -> Vec<Attribute> {
+fn build_tiled_part_attrs(
+    part: &MultipartTiledPart,
+    chunk_count: i32,
+    display_window: Box2i,
+) -> Vec<Attribute> {
     let win = Box2i {
         x_min: 0,
         y_min: 0,
@@ -314,7 +331,7 @@ fn build_tiled_part_attrs(part: &MultipartTiledPart, chunk_count: i32) -> Vec<At
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),

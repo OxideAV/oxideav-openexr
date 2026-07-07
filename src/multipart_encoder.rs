@@ -123,6 +123,20 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
         }
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow —
+    // it is a file-global concept, and the reference reader refuses to
+    // open a file whose parts disagree on it (dataWindow stays per-part).
+    // Use the union (max extent) of the per-part data windows, matching
+    // the mixed-part writer.
+    let disp_w = parts.iter().map(|p| p.width).max().unwrap();
+    let disp_h = parts.iter().map(|p| p.height).max().unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Build per-part headers (without the trailing NUL terminator) ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     let mut chunk_counts: Vec<u32> = Vec::with_capacity(parts.len());
@@ -132,7 +146,7 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
         let cc = p.height.div_ceil(block_h);
         chunk_counts.push(cc);
 
-        let attrs = build_scanline_part_attrs(p, cc);
+        let attrs = build_scanline_part_attrs(p, cc, display_window);
         header_byte_blocks.push(encode_part_header_attributes(&attrs));
     }
 
@@ -368,7 +382,11 @@ struct RgbaPlanes {
 
 /// Build the per-part attribute set for a scanline part (standard
 /// required attrs + name + type + chunkCount).
-fn build_scanline_part_attrs(part: &MultipartScanlinePart, chunk_count: u32) -> Vec<Attribute> {
+fn build_scanline_part_attrs(
+    part: &MultipartScanlinePart,
+    chunk_count: u32,
+    display_window: Box2i,
+) -> Vec<Attribute> {
     let win = Box2i {
         x_min: 0,
         y_min: 0,
@@ -397,7 +415,7 @@ fn build_scanline_part_attrs(part: &MultipartScanlinePart, chunk_count: u32) -> 
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),
