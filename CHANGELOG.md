@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.5](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.4...v0.0.5) - 2026-07-03
+### Added
+
+- Round-398 **independent-reader cross-validation** (`tests/independent_reader_validation.rs`):
+  until now every reference-binary acceptance test drove the classic
+  `Imf`-library reader (via `exrheader` / `exrmetrics`). This suite adds
+  two opaque validators built on *different* codebases: `exrinfo`
+  (the independent `OpenEXRCore` C decoder) must accept our scanline
+  output for all seven emitted compression schemes (NONE / ZIP / ZIPS /
+  RLE / PXR24 / B44 / B44A), and `exr2aces` (the ACES colour-conversion
+  tool) must *consume* — not merely echo — a `chromaticities` header
+  attribute to build its RGB→ACES matrix. A companion check writes a
+  deliberately-not-BT.709 primary set and confirms `exrheader` echoes
+  the exact red-x primary `0.7347`, catching any default-fill or
+  wrong-endian write. All ten tests auto-skip with a printed reason when
+  the tool is absent so CI hosts without an OpenEXR install stay green;
+  locally (with the binaries present) all ten pass.
 
 ### Fixed
 
