@@ -11,10 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Round-398 **multi-part `displayWindow` conformance bug** (found by the
   new independent-reader cross-validation). The multi-part **scanline**,
-  **tiled** (ONE_LEVEL), **mipmap**, and **ripmap** writers
-  (`encode_exr_multipart`, `encode_exr_multipart_tiled`,
+  **tiled** (ONE_LEVEL), **mipmap**, **ripmap**, and all four **deep**
+  writers (`encode_exr_multipart`, `encode_exr_multipart_tiled`,
   `encode_exr_multipart_tiled_mipmap`,
-  `encode_exr_multipart_tiled_ripmap`) each set **every** part's
+  `encode_exr_multipart_tiled_ripmap`,
+  `encode_exr_multipart_deep_scanline`,
+  `encode_exr_multipart_deep_tiled`,
+  `encode_exr_multipart_deep_tiled_mipmap`,
+  `encode_exr_multipart_deep_tiled_ripmap`) each set **every** part's
   `displayWindow` equal to that part's own `dataWindow`. But the
   `displayWindow` is a file-global concept that must be **identical**
   across all parts of a multi-part file; only `dataWindow` is per-part.
@@ -22,15 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invisible — but a file mixing parts of different sizes emitted
   divergent per-part displayWindows and was rejected at open time by
   every conforming reader (generic "unable to open" error), even though
-  our own parser round-tripped it. All four writers now compute one
+  our own parser round-tripped it. All eight writers now compute one
   file-global displayWindow (the bounding box / max extent of the part
   data windows, matching the already-correct mixed-part writer) and
   share it across parts. A fixed unequal-sized two-part scanline file is
   now **byte-identical** to the mixed writer's output and accepted by
-  the reference readers. New `tests/multipart_display_window.rs` pins the
-  invariant (binary-independent, CI-enforced) for all four part shapes;
-  the new `independent_reader_validation.rs` adds `exrinfo` acceptance of
-  an unequal-sized two-part file.
+  the reference readers; an unequal-sized two-part deep-scanline file is
+  likewise now accepted. New `tests/multipart_display_window.rs` pins the
+  invariant (binary-independent, CI-enforced) for the flat scanline /
+  tiled / mipmap / ripmap and the deep-scanline part shapes; the new
+  `independent_reader_validation.rs` adds `exrinfo` acceptance of an
+  unequal-sized two-part file.
 
 ### Added
 

@@ -18,12 +18,13 @@
 //! CI host regardless of whether an OpenEXR install is present.
 
 use oxideav_openexr::{
-    encode_exr_multipart, encode_exr_multipart_tiled, encode_exr_multipart_tiled_mipmap,
-    encode_exr_multipart_tiled_ripmap, mipmap_level_count_round_down, parse_exr_multipart,
+    encode_exr_multipart, encode_exr_multipart_deep_scanline, encode_exr_multipart_tiled,
+    encode_exr_multipart_tiled_mipmap, encode_exr_multipart_tiled_ripmap,
+    mipmap_level_count_round_down, parse_exr_deep_multipart, parse_exr_multipart,
     parse_exr_multipart_tiled, parse_exr_multipart_tiled_multilevel,
     ripmap_level_counts_round_down, Attribute, AttributeValue, Box2i, Channel, Compression,
-    MipmapLevel, MultipartMipmapTiledPart, MultipartRipmapTiledPart, MultipartScanlinePart,
-    MultipartTiledPart, RipmapPyramid,
+    MipmapLevel, MultipartDeepScanlinePart, MultipartMipmapTiledPart, MultipartRipmapTiledPart,
+    MultipartScanlinePart, MultipartTiledPart, RipmapPyramid,
 };
 
 fn display_window(attrs: &[Attribute]) -> Box2i {
@@ -275,4 +276,63 @@ fn ripmap_multipart_shares_display_window() {
         saw_smaller,
         "test not exercising unequal-sized ripmap parts"
     );
+}
+
+#[test]
+fn deep_scanline_multipart_shares_display_window() {
+    let (w0, h0, w1, h1) = (10u32, 8u32, 6u32, 4u32);
+    let spp0 = vec![1u32; (w0 * h0) as usize];
+    let samp0: Vec<f32> = (0..spp0.iter().sum::<u32>())
+        .map(|i| i as f32 * 0.1)
+        .collect();
+    let spp1 = vec![1u32; (w1 * h1) as usize];
+    let samp1: Vec<f32> = (0..spp1.iter().sum::<u32>())
+        .map(|i| i as f32 * 0.2)
+        .collect();
+    let deep_ch = vec![Channel {
+        name: "A".to_string(),
+        pixel_type: oxideav_openexr::PixelType::Float,
+        p_linear: false,
+        x_sampling: 1,
+        y_sampling: 1,
+    }];
+    let parts = vec![
+        MultipartDeepScanlinePart {
+            name: "big".to_string(),
+            width: w0,
+            height: h0,
+            channels: deep_ch.clone(),
+            samples_per_pixel: &spp0,
+            channel_samples: vec![&samp0],
+            compression: Compression::Zips,
+        },
+        MultipartDeepScanlinePart {
+            name: "small".to_string(),
+            width: w1,
+            height: h1,
+            channels: deep_ch.clone(),
+            samples_per_pixel: &spp1,
+            channel_samples: vec![&samp1],
+            compression: Compression::Zips,
+        },
+    ];
+    let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
+    let parts_out = parse_exr_deep_multipart(&bytes).unwrap();
+    let expect = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (w0 - 1) as i32,
+        y_max: (h0 - 1) as i32,
+    };
+    let mut saw_smaller = false;
+    for p in &parts_out {
+        assert_eq!(
+            p.display_window, expect,
+            "a deep part's displayWindow diverges from the file-global window"
+        );
+        if p.data_window != expect {
+            saw_smaller = true;
+        }
+    }
+    assert!(saw_smaller, "test not exercising unequal-sized deep parts");
 }

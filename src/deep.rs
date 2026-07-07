@@ -1396,6 +1396,19 @@ pub fn encode_exr_multipart_deep_scanline(parts: &[MultipartDeepScanlinePart]) -
         }
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow
+    // (a file-global concept); the reference reader refuses to open a
+    // file whose parts disagree. dataWindow stays per-part. Use the union
+    // (max extent) of the per-part data windows.
+    let disp_w = parts.iter().map(|p| p.width).max().unwrap();
+    let disp_h = parts.iter().map(|p| p.height).max().unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Per-part header byte blocks + chunk counts. ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     let mut chunk_counts: Vec<usize> = Vec::with_capacity(parts.len());
@@ -1405,7 +1418,7 @@ pub fn encode_exr_multipart_deep_scanline(parts: &[MultipartDeepScanlinePart]) -
         let cc = p.height.div_ceil(block_h) as usize;
         chunk_counts.push(cc);
         let max_samples = p.samples_per_pixel.iter().copied().max().unwrap_or(0) as i32;
-        let attrs = build_deep_part_attrs(p, cc as i32, max_samples);
+        let attrs = build_deep_part_attrs(p, cc as i32, max_samples, display_window);
         let mut hb = Vec::with_capacity(256);
         for a in &attrs {
             hb.extend_from_slice(a.name.as_bytes());
@@ -1573,6 +1586,7 @@ fn build_deep_part_attrs(
     part: &MultipartDeepScanlinePart,
     chunk_count: i32,
     max_samples: i32,
+    display_window: Box2i,
 ) -> Vec<Attribute> {
     let win = Box2i {
         x_min: 0,
@@ -1602,7 +1616,7 @@ fn build_deep_part_attrs(
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),
@@ -2717,11 +2731,25 @@ pub fn encode_exr_multipart_deep_tiled(parts: &[MultipartDeepTiledPart]) -> Resu
         ty_counts.push(ty_count);
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow
+    // (a file-global concept); the reference reader refuses to open a
+    // file whose parts disagree. dataWindow stays per-part. Use the union
+    // (max extent) of the per-part data windows.
+    let disp_w = parts.iter().map(|p| p.width).max().unwrap();
+    let disp_h = parts.iter().map(|p| p.height).max().unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Per-part header byte blocks. ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
         let max_samples = p.samples_per_pixel.iter().copied().max().unwrap_or(0) as i32;
-        let attrs = build_deep_tiled_part_attrs(p, chunk_counts[i] as i32, max_samples);
+        let attrs =
+            build_deep_tiled_part_attrs(p, chunk_counts[i] as i32, max_samples, display_window);
         let mut hb = Vec::with_capacity(256);
         for a in &attrs {
             hb.extend_from_slice(a.name.as_bytes());
@@ -2920,6 +2948,7 @@ fn build_deep_tiled_part_attrs(
     part: &MultipartDeepTiledPart,
     chunk_count: i32,
     max_samples: i32,
+    display_window: Box2i,
 ) -> Vec<Attribute> {
     let win = Box2i {
         x_min: 0,
@@ -2953,7 +2982,7 @@ fn build_deep_tiled_part_attrs(
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),
@@ -5666,6 +5695,19 @@ pub fn encode_exr_multipart_deep_tiled_mipmap(
         chunk_counts.push(cc);
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow
+    // (a file-global concept); the reference reader refuses to open a
+    // file whose parts disagree. dataWindow stays per-part. Use the union
+    // (max extent) of the per-part full-resolution data windows.
+    let disp_w = parts.iter().map(|p| p.pyramid[0].width).max().unwrap();
+    let disp_h = parts.iter().map(|p| p.pyramid[0].height).max().unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Per-part header byte blocks. ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
@@ -5675,7 +5717,12 @@ pub fn encode_exr_multipart_deep_tiled_mipmap(
             .flat_map(|lvl| lvl.samples_per_pixel.iter().copied())
             .max()
             .unwrap_or(0) as i32;
-        let attrs = build_deep_mipmap_tiled_part_attrs(p, chunk_counts[i] as i32, max_samples);
+        let attrs = build_deep_mipmap_tiled_part_attrs(
+            p,
+            chunk_counts[i] as i32,
+            max_samples,
+            display_window,
+        );
         let mut hb = Vec::with_capacity(256);
         for a in &attrs {
             hb.extend_from_slice(a.name.as_bytes());
@@ -5871,6 +5918,7 @@ fn build_deep_mipmap_tiled_part_attrs(
     part: &MultipartDeepMipmapTiledPart,
     chunk_count: i32,
     max_samples: i32,
+    display_window: Box2i,
 ) -> Vec<Attribute> {
     let width = part.pyramid[0].width;
     let height = part.pyramid[0].height;
@@ -5906,7 +5954,7 @@ fn build_deep_mipmap_tiled_part_attrs(
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),
@@ -6759,6 +6807,19 @@ pub fn encode_exr_multipart_deep_tiled_ripmap(
         chunk_counts.push(cc);
     }
 
+    // Every part of a multi-part file must carry the SAME displayWindow
+    // (a file-global concept); the reference reader refuses to open a
+    // file whose parts disagree. dataWindow stays per-part. Use the union
+    // (max extent) of the per-part full-resolution data windows.
+    let disp_w = parts.iter().map(|p| p.grid[0][0].width).max().unwrap();
+    let disp_h = parts.iter().map(|p| p.grid[0][0].height).max().unwrap();
+    let display_window = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (disp_w - 1) as i32,
+        y_max: (disp_h - 1) as i32,
+    };
+
     // ---- Per-part header byte blocks. ----
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
@@ -6769,7 +6830,12 @@ pub fn encode_exr_multipart_deep_tiled_ripmap(
             .flat_map(|cell| cell.samples_per_pixel.iter().copied())
             .max()
             .unwrap_or(0) as i32;
-        let attrs = build_deep_ripmap_tiled_part_attrs(p, chunk_counts[i] as i32, max_samples);
+        let attrs = build_deep_ripmap_tiled_part_attrs(
+            p,
+            chunk_counts[i] as i32,
+            max_samples,
+            display_window,
+        );
         let mut hb = Vec::with_capacity(256);
         for a in &attrs {
             hb.extend_from_slice(a.name.as_bytes());
@@ -6971,6 +7037,7 @@ fn build_deep_ripmap_tiled_part_attrs(
     part: &MultipartDeepRipmapTiledPart,
     chunk_count: i32,
     max_samples: i32,
+    display_window: Box2i,
 ) -> Vec<Attribute> {
     let width = part.grid[0][0].width;
     let height = part.grid[0][0].height;
@@ -7006,7 +7073,7 @@ fn build_deep_ripmap_tiled_part_attrs(
         },
         Attribute {
             name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
+            value: AttributeValue::Box2i(display_window),
         },
         Attribute {
             name: "lineOrder".to_string(),
