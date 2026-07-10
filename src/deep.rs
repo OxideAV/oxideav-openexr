@@ -349,7 +349,13 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
         width: u32,
         height: u32,
         samples_per_pixel: Vec<u32>,
-        channel_samples: Vec<Vec<f32>>,
+        // Per-chunk decoded sample lists, buffered with the block's
+        // first row so the flat per-channel vectors can be assembled
+        // in canonical top-first order after the linear scan — the
+        // physical chunk storage order is NOT guaranteed to be
+        // canonical (DECREASING_Y files store bottom-first).
+        pending_blocks: Vec<(u32, Vec<Vec<f32>>)>,
+        seen_blocks: Vec<bool>,
     }
 
     let mut state: Vec<PartState> = Vec::with_capacity(parts.len());
@@ -433,7 +439,8 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
             width,
             height,
             samples_per_pixel: vec![0u32; pixels],
-            channel_samples: (0..sorted_channels.len()).map(|_| Vec::new()).collect(),
+            pending_blocks: Vec::with_capacity(expected_chunks),
+            seen_blocks: vec![false; expected_chunks],
         });
     }
 
@@ -496,6 +503,22 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
         }
         let block_y0 = row_in_image as u32;
         let block_h = compression.scanlines_per_block();
+        let block_idx_in_part = (block_y0 / block_h) as usize;
+        if block_y0 % block_h != 0 || block_idx_in_part >= ps.seen_blocks.len() {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {part_idx} ('{}'): chunk Y={y_coord} not on the \
+                 block grid",
+                ps.name
+            )));
+        }
+        if ps.seen_blocks[block_idx_in_part] {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep part {part_idx} ('{}'): duplicate chunk for block \
+                 starting at Y={y_coord}",
+                ps.name
+            )));
+        }
+        ps.seen_blocks[block_idx_in_part] = true;
         let rows_in_block = ((height - block_y0).min(block_h)) as usize;
         let entries_in_table = rows_in_block * width as usize;
         let unpacked_table_size = entries_in_table * 4;
@@ -545,7 +568,12 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
         let sample_bytes =
             decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?;
         let mut p = 0usize;
-        // Snapshot channel types/names so we can borrow channel_samples mutably below.
+        // Decode this chunk's samples into per-channel block-local
+        // vectors; they are stitched into the flat per-channel lists in
+        // canonical block order after the scan.
+        let mut block_channels: Vec<Vec<f32>> = (0..ps.channels.len())
+            .map(|_| Vec::with_capacity(block_samples_total as usize))
+            .collect();
         let channel_types: Vec<(PixelType, String)> = ps
             .channels
             .iter()
@@ -575,7 +603,7 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
                         bits as f32
                     }
                 };
-                ps.channel_samples[ch_idx].push(v);
+                block_channels[ch_idx].push(v);
             }
             p += need;
         }
@@ -587,22 +615,38 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
             )));
         }
 
+        ps.pending_blocks.push((block_y0, block_channels));
+
         scan_pos = data_end;
         let _ = ps.chunk_count; // reserved for future bounds checks
     }
 
     Ok(state
         .into_iter()
-        .map(|ps| DeepScanlinePart {
-            name: ps.name,
-            data_window: ps.data_window,
-            display_window: ps.display_window,
-            line_order: ps.line_order,
-            compression: ps.compression,
-            channels: ps.channels,
-            samples_per_pixel: ps.samples_per_pixel,
-            channel_samples: ps.channel_samples,
-            attributes: ps.attributes,
+        .map(|mut ps| {
+            // Stitch the buffered per-chunk sample lists into flat
+            // per-channel vectors in canonical top-first block order —
+            // the linear scan visits chunks in physical storage order,
+            // which for DECREASING_Y files is bottom-first.
+            ps.pending_blocks.sort_by_key(|&(y0, _)| y0);
+            let mut channel_samples: Vec<Vec<f32>> =
+                (0..ps.channels.len()).map(|_| Vec::new()).collect();
+            for (_, block) in ps.pending_blocks {
+                for (dst, src) in channel_samples.iter_mut().zip(block) {
+                    dst.extend(src);
+                }
+            }
+            DeepScanlinePart {
+                name: ps.name,
+                data_window: ps.data_window,
+                display_window: ps.display_window,
+                line_order: ps.line_order,
+                compression: ps.compression,
+                channels: ps.channels,
+                samples_per_pixel: ps.samples_per_pixel,
+                channel_samples,
+                attributes: ps.attributes,
+            }
         })
         .collect())
 }

@@ -76,6 +76,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Round-410 **deep-scanline multi-part readers misordered sample lists
+  for non-canonical chunk storage** (`parse_exr_deep_multipart` and
+  the mixed reader's `deepscanline` parts). Both walk chunks linearly
+  (for robustness against zero-filled offset tables) and appended each
+  chunk's variable-length samples in encounter order — a legal
+  DECREASING_Y-stored file (chunks bottom-first, tables still
+  canonically keyed) decoded with its per-channel sample lists in
+  reversed block order while `samples_per_pixel` said otherwise
+  (silent data corruption; flat parts scatter by row/tile and deep
+  TILED parts buffer per-tile slabs, so only the deep SCANLINE
+  accumulation was affected). Per-chunk sample lists are now buffered
+  with their block row and stitched in canonical top-first order after
+  the scan, and a new guard rejects chunks off the block grid or
+  duplicated for the same block. Pinned by
+  `tests/line_order_deep_multipart_read.rs` (byte-level storage
+  permutation of a writer-produced two-part deep file must decode
+  identically through both readers). Bounded fuzz regression clean
+  (`parse_multipart_mixed` 646k runs, `parse_deep_scanline` 1.36M
+  runs).
 - Round-410 **PXR24 raw-fallback conformance bug** (caught by the new
   multilevel lossy tests — small mipmap tiles trip it). When zlib
   deflate did not shrink a PXR24 chunk, the encoder stored the

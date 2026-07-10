@@ -2071,7 +2071,13 @@ enum PartState {
         req: RequiredAttrs,
         sorted_channels: Vec<Channel>,
         samples_per_pixel: Vec<u32>,
-        channel_samples: Vec<Vec<f32>>,
+        // Per-chunk decoded sample lists buffered with the block's
+        // first row: the linear scan visits chunks in physical storage
+        // order (bottom-first for DECREASING_Y files), so the flat
+        // per-channel vectors are assembled in canonical order at the
+        // end.
+        pending_blocks: Vec<(u32, Vec<Vec<f32>>)>,
+        seen_blocks: Vec<bool>,
     },
     DeepTiled {
         name: String,
@@ -2341,12 +2347,14 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 }
                 let pixels = (width as usize) * (height as usize);
                 let n_channels = sorted_channels.len();
+                let _ = n_channels;
                 state.push(PartState::DeepScanline {
                     name: part_name()?,
                     req,
                     sorted_channels,
                     samples_per_pixel: vec![0u32; pixels],
-                    channel_samples: (0..n_channels).map(|_| Vec::new()).collect(),
+                    pending_blocks: Vec::with_capacity(expected),
+                    seen_blocks: vec![false; expected],
                 });
             }
             "deeptile" => {
@@ -2735,7 +2743,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 req,
                 sorted_channels,
                 samples_per_pixel,
-                channel_samples,
+                pending_blocks,
+                seen_blocks,
             } => {
                 // i32 part + i32 Y + 3×u64 sizes = 32 bytes of header.
                 if scan_pos + 32 > bytes.len() {
@@ -2774,6 +2783,20 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 }
                 let block_y0 = row_in_image as u32;
                 let block_h = req.compression.scanlines_per_block();
+                let block_idx_in_part = (block_y0 / block_h) as usize;
+                if block_y0 % block_h != 0 || block_idx_in_part >= seen_blocks.len() {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part deep scanline part {part_idx} ('{name}'): \
+                         chunk Y={y_coord} not on the block grid"
+                    )));
+                }
+                if seen_blocks[block_idx_in_part] {
+                    return Err(ExrError::invalid(format!(
+                        "mixed multi-part deep scanline part {part_idx} ('{name}'): \
+                         duplicate chunk for block starting at Y={y_coord}"
+                    )));
+                }
+                seen_blocks[block_idx_in_part] = true;
                 let rows_in_block = ((height - block_y0).min(block_h)) as usize;
                 let entries = rows_in_block * width as usize;
 
@@ -2810,17 +2833,21 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 }
                 let sample_bytes =
                     decompress_buffer(&bytes[table_end..data_end], unpacked_data, req.compression)?;
+                let mut block_channels: Vec<Vec<f32>> = (0..sorted_channels.len())
+                    .map(|_| Vec::with_capacity(block_samples_total as usize))
+                    .collect();
                 decode_deep_sample_block(
                     &sample_bytes,
                     sorted_channels,
                     block_samples_total as usize,
-                    channel_samples,
+                    &mut block_channels,
                 )
                 .map_err(|e| {
                     ExrError::invalid(format!(
                         "mixed multi-part deep scanline part {part_idx} ('{name}'): {e}"
                     ))
                 })?;
+                pending_blocks.push((block_y0, block_channels));
                 scan_pos = data_end;
             }
             PartState::DeepTiled {
@@ -3077,18 +3104,32 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 req,
                 sorted_channels,
                 samples_per_pixel,
-                channel_samples,
-            } => MultipartMixedImage::DeepScanline(DeepScanlinePart {
-                name,
-                data_window: req.data_window,
-                display_window: req.display_window,
-                line_order: req.line_order,
-                compression: req.compression,
-                channels: sorted_channels,
-                samples_per_pixel,
-                channel_samples,
-                attributes: part.attributes.clone(),
-            }),
+                mut pending_blocks,
+                ..
+            } => {
+                // Canonical top-first assembly of the buffered
+                // per-chunk sample lists (storage order is physical
+                // and may be bottom-first for DECREASING_Y files).
+                pending_blocks.sort_by_key(|&(y0, _)| y0);
+                let mut channel_samples: Vec<Vec<f32>> =
+                    (0..sorted_channels.len()).map(|_| Vec::new()).collect();
+                for (_, block) in pending_blocks {
+                    for (dst, src) in channel_samples.iter_mut().zip(block) {
+                        dst.extend(src);
+                    }
+                }
+                MultipartMixedImage::DeepScanline(DeepScanlinePart {
+                    name,
+                    data_window: req.data_window,
+                    display_window: req.display_window,
+                    line_order: req.line_order,
+                    compression: req.compression,
+                    channels: sorted_channels,
+                    samples_per_pixel,
+                    channel_samples,
+                    attributes: part.attributes.clone(),
+                })
+            }
             PartState::DeepTiled {
                 name,
                 req,
