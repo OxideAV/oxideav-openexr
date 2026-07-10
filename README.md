@@ -13,16 +13,17 @@ Clean-room from the public OpenEXR file-format specification.
 | Magic + version field               | parse + write (format-version 2)                 |
 | Attribute table                     | parse + write; eight required attributes typed, plus typed inspectors for `int` / `double` / `string` / `v2i` / `v2d` / `v3i` / `v3f` / `v3d` / `m33f` / `m44f` / `m33d` / `m44d` / `chromaticities` / `box2f` / `tiledesc` / `rational` / `timecode` (BCD time accessors) / `keycode` / `stringvector` / `envmap` / `preview` / `floatvector` / `deepImageState` |
 | Channel list (`chlist`)             | parse + write — `HALF`, `FLOAT`, `UINT`          |
+| `lineOrder` (INCREASING_Y / DECREASING_Y / RANDOM_Y) | parse + write — observer-derived (r410): the chunk offset table is ALWAYS keyed canonically (top-first / ty-outer-tx-inner walk) and `lineOrder` governs only physical chunk storage order; RANDOM_Y is invalid for scanline images (writer rejects; reader stays lenient since chunks self-describe coordinates). `*_with_line_order` writer variants for scanline, tiled ONE_LEVEL, MIPMAP and RIPMAP; DECREASING_Y stores rows bottom-first, RANDOM_Y (tiled only) a deterministic shuffle. Reference-validated (header echo + independent reader + convert pixel-exact); derivation record in `tests/line_order_observer_notes.md` |
 | Compression: `NONE`                 | parse + write                                    |
 | Compression: `ZIP`  (16 lines/blk)  | parse + write (zlib)                             |
 | Compression: `ZIPS` (1 line/blk)    | parse + write (zlib)                             |
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
-| Compression: `PXR24` (16 lines/blk) | **parse + write** (scanline + tiled + multi-part) — encode: FLOAT→24-bit reduction (round mantissa to 15 bits) + byte-plane horizontal-delta + zlib deflate with raw fallback; decode: zlib inflate + prefix-sum + 24-bit reconstruction. HALF/UINT lossless. Decode validated bit-exact against the staged observer-spec's 24-bit reduction; encode round-trips through our decoder AND is accepted + decoded identically by a reference EXR validator binary |
+| Compression: `PXR24` (16 lines/blk) | **parse + write** (scanline + tiled + multi-part) — encode: FLOAT→24-bit reduction (round mantissa to 15 bits) + byte-plane horizontal-delta + zlib deflate with raw fallback; decode: zlib inflate + prefix-sum + 24-bit reconstruction. HALF/UINT lossless. Decode validated bit-exact against the staged observer-spec's 24-bit reduction; encode round-trips through our decoder AND is accepted + decoded identically by a reference EXR validator binary. r410: the raw fallback now stores/detects the NATIVE chunk bytes (`compressed_len == uncompressed_len`), matching conforming readers — incompressible chunks carry FLOAT at full precision |
 | Compression: `B44` / `B44A` (32 lines/blk) | **parse + write** (scanline + tiled + multi-part) — per-channel planes; HALF 4×4 blocks (14-byte packed + B44A 3-byte flat), edge replication, optional pLinear exp/log quantisation (tables computed bit-exact vs staged 65 536-entry CSVs); FLOAT/UINT copied raw; shared raw fallback. Encode searches the smallest 6-bit shift, applies the non-linear `exactmax` `t[0]` correction, and emits 3-byte flat blocks for B44A. Decode validated bit-exact against the staged observer-spec's B44 reduction; encode round-trips through our decoder AND is accepted + decoded identically by a reference EXR validator binary (b44/b44a) |
 | Single-part scanline                | parse + write                                    |
 | Single-part tiled (`ONE_LEVEL`)     | parse + write                                    |
-| Tiled `MIPMAP_LEVELS`               | parse + write — full pyramid via `parse_exr_tiled_multilevel`; NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A. `parse_exr` returns level-0 only |
-| Tiled `RIPMAP_LEVELS`               | parse + write — full 2-D reduction grid; NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A |
+| Tiled `MIPMAP_LEVELS`               | parse + write — full pyramid via `parse_exr_tiled_multilevel`; NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A (r410: the single-part writer now carries the lossy schemes too, reference-validated incl. bit-exact reference-decode vs our-decode). `parse_exr` returns level-0 only |
+| Tiled `RIPMAP_LEVELS`               | parse + write — full 2-D reduction grid; NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A (r410: single-part writer incl. lossy) |
 | Multi-part EXR (scanline parts)     | parse + write                                    |
 | Multi-part EXR (flat tiled parts)   | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware |
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write — lossless AND lossy (PXR24 / B44 / B44A) scanline paths; luminance/chroma (`Y` + 2×2 `BY`/`RY`) layouts validated bit-exact against a reference EXR validator binary. Note: the reference reader requires sub-sampled data-window extents divisible by the sampling factor; our reader additionally accepts ceil-sized odd extents |
@@ -94,13 +95,20 @@ current numbers (scanline HALF NONE decode 2.6 GiB/s, FLOAT NONE
 
 ## Fuzzing
 
-Two coverage-guided `cargo-fuzz` targets live under `fuzz/`:
+Three coverage-guided `cargo-fuzz` targets live under `fuzz/`:
 
 ```sh
+cargo +nightly fuzz run parse_flat
 cargo +nightly fuzz run parse_deep_scanline
 cargo +nightly fuzz run parse_multipart_mixed
 ```
 
+`parse_flat` attacks the single-part flat readers — `parse_exr`
+(scanline + tiled ONE_LEVEL) and `parse_exr_tiled_multilevel`
+(MIPMAP / RIPMAP) — the only route into the PXR24 byte-plane/delta and
+B44/B44A 4×4-block decode arithmetic; its overlay mode splices fuzz
+bytes over the offset-table + chunk region of writer-produced valid
+files across shape × compression × lineOrder combinations.
 `parse_deep_scanline` attacks the deep scanline chunk walk.
 `parse_multipart_mixed` attacks the mixed multi-part reader — the
 per-part chunk-shape dispatch (flat scanline / flat + deep tiled at
