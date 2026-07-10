@@ -353,6 +353,28 @@ pub fn encode_exr_scanline_rgba_float(width: u32, height: u32, samples: &[f32]) 
     encode_exr_scanline_rgba_float_with(width, height, samples, Compression::Zip)
 }
 
+/// Same as [`encode_exr_scanline_rgba_float_with`] but with an explicit
+/// `lineOrder`.
+///
+/// `IncreasingY` stores scanline chunks top-first (the default);
+/// `DecreasingY` stores them bottom-first. In both cases the line
+/// offset table stays keyed by block index from the top of the data
+/// window (entry `i` always points at the block whose first scanline is
+/// `y_min + i * blockHeight`) — the observer-established wire fact is
+/// that `lineOrder` governs only the physical storage/streaming order
+/// of the chunks, never the offset-table keying. `RandomY` is rejected:
+/// a scanline image header carrying RANDOM_Y is invalid (the reference
+/// readers refuse to open such files).
+pub fn encode_exr_scanline_rgba_float_with_line_order(
+    width: u32,
+    height: u32,
+    samples: &[f32],
+    compression: Compression,
+    line_order: LineOrder,
+) -> Result<Vec<u8>> {
+    encode_rgba_float_impl(width, height, samples, compression, line_order)
+}
+
 /// Same as [`encode_exr_scanline_rgba_float`] but with an explicit
 /// compression mode (round 1 supports NO_COMPRESSION + ZIP).
 pub fn encode_exr_scanline_rgba_float_with(
@@ -360,6 +382,16 @@ pub fn encode_exr_scanline_rgba_float_with(
     height: u32,
     samples: &[f32],
     compression: Compression,
+) -> Result<Vec<u8>> {
+    encode_rgba_float_impl(width, height, samples, compression, LineOrder::IncreasingY)
+}
+
+fn encode_rgba_float_impl(
+    width: u32,
+    height: u32,
+    samples: &[f32],
+    compression: Compression,
+    line_order: LineOrder,
 ) -> Result<Vec<u8>> {
     let need = (width as usize) * (height as usize) * 4;
     if samples.len() != need {
@@ -398,19 +430,16 @@ pub fn encode_exr_scanline_rgba_float_with(
         a.push(samples[px * 4 + 3]);
     }
 
-    let chs = match &rgba_float_attributes(width, height, compression)[0].value {
+    let mut attributes = rgba_float_attributes(width, height, compression);
+    if let Some(lo) = attributes.iter_mut().find(|a| a.name == "lineOrder") {
+        lo.value = AttributeValue::LineOrder(line_order);
+    }
+    let chs = match &attributes[0].value {
         AttributeValue::Channels(c) => c.clone(),
         _ => unreachable!(),
     };
     let planes_f32: Vec<&[f32]> = vec![&a, &b, &g, &r];
-    encode_exr_scanline(
-        width,
-        height,
-        &chs,
-        &planes_f32,
-        compression,
-        rgba_float_attributes(width, height, compression),
-    )
+    encode_exr_scanline(width, height, &chs, &planes_f32, compression, attributes)
 }
 
 /// General-purpose scanline encoder. `planes` must contain one
@@ -475,6 +504,23 @@ pub fn encode_exr_scanline(
         return Err(ExrError::unsupported(format!(
             "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + B44/B44A)"
         )));
+    }
+
+    // Honour a caller-supplied `lineOrder` attribute. RANDOM_Y is only
+    // meaningful for tiled files — a scanline image header carrying
+    // RANDOM_Y is invalid and the reference readers refuse to open it,
+    // so reject it here rather than emit an unreadable file.
+    let line_order = attributes
+        .iter()
+        .find_map(|a| match (&a.name[..], &a.value) {
+            ("lineOrder", AttributeValue::LineOrder(l)) => Some(*l),
+            _ => None,
+        })
+        .unwrap_or(LineOrder::IncreasingY);
+    if line_order == LineOrder::RandomY {
+        return Err(ExrError::invalid(
+            "lineOrder RANDOM_Y is not valid for scanline images (tiled files only)".to_string(),
+        ));
     }
 
     let block_h = compression.scanlines_per_block();
@@ -595,12 +641,27 @@ pub fn encode_exr_scanline(
     //   header | offset table | block headers + payloads
     // Offsets are absolute byte positions into the file, so we have to
     // compute the offset of each block first.
+    //
+    // Physical chunk storage follows `lineOrder` (DECREASING_Y stores
+    // the bottom block first), but the offset table is ALWAYS keyed by
+    // block index from the top of the data window: entry `i` points at
+    // the block whose first scanline is `y_min + i * blockHeight`,
+    // wherever that block lives in the file. (Observer-established:
+    // reference readers reject a table whose entry order follows the
+    // decreasing storage order with a chunk-leader error, and accept a
+    // top-first-keyed table over bottom-first storage bit-exactly.)
+    let storage_order: Vec<usize> = match line_order {
+        LineOrder::IncreasingY => (0..num_blocks).collect(),
+        LineOrder::DecreasingY => (0..num_blocks).rev().collect(),
+        LineOrder::RandomY => unreachable!("rejected above"),
+    };
+
     let offset_table_size = num_blocks * 8;
-    let mut block_offsets = Vec::with_capacity(num_blocks);
+    let mut block_offsets = vec![0u64; num_blocks];
     let mut running = header_bytes.len() + offset_table_size;
-    for p in &block_payloads {
-        block_offsets.push(running as u64);
-        running += 8 + p.len(); // 8 bytes for Y(i32) + size(i32)
+    for &bi in &storage_order {
+        block_offsets[bi] = running as u64;
+        running += 8 + block_payloads[bi].len(); // 8 bytes for Y(i32) + size(i32)
     }
 
     let mut out = Vec::with_capacity(running);
@@ -608,8 +669,9 @@ pub fn encode_exr_scanline(
     for &off in &block_offsets {
         out.extend_from_slice(&off.to_le_bytes());
     }
-    for (block_idx, p) in block_payloads.iter().enumerate() {
-        let y = block_idx as u32 * block_h;
+    for &bi in &storage_order {
+        let p = &block_payloads[bi];
+        let y = bi as u32 * block_h;
         out.extend_from_slice(&(y as i32).to_le_bytes());
         out.extend_from_slice(&(p.len() as i32).to_le_bytes());
         out.extend_from_slice(p);

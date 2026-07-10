@@ -398,6 +398,7 @@ pub use deep::{
 };
 pub use encoder::{
     encode_exr_scanline, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,
+    encode_exr_scanline_rgba_float_with_line_order,
 };
 pub use error::{ExrError, Result};
 pub use header::{

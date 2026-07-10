@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round-410 **`lineOrder` conformance — DECREASING_Y scanline write
+  support** (`encode_exr_scanline_rgba_float_with_line_order`, plus
+  `encode_exr_scanline` now honours a caller-supplied `lineOrder`
+  attribute). Wire facts derived by black-box observation of the
+  reference reader binaries (see
+  `tests/line_order_observer_notes.md`): the chunk offset table is
+  ALWAYS keyed in canonical top-first order regardless of `lineOrder`
+  (a table following the decreasing storage order is rejected with a
+  chunk-leader error); `lineOrder` governs only the physical chunk
+  storage order; RANDOM_Y is invalid for scanline images. The writer
+  stores chunks bottom-first for DECREASING_Y and rejects RANDOM_Y on
+  scanline output; the offset-table-driven reader already decoded any
+  storage order and is now pinned by `tests/line_order_validation.rs`
+  (wire-layout assertions + reference validation via `exrheader` echo,
+  `exrinfo` acceptance, and `exrmetrics --convert` pixel-exact
+  round-trip, auto-skipping when the tools are absent). Reader
+  leniency for RANDOM_Y scanline headers (which reference readers
+  refuse) is deliberate and pinned.
+
 ### Fixed
 
 - Round-398 **multi-part `displayWindow` conformance bug** (found by the
