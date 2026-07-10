@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round-trip, auto-skipping when the tools are absent). Reader
   leniency for RANDOM_Y scanline headers (which reference readers
   refuse) is deliberate and pinned.
+- Round-410 **tiled `lineOrder` write support — DECREASING_Y and
+  RANDOM_Y** (`encode_exr_tiled_with_line_order` +
+  `encode_exr_tiled_rgba_float_with_line_order`). Both non-default
+  orders are valid for tiled files (observer-established; the scanline
+  RANDOM_Y rejection does not apply). DECREASING_Y stores tile rows
+  bottom-first (ty descending, tx ascending); RANDOM_Y emits a
+  deterministic fixed-seed shuffle so output is reproducible; in every
+  case the tile offset table stays keyed to the canonical
+  ty-outer/tx-inner walk (entry `i` ↔ canonical tile `i`).
+  Wire-layout, determinism, all-compression edge-tile round-trip, and
+  reference validation (header echo + independent-reader acceptance +
+  convert pixel-exact) tests added.
 
 ### Fixed
 

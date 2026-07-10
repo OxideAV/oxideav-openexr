@@ -250,6 +250,63 @@ pub fn encode_exr_tiled_rgba_float_with(
     )
 }
 
+/// Same as [`encode_exr_tiled_rgba_float_with`] but with an explicit
+/// `lineOrder`. See [`encode_exr_tiled_with_line_order`] for the
+/// storage-order semantics (all three orders are valid for tiled
+/// files, including RANDOM_Y).
+pub fn encode_exr_tiled_rgba_float_with_line_order(
+    width: u32,
+    height: u32,
+    samples: &[f32],
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
+) -> Result<Vec<u8>> {
+    // Delegate the reshape + channel setup to the IncreasingY entry,
+    // then... the reshape is cheap; simplest correct path is to reuse
+    // the general encoder directly with the RGBA channel set.
+    let need = (width as usize) * (height as usize) * 4;
+    if samples.len() != need {
+        return Err(ExrError::invalid(format!(
+            "samples length {} != width({width})*height({height})*4 = {need}",
+            samples.len()
+        )));
+    }
+    let pixels = (width as usize) * (height as usize);
+    let mut a = Vec::with_capacity(pixels);
+    let mut b = Vec::with_capacity(pixels);
+    let mut g = Vec::with_capacity(pixels);
+    let mut r = Vec::with_capacity(pixels);
+    for px in 0..pixels {
+        r.push(samples[px * 4]);
+        g.push(samples[px * 4 + 1]);
+        b.push(samples[px * 4 + 2]);
+        a.push(samples[px * 4 + 3]);
+    }
+    let chs: Vec<Channel> = ["A", "B", "G", "R"]
+        .iter()
+        .map(|n| Channel {
+            name: (*n).to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        })
+        .collect();
+    let planes_f32: Vec<&[f32]> = vec![&a, &b, &g, &r];
+    encode_exr_tiled_with_line_order(
+        width,
+        height,
+        &chs,
+        &planes_f32,
+        compression,
+        tile_x,
+        tile_y,
+        line_order,
+    )
+}
+
 /// General-purpose tiled encoder. Writes a single-part ONE_LEVEL tiled
 /// EXR where each plane carries one `width × height` `f32` slice in
 /// alphabetical channel order. UINT channels store the f32 value
@@ -265,6 +322,43 @@ pub fn encode_exr_tiled(
     compression: Compression,
     tile_x: u32,
     tile_y: u32,
+) -> Result<Vec<u8>> {
+    encode_exr_tiled_with_line_order(
+        width,
+        height,
+        channels,
+        planes,
+        compression,
+        tile_x,
+        tile_y,
+        LineOrder::IncreasingY,
+    )
+}
+
+/// [`encode_exr_tiled`] with an explicit `lineOrder`.
+///
+/// All three orders are valid for tiled files. The tile offset table is
+/// ALWAYS keyed in the canonical ty-outer / tx-inner (INCREASING_Y)
+/// walk — entry `i` points at canonical tile `i` wherever it lives in
+/// the file; only the physical storage order of the tile chunks
+/// changes (the observer-established wire fact — reference readers
+/// reject a table whose entry order follows non-canonical storage):
+///
+/// * `IncreasingY` — tile rows top-first (canonical order).
+/// * `DecreasingY` — tile rows bottom-first (`ty` descending, `tx`
+///   ascending within each row).
+/// * `RandomY` — no guaranteed order; this writer emits a
+///   deterministic shuffle so the layout is reproducible.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_exr_tiled_with_line_order(
+    width: u32,
+    height: u32,
+    channels: &[Channel],
+    planes: &[&[f32]],
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
 ) -> Result<Vec<u8>> {
     if channels.len() != planes.len() {
         return Err(ExrError::invalid(format!(
@@ -323,7 +417,7 @@ pub fn encode_exr_tiled(
     let ty_count = height.div_ceil(tile_y);
     let chunk_count = tx_count * ty_count;
 
-    let attrs = build_tiled_attributes(
+    let mut attrs = build_tiled_attributes(
         channels,
         width,
         height,
@@ -332,6 +426,10 @@ pub fn encode_exr_tiled(
         tile_y,
         chunk_count,
     );
+    if let Some(lo) = attrs.iter_mut().find(|a| a.name == "lineOrder") {
+        lo.value = AttributeValue::LineOrder(line_order);
+    }
+    let attrs = attrs;
 
     // Set the version-field single_tile bit (0x200) and format version 2.
     let version = VersionField::from_u32(2 | 0x200);
@@ -409,38 +507,65 @@ pub fn encode_exr_tiled(
         }
     }
 
-    // Compute absolute byte offsets for each tile chunk.
-    let offset_table_size = (chunk_count as usize) * 8;
-    let chunks_start = header_bytes.len() + offset_table_size;
-    let mut tile_offsets: Vec<u64> = Vec::with_capacity(chunk_count as usize);
-    {
-        let mut running = chunks_start;
-        for (_tx, _ty, p) in &tile_payloads {
-            tile_offsets.push(running as u64);
-            running += 20 + p.len(); // 4×i32 coords + i32 size + payload
+    // Physical chunk storage follows `lineOrder`; the offset table is
+    // ALWAYS keyed in the canonical ty-outer / tx-inner order (entry i
+    // ↔ canonical tile i), wherever each tile lives in the file.
+    // `tile_payloads` is built canonically, so index it through a
+    // storage permutation.
+    let n = chunk_count as usize;
+    let storage_order: Vec<usize> = match line_order {
+        LineOrder::IncreasingY => (0..n).collect(),
+        LineOrder::DecreasingY => {
+            // Tile rows bottom-first: ty descending, tx ascending.
+            let mut v = Vec::with_capacity(n);
+            for ty in (0..ty_count).rev() {
+                for tx in 0..tx_count {
+                    v.push((ty * tx_count + tx) as usize);
+                }
+            }
+            v
         }
-    }
-    let total_size = tile_offsets
-        .last()
-        .map(|&o| o as usize)
-        .unwrap_or(chunks_start)
-        + tile_payloads
-            .last()
-            .map(|(_, _, p)| 20 + p.len())
-            .unwrap_or(0);
+        LineOrder::RandomY => {
+            // RANDOM_Y promises no order at all; emit a deterministic
+            // shuffle (fixed-seed LCG Fisher-Yates) so output bytes are
+            // reproducible run-to-run.
+            let mut v: Vec<usize> = (0..n).collect();
+            let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+            for i in (1..n).rev() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let j = ((state >> 33) as usize) % (i + 1);
+                v.swap(i, j);
+            }
+            v
+        }
+    };
 
-    let mut out = Vec::with_capacity(total_size);
+    // Compute absolute byte offsets for each tile chunk (keyed by
+    // canonical index, assigned in storage order).
+    let offset_table_size = n * 8;
+    let chunks_start = header_bytes.len() + offset_table_size;
+    let mut tile_offsets: Vec<u64> = vec![0; n];
+    let mut running = chunks_start;
+    for &ci in &storage_order {
+        tile_offsets[ci] = running as u64;
+        running += 20 + tile_payloads[ci].2.len(); // 4×i32 coords + i32 size + payload
+    }
+
+    let mut out = Vec::with_capacity(running);
     out.extend_from_slice(&header_bytes);
     for &off in &tile_offsets {
         out.extend_from_slice(&off.to_le_bytes());
     }
-    for (tx, ty, p) in tile_payloads {
-        out.extend_from_slice(&(tx as i32).to_le_bytes());
-        out.extend_from_slice(&(ty as i32).to_le_bytes());
+    for &ci in &storage_order {
+        let (tx, ty, p) = &tile_payloads[ci];
+        out.extend_from_slice(&(*tx as i32).to_le_bytes());
+        out.extend_from_slice(&(*ty as i32).to_le_bytes());
         out.extend_from_slice(&0i32.to_le_bytes()); // lvlx
         out.extend_from_slice(&0i32.to_le_bytes()); // lvly
         out.extend_from_slice(&(p.len() as i32).to_le_bytes());
-        out.extend_from_slice(&p);
+        out.extend_from_slice(p);
     }
     Ok(out)
 }

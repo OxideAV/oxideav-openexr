@@ -23,7 +23,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline_rgba_float_with, encode_exr_scanline_rgba_float_with_line_order, parse_exr,
+    encode_exr_scanline_rgba_float_with, encode_exr_scanline_rgba_float_with_line_order,
+    encode_exr_tiled_rgba_float_with, encode_exr_tiled_rgba_float_with_line_order, parse_exr,
     Compression, LineOrder,
 };
 
@@ -239,6 +240,141 @@ fn decreasing_y_all_compressions_roundtrip() {
 }
 
 // ---------------------------------------------------------------------
+// Tiled (ONE_LEVEL) — DECREASING_Y and RANDOM_Y are both valid
+// ---------------------------------------------------------------------
+
+/// Read the tile offset table + per-entry chunk coordinates of a
+/// single-part tiled file. Returns (offset, tx, ty) per table entry.
+fn tiled_table_entries(bytes: &[u8], n: usize) -> Vec<(usize, i32, i32)> {
+    let (_, header_end) = find_line_order_and_header_end(bytes);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = header_end + i * 8;
+        let off = u64::from_le_bytes(bytes[p..p + 8].try_into().unwrap()) as usize;
+        let tx = i32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        let ty = i32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+        out.push((off, tx, ty));
+    }
+    out
+}
+
+/// DECREASING_Y tiled: table entries stay keyed to the canonical
+/// ty-outer/tx-inner walk while physical storage runs bottom-row-first.
+#[test]
+fn decreasing_y_tiled_wire_layout() {
+    let (w, h) = (32u32, 40u32); // 16×16 tiles → 2×3 grid, 6 chunks
+    let px = gradient(w, h);
+    let bytes = encode_exr_tiled_rgba_float_with_line_order(
+        w,
+        h,
+        &px,
+        Compression::Zip,
+        16,
+        16,
+        LineOrder::DecreasingY,
+    )
+    .unwrap();
+
+    let (lo_off, _) = find_line_order_and_header_end(&bytes);
+    assert_eq!(bytes[lo_off], 1, "lineOrder attribute value must be 1");
+
+    let entries = tiled_table_entries(&bytes, 6);
+    // Canonical keying: entry i ↔ tile (i % 2, i / 2).
+    for (i, &(_, tx, ty)) in entries.iter().enumerate() {
+        assert_eq!((tx, ty), ((i % 2) as i32, (i / 2) as i32));
+    }
+    // Bottom tile row (ty=2, entries 4 and 5) must be stored first.
+    let min_off = entries.iter().map(|e| e.0).min().unwrap();
+    assert!(
+        entries[4].0 == min_off || entries[5].0 == min_off,
+        "bottom tile row must be stored first (offsets {:?})",
+        entries.iter().map(|e| e.0).collect::<Vec<_>>()
+    );
+
+    assert_planes_match(&bytes, &px, w, h, 0.0);
+}
+
+/// RANDOM_Y tiled: valid layout, deterministic output, decodes exactly.
+#[test]
+fn random_y_tiled_roundtrip_and_deterministic() {
+    let (w, h) = (32u32, 40u32);
+    let px = gradient(w, h);
+    let enc = || {
+        encode_exr_tiled_rgba_float_with_line_order(
+            w,
+            h,
+            &px,
+            Compression::Rle,
+            16,
+            16,
+            LineOrder::RandomY,
+        )
+        .unwrap()
+    };
+    let bytes = enc();
+    assert_eq!(bytes, enc(), "RANDOM_Y output must be deterministic");
+
+    let (lo_off, _) = find_line_order_and_header_end(&bytes);
+    assert_eq!(bytes[lo_off], 2, "lineOrder attribute value must be 2");
+
+    // Table still canonically keyed.
+    let entries = tiled_table_entries(&bytes, 6);
+    for (i, &(_, tx, ty)) in entries.iter().enumerate() {
+        assert_eq!((tx, ty), ((i % 2) as i32, (i / 2) as i32));
+    }
+    // Storage must actually be shuffled (not canonical order).
+    let offs: Vec<usize> = entries.iter().map(|e| e.0).collect();
+    assert!(
+        offs.windows(2).any(|w| w[1] < w[0]),
+        "RANDOM_Y storage unexpectedly canonical: {offs:?}"
+    );
+
+    assert_planes_match(&bytes, &px, w, h, 0.0);
+}
+
+/// IncreasingY tiled output is byte-identical through both entry points.
+#[test]
+fn increasing_y_tiled_explicit_matches_default() {
+    let (w, h) = (32u32, 40u32);
+    let px = gradient(w, h);
+    let a = encode_exr_tiled_rgba_float_with(w, h, &px, Compression::Zip, 16, 16).unwrap();
+    let b = encode_exr_tiled_rgba_float_with_line_order(
+        w,
+        h,
+        &px,
+        Compression::Zip,
+        16,
+        16,
+        LineOrder::IncreasingY,
+    )
+    .unwrap();
+    assert_eq!(a, b);
+}
+
+/// Tiled DECREASING_Y + RANDOM_Y round-trip across every compression
+/// scheme, including edge tiles (13×9 tiles over 32×40).
+#[test]
+fn tiled_line_orders_all_compressions_roundtrip() {
+    for lo in [LineOrder::DecreasingY, LineOrder::RandomY] {
+        for (comp, tol) in [
+            (Compression::None, 0.0),
+            (Compression::Zip, 0.0),
+            (Compression::Zips, 0.0),
+            (Compression::Rle, 0.0),
+            (Compression::Pxr24, 1.0 / 32768.0),
+            (Compression::B44, 0.0),
+            (Compression::B44a, 0.0),
+        ] {
+            let (w, h) = (32u32, 40u32);
+            let px = gradient(w, h);
+            let bytes =
+                encode_exr_tiled_rgba_float_with_line_order(w, h, &px, comp, 13, 9, lo).unwrap();
+            assert_planes_match(&bytes, &px, w, h, tol);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Reference-binary validation (auto-skip when absent)
 // ---------------------------------------------------------------------
 
@@ -303,4 +439,66 @@ fn decreasing_y_scanline_reference_validated() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Tiled DECREASING_Y and RANDOM_Y files must be accepted by the
+/// reference readers, echo the right lineOrder, and convert
+/// pixel-exactly.
+#[test]
+fn tiled_line_orders_reference_validated() {
+    let (w, h) = (32u32, 40u32);
+    let px = gradient(w, h);
+    for (lo, echo) in [
+        (LineOrder::DecreasingY, "decreasing y"),
+        (LineOrder::RandomY, "random y"),
+    ] {
+        let bytes =
+            encode_exr_tiled_rgba_float_with_line_order(w, h, &px, Compression::Zip, 16, 16, lo)
+                .unwrap();
+        let dir = tempdir();
+        let path = format!("{dir}/tiled.exr");
+        std::fs::write(&path, &bytes).unwrap();
+
+        if tool_available("exrheader") {
+            let out = Command::new("exrheader").arg(&path).output().unwrap();
+            assert!(out.status.success(), "exrheader rejected {echo} tiled file");
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                text.contains(echo),
+                "exrheader did not echo {echo}:\n{text}"
+            );
+        } else {
+            eprintln!("exrheader not available, skipping ({echo})");
+        }
+
+        if tool_available("exrinfo") {
+            let out = Command::new("exrinfo").arg(&path).output().unwrap();
+            assert!(
+                out.status.success(),
+                "exrinfo rejected {echo} tiled file: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        } else {
+            eprintln!("exrinfo not available, skipping ({echo})");
+        }
+
+        if tool_available("exrmetrics") {
+            let conv = format!("{dir}/conv.exr");
+            let out = Command::new("exrmetrics")
+                .args(["--convert", "-z", "none", "-o", &conv, &path])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "exrmetrics --convert rejected {echo} tiled file: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let converted = std::fs::read(&conv).unwrap();
+            assert_planes_match(&converted, &px, w, h, 0.0);
+        } else {
+            eprintln!("exrmetrics not available, skipping ({echo})");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

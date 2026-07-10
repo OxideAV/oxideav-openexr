@@ -420,7 +420,10 @@ pub use multipart_mixed_encoder::{
 };
 pub use multipart_ripmap_encoder::{encode_exr_multipart_tiled_ripmap, MultipartRipmapTiledPart};
 pub use multipart_tiled_encoder::{encode_exr_multipart_tiled, MultipartTiledPart};
-pub use tile_encoder::{encode_exr_tiled, encode_exr_tiled_rgba_float_with};
+pub use tile_encoder::{
+    encode_exr_tiled, encode_exr_tiled_rgba_float_with,
+    encode_exr_tiled_rgba_float_with_line_order, encode_exr_tiled_with_line_order,
+};
 pub use types::{
     Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EnvMap, Keycode,
     LineOrder, PixelType, Preview, Timecode, EXR_MAGIC,
