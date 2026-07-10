@@ -407,9 +407,10 @@ pub use header::{
 pub use image::{ExrImage, ExrPlane};
 pub use mipmap_encoder::{
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap,
-    encode_exr_tiled_rgba_float_mipmap_box_filter, encode_exr_tiled_rgba_float_ripmap_box_filter,
-    encode_exr_tiled_ripmap, mipmap_level_count_round_down, ripmap_level_counts_round_down,
-    MipmapLevel, RipmapLevel, RipmapPyramid,
+    encode_exr_tiled_mipmap_with_line_order, encode_exr_tiled_rgba_float_mipmap_box_filter,
+    encode_exr_tiled_rgba_float_ripmap_box_filter, encode_exr_tiled_ripmap,
+    encode_exr_tiled_ripmap_with_line_order, mipmap_level_count_round_down,
+    ripmap_level_counts_round_down, MipmapLevel, RipmapLevel, RipmapPyramid,
 };
 pub use multipart_encoder::{
     encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,

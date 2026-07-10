@@ -23,9 +23,11 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline_rgba_float_with, encode_exr_scanline_rgba_float_with_line_order,
-    encode_exr_tiled_rgba_float_with, encode_exr_tiled_rgba_float_with_line_order, parse_exr,
-    Compression, LineOrder,
+    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_scanline_rgba_float_with,
+    encode_exr_scanline_rgba_float_with_line_order, encode_exr_tiled_mipmap,
+    encode_exr_tiled_mipmap_with_line_order, encode_exr_tiled_rgba_float_with,
+    encode_exr_tiled_rgba_float_with_line_order, encode_exr_tiled_ripmap_with_line_order,
+    parse_exr, parse_exr_tiled_multilevel, Channel, Compression, LineOrder, PixelType,
 };
 
 fn tool_available(bin: &str) -> bool {
@@ -371,6 +373,184 @@ fn tiled_line_orders_all_compressions_roundtrip() {
                 encode_exr_tiled_rgba_float_with_line_order(w, h, &px, comp, 13, 9, lo).unwrap();
             assert_planes_match(&bytes, &px, w, h, tol);
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Multilevel (MIPMAP / RIPMAP) tiled line orders
+// ---------------------------------------------------------------------
+
+fn gray_channel() -> Vec<Channel> {
+    vec![Channel {
+        name: "G".to_string(),
+        pixel_type: PixelType::Float,
+        p_linear: false,
+        x_sampling: 1,
+        y_sampling: 1,
+    }]
+}
+
+fn gray_plane(w: u32, h: u32) -> Vec<f32> {
+    (0..(w * h) as usize)
+        .map(|i| (i % 251) as f32 / 250.0)
+        .collect()
+}
+
+/// Every level of a DECREASING_Y / RANDOM_Y mipmap pyramid decodes
+/// exactly; the offset table stays keyed to the canonical walk; the
+/// IncreasingY explicit entry is byte-identical to the default.
+#[test]
+fn multilevel_mipmap_line_orders_roundtrip() {
+    let (w, h) = (32u32, 32u32);
+    let chs = gray_channel();
+    let pyramid = build_box_filter_pyramid(w, h, &[gray_plane(w, h)]);
+
+    let base = encode_exr_tiled_mipmap(&chs, &pyramid, Compression::Zip, 16, 16).unwrap();
+    let inc = encode_exr_tiled_mipmap_with_line_order(
+        &chs,
+        &pyramid,
+        Compression::Zip,
+        16,
+        16,
+        LineOrder::IncreasingY,
+    )
+    .unwrap();
+    assert_eq!(base, inc, "explicit IncreasingY must match default");
+
+    for lo in [LineOrder::DecreasingY, LineOrder::RandomY] {
+        let bytes =
+            encode_exr_tiled_mipmap_with_line_order(&chs, &pyramid, Compression::Zip, 16, 16, lo)
+                .unwrap();
+        let img = parse_exr_tiled_multilevel(&bytes).unwrap();
+        assert_eq!(img.levels.len(), pyramid.len());
+        for (lvl, want) in img.levels.iter().zip(pyramid.iter()) {
+            assert_eq!((lvl.width, lvl.height), (want.width, want.height));
+            for (got, want_v) in lvl.planes[0].samples.iter().zip(want.planes[0].iter()) {
+                assert_eq!(got, want_v, "level {} sample mismatch", lvl.level_x);
+            }
+        }
+
+        // Offset table canonical keying: walk table entries, check each
+        // chunk header's (tx, ty, lvlx, lvly) matches the canonical
+        // enumeration (levels ascending, ty outer, tx inner).
+        let (_, header_end) = find_line_order_and_header_end(&bytes);
+        let mut canonical = Vec::new();
+        for (l, lvl) in pyramid.iter().enumerate() {
+            for ty in 0..lvl.height.div_ceil(16) {
+                for tx in 0..lvl.width.div_ceil(16) {
+                    canonical.push((tx as i32, ty as i32, l as i32, l as i32));
+                }
+            }
+        }
+        for (i, want) in canonical.iter().enumerate() {
+            let p = header_end + i * 8;
+            let off = u64::from_le_bytes(bytes[p..p + 8].try_into().unwrap()) as usize;
+            let tx = i32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+            let ty = i32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+            let lx = i32::from_le_bytes(bytes[off + 8..off + 12].try_into().unwrap());
+            let ly = i32::from_le_bytes(bytes[off + 12..off + 16].try_into().unwrap());
+            assert_eq!(
+                (tx, ty, lx, ly),
+                *want,
+                "table entry {i} keyed to wrong chunk under {lo:?}"
+            );
+        }
+    }
+}
+
+/// Every cell of a DECREASING_Y / RANDOM_Y ripmap grid decodes exactly.
+#[test]
+fn multilevel_ripmap_line_orders_roundtrip() {
+    let (w, h) = (32u32, 16u32);
+    let chs = gray_channel();
+    let pyramid = build_box_filter_ripmap(w, h, &[gray_plane(w, h)]);
+
+    for lo in [LineOrder::DecreasingY, LineOrder::RandomY] {
+        let bytes =
+            encode_exr_tiled_ripmap_with_line_order(&chs, &pyramid, Compression::Rle, 8, 8, lo)
+                .unwrap();
+        let img = parse_exr_tiled_multilevel(&bytes).unwrap();
+        let mut idx = 0;
+        for (lvly, row) in pyramid.grid.iter().enumerate() {
+            for (lvlx, cell) in row.iter().enumerate() {
+                let lvl = &img.levels[idx];
+                idx += 1;
+                assert_eq!(
+                    (lvl.level_x, lvl.level_y, lvl.width, lvl.height),
+                    (lvlx as u32, lvly as u32, cell.width, cell.height)
+                );
+                for (got, want_v) in lvl.planes[0].samples.iter().zip(cell.planes[0].iter()) {
+                    assert_eq!(got, want_v, "cell ({lvlx},{lvly}) sample mismatch");
+                }
+            }
+        }
+        assert_eq!(idx, img.levels.len());
+    }
+}
+
+/// Reference validation of multilevel non-default line orders: header
+/// echo + independent reader + pixel-exact convert at level 0.
+#[test]
+fn multilevel_line_orders_reference_validated() {
+    let (w, h) = (32u32, 32u32);
+    let chs = gray_channel();
+    let plane = gray_plane(w, h);
+    let pyramid = build_box_filter_pyramid(w, h, std::slice::from_ref(&plane));
+
+    for (lo, echo) in [
+        (LineOrder::DecreasingY, "decreasing y"),
+        (LineOrder::RandomY, "random y"),
+    ] {
+        let bytes =
+            encode_exr_tiled_mipmap_with_line_order(&chs, &pyramid, Compression::Zip, 16, 16, lo)
+                .unwrap();
+        let dir = tempdir();
+        let path = format!("{dir}/mip.exr");
+        std::fs::write(&path, &bytes).unwrap();
+
+        if tool_available("exrheader") {
+            let out = Command::new("exrheader").arg(&path).output().unwrap();
+            assert!(out.status.success(), "exrheader rejected {echo} mipmap");
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains(echo), "no {echo} echo:\n{text}");
+        } else {
+            eprintln!("exrheader not available, skipping ({echo})");
+        }
+
+        if tool_available("exrinfo") {
+            let out = Command::new("exrinfo").arg(&path).output().unwrap();
+            assert!(
+                out.status.success(),
+                "exrinfo rejected {echo} mipmap: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        } else {
+            eprintln!("exrinfo not available, skipping ({echo})");
+        }
+
+        if tool_available("exrmetrics") {
+            let conv = format!("{dir}/conv.exr");
+            let out = Command::new("exrmetrics")
+                .args(["--convert", "-z", "none", "-o", &conv, &path])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "exrmetrics --convert rejected {echo} mipmap: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // Level 0 of the converted file must match the source plane.
+            let converted = std::fs::read(&conv).unwrap();
+            let img = parse_exr(&converted).unwrap();
+            assert_eq!((img.width(), img.height()), (w, h));
+            for (got, want) in img.planes[0].samples.iter().zip(plane.iter()) {
+                assert_eq!(got, want, "converted {echo} level-0 sample mismatch");
+            }
+        } else {
+            eprintln!("exrmetrics not available, skipping ({echo})");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

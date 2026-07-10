@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Wire-layout, determinism, all-compression edge-tile round-trip, and
   reference validation (header echo + independent-reader acceptance +
   convert pixel-exact) tests added.
+- Round-410 **multilevel `lineOrder` write support**
+  (`encode_exr_tiled_mipmap_with_line_order` +
+  `encode_exr_tiled_ripmap_with_line_order`). DECREASING_Y stores each
+  level cell's tile rows bottom-first (canonical level walk kept);
+  RANDOM_Y shuffles the whole chunk list deterministically; the tile
+  offset table stays keyed to the canonical walk in every case. The
+  shared multilevel chunk-emission tail is factored into
+  `emit_tiled_chunks` / `multilevel_storage_order`. Tests pin
+  full-pyramid / full-grid pixel-exact decode, canonical table keying
+  per entry, byte-identical IncreasingY output, and reference
+  validation of both non-default orders.
 
 ### Fixed
 

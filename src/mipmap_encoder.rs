@@ -199,6 +199,33 @@ pub fn encode_exr_tiled_mipmap(
     tile_x: u32,
     tile_y: u32,
 ) -> Result<Vec<u8>> {
+    encode_exr_tiled_mipmap_with_line_order(
+        channels,
+        pyramid,
+        compression,
+        tile_x,
+        tile_y,
+        LineOrder::IncreasingY,
+    )
+}
+
+/// [`encode_exr_tiled_mipmap`] with an explicit `lineOrder`.
+///
+/// The tile offset table is ALWAYS keyed in the canonical walk (levels
+/// ascending, ty-outer/tx-inner within each level) regardless of
+/// `lineOrder` — the observer-established wire fact is that `lineOrder`
+/// governs only the physical storage order of the chunks. DECREASING_Y
+/// stores each level's tile rows bottom-first (ty descending, tx
+/// ascending), levels still ascending; RANDOM_Y emits a deterministic
+/// fixed-seed shuffle of the whole chunk list.
+pub fn encode_exr_tiled_mipmap_with_line_order(
+    channels: &[Channel],
+    pyramid: &[MipmapLevel],
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
+) -> Result<Vec<u8>> {
     if pyramid.is_empty() {
         return Err(ExrError::invalid(
             "mipmap pyramid must have at least one level".to_string(),
@@ -279,7 +306,7 @@ pub fn encode_exr_tiled_mipmap(
         chunk_count += lvl.width.div_ceil(tile_x) * lvl.height.div_ceil(tile_y);
     }
 
-    let attrs = build_tiled_mipmap_attributes(
+    let mut attrs = build_tiled_mipmap_attributes(
         channels,
         width,
         height,
@@ -288,6 +315,9 @@ pub fn encode_exr_tiled_mipmap(
         tile_y,
         chunk_count,
     );
+    if let Some(lo) = attrs.iter_mut().find(|a| a.name == "lineOrder") {
+        lo.value = AttributeValue::LineOrder(line_order);
+    }
 
     let version = VersionField::from_u32(2 | 0x200);
     let header_bytes = encode_header(version, &attrs);
@@ -347,40 +377,97 @@ pub fn encode_exr_tiled_mipmap(
         }
     }
 
-    // Compute absolute byte offsets for each tile chunk.
-    let offset_table_size = (chunk_count as usize) * 8;
-    let chunks_start = header_bytes.len() + offset_table_size;
-    let mut tile_offsets: Vec<u64> = Vec::with_capacity(chunk_count as usize);
-    {
-        let mut running = chunks_start;
-        for (_, _, _, _, p) in &tile_chunks {
-            tile_offsets.push(running as u64);
-            running += 20 + p.len();
+    let storage_order = multilevel_storage_order(&tile_chunks, line_order);
+    Ok(emit_tiled_chunks(
+        &header_bytes,
+        &tile_chunks,
+        &storage_order,
+    ))
+}
+
+/// Storage permutation over a canonical multilevel tile-chunk list.
+///
+/// `tile_chunks` must be in canonical (offset-table) order. The table is
+/// always keyed canonically; this permutation controls only where each
+/// chunk physically lands in the file:
+///
+/// * `IncreasingY` — identity (canonical order).
+/// * `DecreasingY` — within each level cell, tile rows bottom-first
+///   (ty descending, tx ascending); the canonical level walk is kept.
+/// * `RandomY` — deterministic fixed-seed LCG Fisher-Yates shuffle so
+///   output bytes are reproducible run-to-run.
+fn multilevel_storage_order(
+    tile_chunks: &[(u32, u32, u32, u32, Vec<u8>)],
+    line_order: LineOrder,
+) -> Vec<usize> {
+    let n = tile_chunks.len();
+    match line_order {
+        LineOrder::IncreasingY => (0..n).collect(),
+        LineOrder::DecreasingY => {
+            let mut v: Vec<usize> = (0..n).collect();
+            // Canonical input is grouped by level cell (mipmap: lx == ly
+            // ascending; ripmap: ly outer, lx inner), so a stable sort by
+            // (cell, ty descending, tx ascending) flips only the row
+            // order inside each cell.
+            v.sort_by_key(|&i| {
+                let (tx, ty, lx, ly, _) = &tile_chunks[i];
+                (
+                    (u64::from(*ly) << 32) | u64::from(*lx),
+                    std::cmp::Reverse(*ty),
+                    *tx,
+                )
+            });
+            v
+        }
+        LineOrder::RandomY => {
+            let mut v: Vec<usize> = (0..n).collect();
+            let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+            for i in (1..n).rev() {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let j = ((state >> 33) as usize) % (i + 1);
+                v.swap(i, j);
+            }
+            v
         }
     }
-    let total_size = tile_offsets
-        .last()
-        .map(|&o| o as usize)
-        .unwrap_or(chunks_start)
-        + tile_chunks
-            .last()
-            .map(|(_, _, _, _, p)| 20 + p.len())
-            .unwrap_or(0);
+}
 
-    let mut out = Vec::with_capacity(total_size);
-    out.extend_from_slice(&header_bytes);
+/// Assemble `header | canonical-keyed offset table | chunks in storage
+/// order`. `tile_chunks` is the canonical chunk list; `storage_order`
+/// gives the physical emission sequence (indices into `tile_chunks`).
+/// Offset-table entry `i` always points at canonical chunk `i`.
+fn emit_tiled_chunks(
+    header_bytes: &[u8],
+    tile_chunks: &[(u32, u32, u32, u32, Vec<u8>)],
+    storage_order: &[usize],
+) -> Vec<u8> {
+    let n = tile_chunks.len();
+    let offset_table_size = n * 8;
+    let chunks_start = header_bytes.len() + offset_table_size;
+    let mut tile_offsets: Vec<u64> = vec![0; n];
+    let mut running = chunks_start;
+    for &ci in storage_order {
+        tile_offsets[ci] = running as u64;
+        running += 20 + tile_chunks[ci].4.len();
+    }
+
+    let mut out = Vec::with_capacity(running);
+    out.extend_from_slice(header_bytes);
     for &off in &tile_offsets {
         out.extend_from_slice(&off.to_le_bytes());
     }
-    for (tx, ty, lx, ly, p) in tile_chunks {
-        out.extend_from_slice(&(tx as i32).to_le_bytes());
-        out.extend_from_slice(&(ty as i32).to_le_bytes());
-        out.extend_from_slice(&(lx as i32).to_le_bytes());
-        out.extend_from_slice(&(ly as i32).to_le_bytes());
+    for &ci in storage_order {
+        let (tx, ty, lx, ly, p) = &tile_chunks[ci];
+        out.extend_from_slice(&(*tx as i32).to_le_bytes());
+        out.extend_from_slice(&(*ty as i32).to_le_bytes());
+        out.extend_from_slice(&(*lx as i32).to_le_bytes());
+        out.extend_from_slice(&(*ly as i32).to_le_bytes());
         out.extend_from_slice(&(p.len() as i32).to_le_bytes());
-        out.extend_from_slice(&p);
+        out.extend_from_slice(p);
     }
-    Ok(out)
+    out
 }
 
 fn build_tiled_mipmap_attributes(
@@ -707,6 +794,31 @@ pub fn encode_exr_tiled_ripmap(
     tile_x: u32,
     tile_y: u32,
 ) -> Result<Vec<u8>> {
+    encode_exr_tiled_ripmap_with_line_order(
+        channels,
+        pyramid,
+        compression,
+        tile_x,
+        tile_y,
+        LineOrder::IncreasingY,
+    )
+}
+
+/// [`encode_exr_tiled_ripmap`] with an explicit `lineOrder`.
+///
+/// The tile offset table is ALWAYS keyed in the canonical walk (`lvly`
+/// outer, `lvlx` inner across the grid, ty-outer/tx-inner within each
+/// cell) regardless of `lineOrder`; only the physical chunk storage
+/// order changes. DECREASING_Y stores each cell's tile rows
+/// bottom-first; RANDOM_Y emits a deterministic fixed-seed shuffle.
+pub fn encode_exr_tiled_ripmap_with_line_order(
+    channels: &[Channel],
+    pyramid: &RipmapPyramid,
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
+) -> Result<Vec<u8>> {
     if pyramid.grid.is_empty() || pyramid.grid[0].is_empty() {
         return Err(ExrError::invalid(
             "ripmap pyramid grid must have at least one cell".to_string(),
@@ -798,7 +910,7 @@ pub fn encode_exr_tiled_ripmap(
         }
     }
 
-    let attrs = build_tiled_ripmap_attributes(
+    let mut attrs = build_tiled_ripmap_attributes(
         channels,
         width,
         height,
@@ -807,6 +919,9 @@ pub fn encode_exr_tiled_ripmap(
         tile_y,
         chunk_count,
     );
+    if let Some(lo) = attrs.iter_mut().find(|a| a.name == "lineOrder") {
+        lo.value = AttributeValue::LineOrder(line_order);
+    }
 
     let version = VersionField::from_u32(2 | 0x200);
     let header_bytes = encode_header(version, &attrs);
@@ -866,40 +981,12 @@ pub fn encode_exr_tiled_ripmap(
         }
     }
 
-    // Absolute byte offsets for each tile chunk.
-    let offset_table_size = (chunk_count as usize) * 8;
-    let chunks_start = header_bytes.len() + offset_table_size;
-    let mut tile_offsets: Vec<u64> = Vec::with_capacity(chunk_count as usize);
-    {
-        let mut running = chunks_start;
-        for (_, _, _, _, p) in &tile_chunks {
-            tile_offsets.push(running as u64);
-            running += 20 + p.len();
-        }
-    }
-    let total_size = tile_offsets
-        .last()
-        .map(|&o| o as usize)
-        .unwrap_or(chunks_start)
-        + tile_chunks
-            .last()
-            .map(|(_, _, _, _, p)| 20 + p.len())
-            .unwrap_or(0);
-
-    let mut out = Vec::with_capacity(total_size);
-    out.extend_from_slice(&header_bytes);
-    for &off in &tile_offsets {
-        out.extend_from_slice(&off.to_le_bytes());
-    }
-    for (tx, ty, lx, ly, p) in tile_chunks {
-        out.extend_from_slice(&(tx as i32).to_le_bytes());
-        out.extend_from_slice(&(ty as i32).to_le_bytes());
-        out.extend_from_slice(&(lx as i32).to_le_bytes());
-        out.extend_from_slice(&(ly as i32).to_le_bytes());
-        out.extend_from_slice(&(p.len() as i32).to_le_bytes());
-        out.extend_from_slice(&p);
-    }
-    Ok(out)
+    let storage_order = multilevel_storage_order(&tile_chunks, line_order);
+    Ok(emit_tiled_chunks(
+        &header_bytes,
+        &tile_chunks,
+        &storage_order,
+    ))
 }
 
 fn build_tiled_ripmap_attributes(
