@@ -164,10 +164,12 @@ fn pxr24_channel_bytes(pt: PixelType) -> usize {
 /// FLOAT codes are the 24-bit reduction; HALF/UINT codes are the raw
 /// little-endian sample value widened to `u32`.
 ///
-/// Returns the zlib stream, or — per the universal raw-fallback rule —
-/// the reorganised bytes themselves when deflate did not shrink them. The
-/// caller distinguishes the two by comparing the returned length against
-/// the uncompressed (native) block size, exactly as the decoder does.
+/// Returns the zlib stream unconditionally. Callers apply the shared
+/// §0 raw fallback against the NATIVE interleaved chunk bytes: when the
+/// returned stream is not smaller than the native chunk, the native
+/// bytes are stored verbatim (never the intermediate reorganised
+/// stream — the fallback payload a conforming reader expects at
+/// `compressed_len == uncompressed_len` is the §0 in-memory layout).
 pub(crate) fn build_pxr24_block_payload(
     channels: &[Channel],
     planes: &[&[f32]],
@@ -263,15 +265,7 @@ pub(crate) fn build_pxr24_block_payload(
     }
     debug_assert_eq!(wp, reorg_size);
 
-    let compressed = zlib_deflate(&reorg)?;
-    // Universal raw-fallback (observer-spec §0): if deflate did not
-    // shrink the reorganised stream, store it uncompressed. The decoder
-    // detects this by `payload.len() == reorg_size`.
-    Ok(if compressed.len() >= reorg.len() {
-        reorg
-    } else {
-        compressed
-    })
+    zlib_deflate(&reorg)
 }
 
 /// Gather one B44 / B44A chunk's per-channel planes from the f32 source
@@ -611,8 +605,18 @@ pub fn encode_exr_scanline(
                 // PXR24 reorganises the FLOAT-reduced / HALF / UINT codes
                 // into byte-plane + horizontal-delta form straight from
                 // the planes (a different layout from the native `raw`
-                // stream), then zlib-deflates with a raw fallback.
-                build_pxr24_block_payload(channels, planes, width, row0, lines_in_block)?
+                // stream), then zlib-deflates. Shared §0 raw fallback:
+                // when deflate does not shrink below the NATIVE chunk
+                // size, store the native bytes (a conforming reader
+                // treats `compressed_len == uncompressed_len` as the raw
+                // §0 layout).
+                let deflated =
+                    build_pxr24_block_payload(channels, planes, width, row0, lines_in_block)?;
+                if deflated.len() >= raw.len() {
+                    raw
+                } else {
+                    deflated
+                }
             }
             Compression::B44 | Compression::B44a => {
                 // B44/B44A regroup the chunk into per-channel contiguous

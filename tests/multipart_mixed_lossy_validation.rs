@@ -387,30 +387,51 @@ fn mixed_pxr24_and_b44_and_zip_in_one_file() {
 use oxideav_openexr::{build_box_filter_pyramid, build_box_filter_ripmap, MultipartMixedImage};
 
 /// Re-encode each decoded level through the given scheme via the ONE_LEVEL
-/// tiled path and decode again; the decoded levels are on the quantisation
-/// lattice so the second pass must be bit-stable.
+/// tiled path and decode again, twice with the same chunk shape; from
+/// the second pass onward the decode must be bit-stable.
+///
+/// Note the first re-encode is NOT required to land back on the
+/// decoded input bit-for-bit: the shared §0 raw fallback stores an
+/// incompressible chunk's NATIVE bytes at full precision (no lossy
+/// transform), so a level decoded from a raw-fallback chunk of the
+/// original file may only reach the quantisation lattice on this
+/// helper's first pass (whose chunk shape — one full-level tile —
+/// differs from the original file's tiling, so its fallback decision
+/// may differ too). Encode∘decode with a fixed chunk shape is
+/// idempotent after one application: a quantised-path decode is on the
+/// lattice and re-quantises to itself, and a raw-fallback decode is
+/// carried verbatim.
 fn multilevel_fixed_point(img: &MultipartMixedImage, channels: &[Channel], scheme: Compression) {
     let mlt = img.multilevel_tiled().unwrap();
     for lvl in &mlt.levels {
-        let refs: Vec<&[f32]> = lvl.planes.iter().map(|p| p.samples.as_slice()).collect();
-        let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::Tiled {
-            name: "p".to_string(),
-            width: lvl.width,
-            height: lvl.height,
-            tile_x: lvl.width.max(1),
-            tile_y: lvl.height.max(1),
-            channels: channels.to_vec(),
-            planes: refs,
-            compression: scheme,
-        }])
-        .unwrap();
-        let re = parse_exr_multipart_mixed(&bytes).unwrap();
-        let rimg = re[0].image().unwrap();
-        for (ci, plane) in rimg.planes.iter().enumerate() {
-            for (off, &got) in plane.samples.iter().enumerate() {
+        let encode_once = |planes: Vec<&[f32]>| -> Vec<Vec<f32>> {
+            let bytes = encode_exr_multipart_mixed(&[MultipartMixedPart::Tiled {
+                name: "p".to_string(),
+                width: lvl.width,
+                height: lvl.height,
+                tile_x: lvl.width.max(1),
+                tile_y: lvl.height.max(1),
+                channels: channels.to_vec(),
+                planes,
+                compression: scheme,
+            }])
+            .unwrap();
+            let re = parse_exr_multipart_mixed(&bytes).unwrap();
+            re[0]
+                .image()
+                .unwrap()
+                .planes
+                .iter()
+                .map(|p| p.samples.clone())
+                .collect()
+        };
+        let pass1 = encode_once(lvl.planes.iter().map(|p| p.samples.as_slice()).collect());
+        let pass2 = encode_once(pass1.iter().map(|p| p.as_slice()).collect());
+        for (ci, (a, b)) in pass1.iter().zip(pass2.iter()).enumerate() {
+            for (off, (x, y)) in a.iter().zip(b.iter()).enumerate() {
                 assert_eq!(
-                    got.to_bits(),
-                    lvl.planes[ci].samples[off].to_bits(),
+                    x.to_bits(),
+                    y.to_bits(),
                     "multi-level {scheme:?} fixed-point level {}x{} ch{ci}[{off}]",
                     lvl.width,
                     lvl.height

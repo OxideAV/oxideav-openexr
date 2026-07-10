@@ -1493,16 +1493,31 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                     let lines_in_block = (height - row0).min(block_h) as usize;
                     // PXR24 / B44 / B44A reorganise the whole chunk (byte
                     // planes / per-channel 4×4 blocks) directly from the
-                    // f32 source planes; the shared block builders apply the
-                    // §0 raw-fallback internally.
+                    // f32 source planes; the shared §0 raw fallback is
+                    // applied here against the NATIVE interleaved chunk.
                     let payload = match *compression {
-                        Compression::Pxr24 => crate::encoder::build_pxr24_block_payload(
-                            channels,
-                            &plane_refs,
-                            *width,
-                            row0,
-                            lines_in_block,
-                        )?,
+                        Compression::Pxr24 => {
+                            let deflated = crate::encoder::build_pxr24_block_payload(
+                                channels,
+                                &plane_refs,
+                                *width,
+                                row0,
+                                lines_in_block,
+                            )?;
+                            let raw_len =
+                                scanline_block_raw_len(channels, *width, row0, lines_in_block);
+                            if deflated.len() >= raw_len {
+                                scanline_block_raw(
+                                    channels,
+                                    &plane_refs,
+                                    *width,
+                                    row0,
+                                    lines_in_block,
+                                )
+                            } else {
+                                deflated
+                            }
+                        }
                         Compression::B44 | Compression::B44a => {
                             let flat = matches!(*compression, Compression::B44a);
                             let raw_len =
@@ -3681,7 +3696,15 @@ fn compress_one_level_tile(
         let sub_refs: Vec<&[f32]> = sub.iter().map(|p| p.as_slice()).collect();
         return Ok(match compression {
             Compression::Pxr24 => {
-                crate::encoder::build_pxr24_block_payload(channels, &sub_refs, tw as u32, 0, th)?
+                let deflated = crate::encoder::build_pxr24_block_payload(
+                    channels, &sub_refs, tw as u32, 0, th,
+                )?;
+                // Shared §0 raw fallback against the NATIVE tile bytes.
+                if deflated.len() >= raw.len() {
+                    raw
+                } else {
+                    deflated
+                }
             }
             Compression::B44 | Compression::B44a => {
                 let flat = matches!(compression, Compression::B44a);

@@ -50,8 +50,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full-pyramid / full-grid pixel-exact decode, canonical table keying
   per entry, byte-identical IncreasingY output, and reference
   validation of both non-default orders.
+- Round-410 **lossy compression (PXR24 / B44 / B44A) for the
+  single-part multilevel writers** (`encode_exr_tiled_mipmap` /
+  `encode_exr_tiled_ripmap` and their line-order variants) — these
+  previously accepted only NONE / ZIP / ZIPS / RLE while the ONE_LEVEL
+  tiled and multi-part mixed writers already carried the lossy
+  schemes. Tiles gather level-local f32 sub-planes and delegate to the
+  shared ONE_LEVEL tile compressor. New
+  `tests/multilevel_lossy_validation.rs` validates every scheme ×
+  pyramid/grid shape by self round-trip within the scheme's
+  quantisation tolerance plus reference cross-checks, including a
+  **bit-exact reference-decode vs our-decode comparison** of the same
+  file (both sides post-quantisation).
 
 ### Fixed
+
+- Round-410 **PXR24 raw-fallback conformance bug** (caught by the new
+  multilevel lossy tests — small mipmap tiles trip it). When zlib
+  deflate did not shrink a PXR24 chunk, the encoder stored the
+  intermediate reorganised (byte-plane + delta) stream, but the §0 raw
+  fallback a conforming reader expects at
+  `compressed_len == uncompressed_len` is the NATIVE interleaved chunk
+  bytes — reference readers rejected such chunks with a corrupt-chunk
+  decompress error. All five PXR24 encode sites (scanline, tiled,
+  multi-part scanline, mixed scanline + mixed tiled) now apply the
+  shared fallback against the native bytes (never emitting the bare
+  reorganised stream), and `decode_pxr24_payload` detects the fallback
+  by the native uncompressed length, matching the reference readers.
+  Consequence pinned in tests: a raw-fallback PXR24 chunk carries FLOAT
+  samples at **full precision** (the 24-bit reduction only applies on
+  the deflate path), so encode→decode is idempotent per chunk shape
+  from the first re-encode onward rather than always landing on the
+  quantisation lattice (`multilevel_fixed_point` rewritten
+  accordingly).
 
 - Round-398 **multi-part `displayWindow` conformance bug** (found by the
   new independent-reader cross-validation). The multi-part **scanline**,

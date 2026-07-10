@@ -634,7 +634,7 @@ fn compress_tile_payload(raw: Vec<u8>, compression: Compression) -> Result<Vec<u
 /// `raw` is the interleaved native tile stream, used for the shared
 /// raw-fallback decision (store the raw bytes when the reorganised payload
 /// would not be smaller — observer-spec §0).
-fn compress_tile_payload_reorg(
+pub(crate) fn compress_tile_payload_reorg(
     raw: Vec<u8>,
     channels: &[Channel],
     sub_planes: &[&[f32]],
@@ -644,7 +644,14 @@ fn compress_tile_payload_reorg(
 ) -> Result<Vec<u8>> {
     Ok(match compression {
         Compression::Pxr24 => {
-            crate::encoder::build_pxr24_block_payload(channels, sub_planes, tw, 0, th)?
+            let deflated =
+                crate::encoder::build_pxr24_block_payload(channels, sub_planes, tw, 0, th)?;
+            // Shared §0 raw fallback against the NATIVE tile bytes.
+            if deflated.len() >= raw.len() {
+                raw
+            } else {
+                deflated
+            }
         }
         Compression::B44 | Compression::B44a => {
             let flat = matches!(compression, Compression::B44a);

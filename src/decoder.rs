@@ -302,6 +302,15 @@ pub(crate) fn decode_pxr24_payload(
     spec: &Pxr24RowSpec,
     uncompressed_size: usize,
 ) -> Result<Vec<u8>> {
+    // §0 raw fallback: a stored length equal to the NATIVE uncompressed
+    // chunk length means the payload is the raw §0 in-memory layout and
+    // no transform applies (this is how a conforming reader
+    // distinguishes the fallback; the intermediate reorganised stream
+    // is never stored bare).
+    if payload.len() == uncompressed_size {
+        return Ok(payload.to_vec());
+    }
+
     // Reorganised (delta+plane) byte-stream size for this block: sum over
     // present rows/channels of (reduced bytes per sample) * (sub-width).
     let mut reorg_size = 0usize;
@@ -317,11 +326,7 @@ pub(crate) fn decode_pxr24_payload(
         }
     }
 
-    // Raw-fallback: an encoder that couldn't shrink the chunk stores the
-    // reorganised stream uncompressed (compressed length == reorg size).
-    let reorg: Vec<u8> = if payload.len() == reorg_size {
-        payload.to_vec()
-    } else {
+    let reorg: Vec<u8> = {
         let inflated = zlib_inflate(payload, reorg_size)?;
         if inflated.len() != reorg_size {
             return Err(ExrError::invalid(format!(

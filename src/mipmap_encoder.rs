@@ -191,7 +191,8 @@ pub fn build_box_filter_pyramid(
 /// respectively, and each plane length must equal `level_w * level_h`.
 ///
 /// All levels use the same compression mode (per the file's single
-/// `compression` attribute). Encoder supports NONE / ZIP / ZIPS / RLE.
+/// `compression` attribute). Encoder supports NONE / ZIP / ZIPS / RLE
+/// / PXR24 / B44 / B44A.
 pub fn encode_exr_tiled_mipmap(
     channels: &[Channel],
     pyramid: &[MipmapLevel],
@@ -238,10 +239,17 @@ pub fn encode_exr_tiled_mipmap_with_line_order(
     }
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (mipmap tiled encoder supports NONE + ZIP + ZIPS + RLE)"
+            "compression {compression:?} (mipmap tiled encoder supports \
+             NONE + ZIP + ZIPS + RLE + PXR24 + B44 + B44A)"
         )));
     }
     for ch in channels {
@@ -369,7 +377,17 @@ pub fn encode_exr_tiled_mipmap_with_line_order(
                         }
                     }
                 }
-                let payload = compress_tile_payload(raw, compression)?;
+                let payload = compress_multilevel_tile_payload(
+                    raw,
+                    channels,
+                    &lvl.planes,
+                    lvl.width,
+                    x0,
+                    y0,
+                    tw,
+                    th,
+                    compression,
+                )?;
                 // For MIPMAP_LEVELS the chunk header carries lvlx == lvly
                 // == level index (the diagonal of the (lvlx, lvly) grid).
                 tile_chunks.push((tx, ty, lvl_idx, lvl_idx, payload));
@@ -468,6 +486,49 @@ fn emit_tiled_chunks(
         out.extend_from_slice(p);
     }
     out
+}
+
+/// Compress one multilevel tile. NONE / ZIP / ZIPS / RLE work on the
+/// interleaved native `raw` stream; PXR24 / B44 / B44A reorganise the
+/// tile into byte-plane / per-channel forms and therefore gather
+/// tile-local f32 sub-planes from the level's full planes (1×1 sampling
+/// in tiled files), delegating to the shared ONE_LEVEL tile compressor.
+#[allow(clippy::too_many_arguments)]
+fn compress_multilevel_tile_payload(
+    raw: Vec<u8>,
+    channels: &[Channel],
+    level_planes: &[Vec<f32>],
+    level_width: u32,
+    x0: u32,
+    y0: u32,
+    tw: usize,
+    th: usize,
+    compression: Compression,
+) -> Result<Vec<u8>> {
+    match compression {
+        Compression::Pxr24 | Compression::B44 | Compression::B44a => {
+            let mut sub_planes: Vec<Vec<f32>> = Vec::with_capacity(level_planes.len());
+            for plane in level_planes {
+                let mut sp = Vec::with_capacity(tw * th);
+                for line in 0..th {
+                    let src_y = y0 as usize + line;
+                    let base = src_y * level_width as usize + x0 as usize;
+                    sp.extend_from_slice(&plane[base..base + tw]);
+                }
+                sub_planes.push(sp);
+            }
+            let refs: Vec<&[f32]> = sub_planes.iter().map(|p| p.as_slice()).collect();
+            crate::tile_encoder::compress_tile_payload_reorg(
+                raw,
+                channels,
+                &refs,
+                tw as u32,
+                th,
+                compression,
+            )
+        }
+        _ => compress_tile_payload(raw, compression),
+    }
 }
 
 fn build_tiled_mipmap_attributes(
@@ -599,8 +660,8 @@ fn compress_tile_payload(raw: Vec<u8>, compression: Compression) -> Result<Vec<u
 //     within each level tiles are emitted INCREASING_Y row-major
 //     (`ty` outer, `tx` inner).
 //
-// This is pure offset-table / container mechanics; no per-compressor table
-// is involved (only NONE / ZIP / ZIPS / RLE, exactly as the MIPMAP writer).
+// This is pure offset-table / container mechanics (NONE / ZIP / ZIPS /
+// RLE / PXR24 / B44 / B44A, exactly as the MIPMAP writer).
 
 /// One x/y reduction level of a ripmap grid: explicit width/height plus one
 /// f32 plane per channel (same alphabetical channel order as the file's
@@ -786,7 +847,8 @@ pub fn encode_exr_tiled_rgba_float_ripmap_box_filter(
 /// must be `ripmap_level_counts_round_down(w, h)` shaped, with each cell's
 /// `width`/`height` matching `mipmap_level_dim(w, lvlx, false)` /
 /// `mipmap_level_dim(h, lvly, false)` and each plane length equal to
-/// `cell_w * cell_h`. Supports NONE / ZIP / ZIPS / RLE.
+/// `cell_w * cell_h`. Supports NONE / ZIP / ZIPS / RLE / PXR24 / B44 /
+/// B44A.
 pub fn encode_exr_tiled_ripmap(
     channels: &[Channel],
     pyramid: &RipmapPyramid,
@@ -831,10 +893,17 @@ pub fn encode_exr_tiled_ripmap_with_line_order(
     }
     if !matches!(
         compression,
-        Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+        Compression::None
+            | Compression::Zip
+            | Compression::Zips
+            | Compression::Rle
+            | Compression::Pxr24
+            | Compression::B44
+            | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (ripmap tiled encoder supports NONE + ZIP + ZIPS + RLE)"
+            "compression {compression:?} (ripmap tiled encoder supports \
+             NONE + ZIP + ZIPS + RLE + PXR24 + B44 + B44A)"
         )));
     }
     for ch in channels {
@@ -974,7 +1043,17 @@ pub fn encode_exr_tiled_ripmap_with_line_order(
                             }
                         }
                     }
-                    let payload = compress_tile_payload(raw, compression)?;
+                    let payload = compress_multilevel_tile_payload(
+                        raw,
+                        channels,
+                        &cell.planes,
+                        cell.width,
+                        x0,
+                        y0,
+                        tw,
+                        th,
+                        compression,
+                    )?;
                     tile_chunks.push((tx, ty, lvlx as u32, lvly as u32, payload));
                 }
             }

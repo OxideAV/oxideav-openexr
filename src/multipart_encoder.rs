@@ -208,13 +208,21 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
             // (a layout distinct from the native `raw` stream), so they reuse
             // the scanline block builders directly.
             let payload = match p.compression {
-                Compression::Pxr24 => crate::encoder::build_pxr24_block_payload(
-                    &p.channels,
-                    &p.planes,
-                    p.width,
-                    row0,
-                    lines_in_block,
-                )?,
+                Compression::Pxr24 => {
+                    let deflated = crate::encoder::build_pxr24_block_payload(
+                        &p.channels,
+                        &p.planes,
+                        p.width,
+                        row0,
+                        lines_in_block,
+                    )?;
+                    // Shared §0 raw fallback against the NATIVE chunk.
+                    if deflated.len() >= raw.len() {
+                        raw
+                    } else {
+                        deflated
+                    }
+                }
                 Compression::B44 | Compression::B44a => {
                     let flat = matches!(p.compression, Compression::B44a);
                     let packed = crate::encoder::build_b44_block_payload(
