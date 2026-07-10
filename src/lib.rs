@@ -348,10 +348,13 @@
 //!
 //! Round-4+ followups still open: PIZ / DWAA / DWAB compression (PIZ
 //! blocked on a clean-room wavelet+Huffman trace doc; DWA on the DCT/
-//! gamma trace); PXR24 and B44 / B44A encode + decode have landed for
-//! single-part scanline images via the observer-spec, with tiled +
-//! multi-part PXR24/B44 still to do; HDR pixel-format integration with
-//! `oxideav-core`; mixed-with-deep + mixed-multi-level multi-part files.
+//! gamma trace) and HDR pixel-format integration with `oxideav-core`.
+//! (PXR24 and B44 / B44A now cover scanline, tiled ONE_LEVEL / MIPMAP /
+//! RIPMAP, and multi-part — including the mixed writer; mixed-with-deep
+//! and mixed-multi-level landed in rounds 232-382. Round 410 added
+//! observer-derived `lineOrder` storage-order support — DECREASING_Y
+//! everywhere, RANDOM_Y for tiled — via the `*_with_line_order` writer
+//! entry points.)
 
 pub mod b44;
 pub mod decoder;
