@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quantisation tolerance plus reference cross-checks, including a
   **bit-exact reference-decode vs our-decode comparison** of the same
   file (both sides post-quantisation).
+- Round-410 **`parse_flat` fuzz target** — the single-part flat decode
+  entry points (`parse_exr` scanline + tiled ONE_LEVEL,
+  `parse_exr_tiled_multilevel` MIPMAP / RIPMAP) had never been fuzzed,
+  and they are the only route into the PXR24 byte-plane/delta and
+  B44/B44A 4×4-block decoders. Raw mode plus an overlay mode that
+  splices fuzz bytes over the offset-table + chunk region of
+  writer-produced valid files across shape × compression × lineOrder
+  combinations. Bounded sessions: `parse_flat` 1.34M runs / 7 min
+  clean; regression runs of `parse_multipart_mixed` (705k / 3 min) and
+  `parse_deep_scanline` (1.8M / 2 min) clean after the PXR24 fallback
+  change. Corpora committed.
 
 ### Fixed
 

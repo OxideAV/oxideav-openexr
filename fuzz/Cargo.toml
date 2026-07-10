@@ -56,3 +56,18 @@ name = "parse_multipart_mixed"
 path = "fuzz_targets/parse_multipart_mixed.rs"
 test = false
 doc = false
+
+# `parse_flat` drives the single-part FLAT decode entry points —
+# `parse_exr` (scanline + tiled ONE_LEVEL) and
+# `parse_exr_tiled_multilevel` (MIPMAP / RIPMAP). These are the only
+# route into the PXR24 byte-plane/delta and B44/B44A 4×4-block
+# decoders (reorg-size accounting, block bit-unpacking, raw-fallback
+# length discrimination), none of which had a fuzz harness before.
+# Overlay mode splices fuzz bytes over the offset table + chunk region
+# of writer-produced valid files across shape × compression ×
+# lineOrder combinations.
+[[bin]]
+name = "parse_flat"
+path = "fuzz_targets/parse_flat.rs"
+test = false
+doc = false
