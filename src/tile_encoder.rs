@@ -184,6 +184,8 @@ pub fn encode_exr_tiled_rgba_float_with(
             | Compression::Rle
             | Compression::Pxr24
             | Compression::Piz
+            | Compression::Dwaa
+            | Compression::Dwab
             | Compression::B44
             | Compression::B44a
     ) {
@@ -405,6 +407,8 @@ pub fn encode_exr_tiled_with_line_order(
             | Compression::Rle
             | Compression::Pxr24
             | Compression::Piz
+            | Compression::Dwaa
+            | Compression::Dwab
             | Compression::B44
             | Compression::B44a
     ) {
@@ -508,6 +512,16 @@ pub fn encode_exr_tiled_with_line_order(
                 Compression::Piz => {
                     crate::encoder::piz_payload_or_raw(raw, channels, tw as u32, 0, th)?
                 }
+                // DWA likewise consumes the native interleaved tile
+                // stream (observer-spec §3); a tile is one chunk.
+                Compression::Dwaa | Compression::Dwab => crate::encoder::dwa_payload_or_raw(
+                    raw,
+                    channels,
+                    tw as u32,
+                    0,
+                    th,
+                    crate::dwa::DEFAULT_DWA_LEVEL,
+                )?,
                 _ => compress_tile_payload(raw, compression)?,
             };
             tile_payloads.push((tx, ty, payload));

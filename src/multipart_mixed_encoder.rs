@@ -502,12 +502,14 @@ fn validate_tiled_common(
             | Compression::Rle
             | Compression::Pxr24
             | Compression::Piz
+            | Compression::Dwaa
+            | Compression::Dwab
             | Compression::B44
             | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
             "mixed multi-part {label} part '{name}': compression {compression:?} \
-             (encoder supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)"
+             (encoder supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/DWAA/DWAB/B44/B44A)"
         )));
     }
     if tile_x == 0 || tile_y == 0 {
@@ -767,12 +769,14 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                         | Compression::Rle
                         | Compression::Pxr24
                         | Compression::Piz
+                        | Compression::Dwaa
+                        | Compression::Dwab
                         | Compression::B44
                         | Compression::B44a
                 ) {
                     return Err(ExrError::unsupported(format!(
                         "mixed multi-part part '{name}': compression {compression:?} \
-                         (scanline supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)"
+                         (scanline supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/DWAA/DWAB/B44/B44A)"
                     )));
                 }
                 if *width == 0 || *height == 0 {
@@ -835,12 +839,14 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                         | Compression::Rle
                         | Compression::Pxr24
                         | Compression::Piz
+                        | Compression::Dwaa
+                        | Compression::Dwab
                         | Compression::B44
                         | Compression::B44a
                 ) {
                     return Err(ExrError::unsupported(format!(
                         "mixed multi-part part '{name}': compression {compression:?} \
-                         (ONE_LEVEL tiled supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)"
+                         (ONE_LEVEL tiled supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/DWAA/DWAB/B44/B44A)"
                     )));
                 }
                 if *width == 0 || *height == 0 {
@@ -1566,6 +1572,25 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                                 lines_in_block,
                             )?
                         }
+                        // DWA likewise consumes the native interleaved
+                        // chunk stream (observer-spec §3).
+                        Compression::Dwaa | Compression::Dwab => {
+                            let raw = scanline_block_raw(
+                                channels,
+                                &plane_refs,
+                                *width,
+                                row0,
+                                lines_in_block,
+                            );
+                            crate::encoder::dwa_payload_or_raw(
+                                raw,
+                                channels,
+                                *width,
+                                row0,
+                                lines_in_block,
+                                crate::dwa::DEFAULT_DWA_LEVEL,
+                            )?
+                        }
                         _ => {
                             let raw = scanline_block_raw(
                                 channels,
@@ -2202,6 +2227,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 | Compression::Rle
                 | Compression::Pxr24
                 | Compression::Piz
+                | Compression::Dwaa
+                | Compression::Dwab
                 | Compression::B44
                 | Compression::B44a
         ) {
@@ -2317,7 +2344,7 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     // levels in spec iteration order and allocate planes.
                     // The per-level tile decoder is the shared
                     // `scatter_tile_into_planes`, which handles
-                    // NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A.
+                    // NONE/ZIP/ZIPS/RLE/PXR24/PIZ/DWAA/DWAB/B44/B44A.
                     let round_up = tdesc.round_mode != 0;
                     let levels = enumerate_tiled_levels(
                         tdesc.level_mode,
@@ -2599,6 +2626,28 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         // (or the raw fallback), then scatters like the
                         // other interleaved schemes.
                         let uncompressed = crate::piz::decode_piz_payload(
+                            payload,
+                            &crate::piz::ChunkShape {
+                                sorted_channels,
+                                width,
+                                block_y0,
+                                lines_in_block,
+                            },
+                            uncompressed_size,
+                        )?;
+                        scatter_scanline_block_into_planes(
+                            &uncompressed,
+                            sorted_channels,
+                            planes,
+                            width,
+                            block_y0,
+                            lines_in_block,
+                        )?;
+                    }
+                    Compression::Dwaa | Compression::Dwab => {
+                        // DWA also decodes to the interleaved native
+                        // stream (or the raw fallback).
+                        let uncompressed = crate::dwa::decode_dwa_payload(
                             payload,
                             &crate::piz::ChunkShape {
                                 sorted_channels,
@@ -3769,6 +3818,19 @@ fn compress_one_level_tile(
     // (observer-spec §2) with the shared raw fallback.
     if compression == Compression::Piz {
         return crate::encoder::piz_payload_or_raw(raw, channels, tw as u32, 0, th);
+    }
+
+    // DWA likewise consumes the native interleaved tile stream
+    // (observer-spec §3); a tile is one chunk.
+    if matches!(compression, Compression::Dwaa | Compression::Dwab) {
+        return crate::encoder::dwa_payload_or_raw(
+            raw,
+            channels,
+            tw as u32,
+            0,
+            th,
+            crate::dwa::DEFAULT_DWA_LEVEL,
+        );
     }
 
     if matches!(

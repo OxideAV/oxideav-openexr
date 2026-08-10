@@ -372,8 +372,8 @@ pub mod multipart_mipmap_encoder;
 pub mod multipart_mixed_encoder;
 pub mod multipart_ripmap_encoder;
 pub mod multipart_tiled_encoder;
-#[cfg(feature = "registry")]
 pub(crate) mod piz;
+#[cfg(feature = "registry")]
 pub mod registry;
 pub mod rle;
 pub mod tile_encoder;

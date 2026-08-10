@@ -113,12 +113,14 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
                 | Compression::Rle
                 | Compression::Pxr24
                 | Compression::Piz
+                | Compression::Dwaa
+                | Compression::Dwab
                 | Compression::B44
                 | Compression::B44a
         ) {
             return Err(ExrError::unsupported(format!(
                 "part '{}': compression {:?} \
-                 (multipart encoder supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)",
+                 (multipart encoder supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/DWAA/DWAB/B44/B44A)",
                 p.name, p.compression
             )));
         }
@@ -249,6 +251,16 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
                     p.width,
                     row0,
                     lines_in_block,
+                )?,
+                // DWA likewise consumes the native interleaved chunk
+                // stream (observer-spec §3).
+                Compression::Dwaa | Compression::Dwab => crate::encoder::dwa_payload_or_raw(
+                    raw,
+                    &p.channels,
+                    p.width,
+                    row0,
+                    lines_in_block,
+                    crate::dwa::DEFAULT_DWA_LEVEL,
                 )?,
                 _ => compress_block(raw, p.compression)?,
             };

@@ -120,10 +120,12 @@ pub fn encode_exr_multipart_tiled_mipmap(parts: &[MultipartMipmapTiledPart]) -> 
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Piz
+                | Compression::Dwaa
+                | Compression::Dwab
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part mipmap tiled part '{}': compression {:?} \
-                 (encoder supports NONE/ZIP/ZIPS/RLE/PIZ)",
+                 (encoder supports NONE/ZIP/ZIPS/RLE/PIZ/DWAA/DWAB)",
                 p.name, p.compression
             )));
         }
@@ -308,6 +310,17 @@ pub fn encode_exr_multipart_tiled_mipmap(parts: &[MultipartMipmapTiledPart]) -> 
                         // PIZ consumes the native interleaved tile stream directly
                         // (observer-spec §2) with the shared raw fallback.
                         crate::encoder::piz_payload_or_raw(raw, &p.channels, tw as u32, 0, th)?
+                    } else if matches!(p.compression, Compression::Dwaa | Compression::Dwab) {
+                        // DWA likewise consumes the native interleaved tile
+                        // stream (observer-spec §3); a tile is one chunk.
+                        crate::encoder::dwa_payload_or_raw(
+                            raw,
+                            &p.channels,
+                            tw as u32,
+                            0,
+                            th,
+                            crate::dwa::DEFAULT_DWA_LEVEL,
+                        )?
                     } else {
                         compress_tile_payload(raw, p.compression)?
                     };
@@ -685,13 +698,17 @@ mod tests {
     }
 
     #[test]
-    fn mipmap_multipart_rejects_unsupported_compression() {
-        // PIZ became a supported scheme in round 439; DWAA is the
-        // remaining unsupported one on this path.
-        let mut p = build_part("dwaa", 8, 8, 0.0, Compression::None, 4);
-        p.compression = Compression::Dwaa;
-        let err = encode_exr_multipart_tiled_mipmap(&[p]).unwrap_err();
-        assert!(format!("{err}").contains("NONE/ZIP/ZIPS/RLE/PIZ"));
+    fn mipmap_multipart_accepts_every_compression_scheme() {
+        // Round 439 closed the last gaps (PIZ + DWAA/DWAB): every
+        // compression code is now writable on this path. Pin that the
+        // former rejects now produce parseable files.
+        for z in [Compression::Piz, Compression::Dwaa, Compression::Dwab] {
+            let mut p = build_part("z", 8, 8, 0.0, Compression::None, 4);
+            p.compression = z;
+            let bytes = encode_exr_multipart_tiled_mipmap(&[p]).unwrap();
+            let parts = crate::decoder::parse_exr_multipart_tiled_multilevel(&bytes).unwrap();
+            assert!(!parts[0].levels.is_empty(), "{z:?}");
+        }
     }
 
     #[test]

@@ -140,10 +140,12 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Piz
+                | Compression::Dwaa
+                | Compression::Dwab
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled part '{}': compression {:?} \
-                 (encoder supports NONE/ZIP/ZIPS/RLE/PIZ)",
+                 (encoder supports NONE/ZIP/ZIPS/RLE/PIZ/DWAA/DWAB)",
                 p.name, p.compression
             )));
         }
@@ -249,6 +251,17 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
                     // PIZ consumes the native interleaved tile stream directly
                     // (observer-spec §2) with the shared raw fallback.
                     crate::encoder::piz_payload_or_raw(raw, &p.channels, tw as u32, 0, th)?
+                } else if matches!(p.compression, Compression::Dwaa | Compression::Dwab) {
+                    // DWA likewise consumes the native interleaved tile
+                    // stream (observer-spec §3); a tile is one chunk.
+                    crate::encoder::dwa_payload_or_raw(
+                        raw,
+                        &p.channels,
+                        tw as u32,
+                        0,
+                        th,
+                        crate::dwa::DEFAULT_DWA_LEVEL,
+                    )?
                 } else {
                     compress_tile_payload(raw, p.compression)?
                 };
