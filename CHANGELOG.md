@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round-439 **PIZ compression — decode AND encode** for single-part
+  scanline images (`Compression::Piz`, 32 scanlines per chunk), from
+  the newly staged clean-room trace
+  `docs/image/openexr/openexr-piz-dwa-observer-spec.md` §2. New
+  `src/huf.rs` implements the shared static-Huffman payload container
+  (canonical 58-bit-max codes rebuilt from transmitted lengths, 6-bit
+  code-length alphabet with zero-run escapes per
+  `tables/piz-huf-lengthcode-alphabet.csv`, run-length escape symbol at
+  `iM`, 14-bit fast decode table); `src/piz.rs` implements the chunk
+  framing (occupancy bitmap with the empty-bitmap `min > max` case),
+  the chunk-derived range-compaction LUT, and both hierarchical 2D
+  wavelet variants with the untransmitted `maxValue < 16384` selection
+  rule. HALF / FLOAT / UINT channels (FLOAT and UINT as two interleaved
+  16-bit components per sample) and sub-sampled channels are covered;
+  the shared raw fallback (`compressed_len == uncompressed_len`)
+  applies on both sides. Lossless and validated bit-exact both ways
+  against a reference EXR binary invoked as an opaque process
+  (`tests/piz_validation.rs`, auto-skips when the tool is absent):
+  reference-encoded PIZ decodes bit-exact, and our PIZ encoding is
+  accepted and decoded bit-exact by the reference.
+
 - Round-410 **`lineOrder` conformance — DECREASING_Y scanline write
   support** (`encode_exr_scanline_rgba_float_with_line_order`, plus
   `encode_exr_scanline` now honours a caller-supplied `lineOrder`

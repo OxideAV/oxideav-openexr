@@ -785,6 +785,16 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
                 },
                 uncompressed_size,
             )?,
+            Compression::Piz => crate::piz::decode_piz_payload(
+                payload,
+                &crate::piz::ChunkShape {
+                    sorted_channels: &sorted_channels,
+                    width,
+                    block_y0,
+                    lines_in_block,
+                },
+                uncompressed_size,
+            )?,
             other => {
                 return Err(ExrError::unsupported(format!(
                     "scanline compression {other:?} not yet implemented"
@@ -903,6 +913,16 @@ pub(crate) fn scatter_tile_into_planes(
             // A tile is a single self-contained block: full width = `tw`,
             // block origin row 0, `th` rows, all present (1×1 sampling).
             &Pxr24RowSpec {
+                sorted_channels,
+                width: tw as u32,
+                block_y0: 0,
+                lines_in_block: th,
+            },
+            uncompressed_size,
+        )?,
+        Compression::Piz => crate::piz::decode_piz_payload(
+            payload,
+            &crate::piz::ChunkShape {
                 sorted_channels,
                 width: tw as u32,
                 block_y0: 0,
@@ -1392,6 +1412,7 @@ pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> 
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
@@ -1707,6 +1728,7 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Pxr24
+                | Compression::Piz
                 | Compression::B44
                 | Compression::B44a
         ) {
@@ -1857,6 +1879,16 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
                 },
                 uncompressed_size,
             )?,
+            Compression::Piz => crate::piz::decode_piz_payload(
+                payload,
+                &crate::piz::ChunkShape {
+                    sorted_channels,
+                    width,
+                    block_y0,
+                    lines_in_block,
+                },
+                uncompressed_size,
+            )?,
             _ => unreachable!("filtered above"),
         };
 
@@ -1990,6 +2022,7 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Pxr24
+                | Compression::Piz
                 | Compression::B44
                 | Compression::B44a
         ) {
@@ -2316,6 +2349,7 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Pxr24
+                | Compression::Piz
                 | Compression::B44
                 | Compression::B44a
         ) {

@@ -335,6 +335,33 @@ pub(crate) fn build_b44_block_payload(
     crate::b44::encode_b44_chunk(&b44_planes, channels, &extents, flat)
 }
 
+/// Compress one chunk's native interleaved byte stream with PIZ and
+/// apply the shared raw fallback: returns the PIZ payload when it is
+/// smaller than the native stream, else the native bytes (a conforming
+/// reader detects the fallback by `compressed_len == uncompressed_len`).
+pub(crate) fn piz_payload_or_raw(
+    raw: Vec<u8>,
+    channels: &[Channel],
+    width: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+) -> Result<Vec<u8>> {
+    let packed = crate::piz::piz_compress(
+        &raw,
+        &crate::piz::ChunkShape {
+            sorted_channels: channels,
+            width,
+            block_y0,
+            lines_in_block,
+        },
+    )?;
+    Ok(if packed.len() >= raw.len() {
+        raw
+    } else {
+        packed
+    })
+}
+
 /// Encode a width × height RGBA-float scanline EXR with the requested
 /// compression. `samples` is `width * height * 4` long, in `R, G, B, A`
 /// pixel order.
@@ -401,11 +428,12 @@ fn encode_rgba_float_impl(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + B44/B44A; PIZ/DWA read-only or deferred)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + PIZ + B44/B44A; DWA deferred)"
         )));
     }
 
@@ -492,11 +520,12 @@ pub fn encode_exr_scanline(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + B44/B44A)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + PIZ + B44/B44A)"
         )));
     }
 
@@ -635,6 +664,12 @@ pub fn encode_exr_scanline(
                 } else {
                     packed
                 }
+            }
+            Compression::Piz => {
+                // PIZ consumes the native interleaved stream directly
+                // (bitmap + LUT + wavelet + Huffman, observer-spec
+                // §2) and shares the raw fallback rule.
+                piz_payload_or_raw(raw, channels, width, row0, lines_in_block)?
             }
             _ => unreachable!("filtered above"),
         };
