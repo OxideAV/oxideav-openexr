@@ -22,11 +22,19 @@ treat them as relative guides, not absolutes.
 | ZIPS   | 267 MiB/s  | 337 MiB/s  |
 | ZIP    | 656 MiB/s  | 697 MiB/s  |
 | PXR24  | 1.07 GiB/s | 2.36 GiB/s |
+| PIZ    | 203 MiB/s  | 237 MiB/s  |
 | B44    | 1.07 GiB/s | 30.8 GiB/s¹ |
 | B44A   | 1.12 GiB/s | 29.8 GiB/s¹ |
+| DWAA   | 189 MiB/s  | 357 MiB/s² |
+| DWAB   | 210 MiB/s  | 398 MiB/s² |
 
 ¹ B44 stores FLOAT channels uncompressed (the scheme only packs HALF),
 so the FLOAT rows measure the raw-copy path.
+
+² DWA is a half-precision codec internally; FLOAT channels ride the
+same half DCT pipeline (twice the accounted bytes per sample explains
+the higher apparent FLOAT throughput). PIZ and DWA rows are round-439
+first-cut implementations — entropy stages are scalar and unoptimised.
 
 ## Tiled ONE_LEVEL decode (64×64 tiles)
 
@@ -37,8 +45,11 @@ so the FLOAT rows measure the raw-copy path.
 | ZIPS   | 610 MiB/s  | 711 MiB/s  |
 | ZIP    | 626 MiB/s  | 709 MiB/s  |
 | PXR24  | 1.02 GiB/s | 2.26 GiB/s |
+| PIZ    | 178 MiB/s  | 218 MiB/s  |
 | B44    | 1.08 GiB/s | 8.5 GiB/s¹ |
 | B44A   | 1.13 GiB/s | 8.4 GiB/s¹ |
+| DWAA   | 170 MiB/s  | 316 MiB/s² |
+| DWAB   | 172 MiB/s  | 312 MiB/s² |
 
 ## Scanline encode (`encode_exr_scanline`)
 
@@ -49,8 +60,11 @@ so the FLOAT rows measure the raw-copy path.
 | ZIPS   | 110 MiB/s  | 151 MiB/s  |
 | ZIP    | 238 MiB/s  | 309 MiB/s  |
 | PXR24  | 251 MiB/s  | 521 MiB/s  |
+| PIZ    | 182 MiB/s  | 236 MiB/s  |
 | B44    | 428 MiB/s  | 3.84 GiB/s¹ |
 | B44A   | 455 MiB/s  | 3.79 GiB/s¹ |
+| DWAA   | 150 MiB/s  | 299 MiB/s² |
+| DWAB   | 199 MiB/s  | 395 MiB/s² |
 
 ## Primitives
 

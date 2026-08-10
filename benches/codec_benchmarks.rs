@@ -124,8 +124,11 @@ fn schemes() -> Vec<(&'static str, Compression)> {
         ("zips", Compression::Zips),
         ("zip", Compression::Zip),
         ("pxr24", Compression::Pxr24),
+        ("piz", Compression::Piz),
         ("b44", Compression::B44),
         ("b44a", Compression::B44a),
+        ("dwaa", Compression::Dwaa),
+        ("dwab", Compression::Dwab),
     ]
 }
 
