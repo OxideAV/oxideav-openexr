@@ -359,6 +359,7 @@
 pub mod b44;
 pub mod decoder;
 pub mod deep;
+pub(crate) mod dwa;
 pub mod encoder;
 pub mod error;
 pub mod half;

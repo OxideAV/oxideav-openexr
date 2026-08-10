@@ -362,6 +362,48 @@ pub(crate) fn piz_payload_or_raw(
     })
 }
 
+/// Compress one chunk's native interleaved byte stream with DWA
+/// (version-2 chunk) and apply the shared raw fallback. `level` is the
+/// DWA compression level (`errorTarget = level / 100000`,
+/// observer-spec §3.5).
+pub(crate) fn dwa_payload_or_raw(
+    raw: Vec<u8>,
+    channels: &[Channel],
+    width: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+    level: f32,
+) -> Result<Vec<u8>> {
+    let packed = crate::dwa::dwa_compress(
+        &raw,
+        &crate::piz::ChunkShape {
+            sorted_channels: channels,
+            width,
+            block_y0,
+            lines_in_block,
+        },
+        level,
+    )?;
+    Ok(if packed.len() >= raw.len() {
+        raw
+    } else {
+        packed
+    })
+}
+
+/// The DWA compression level for an encode: an explicit
+/// `dwaCompressionLevel` float attribute wins, else the default (45).
+pub(crate) fn dwa_level_from_attributes(attributes: &[Attribute]) -> f32 {
+    attributes
+        .iter()
+        .find_map(|a| match (&a.name[..], &a.value) {
+            ("dwaCompressionLevel", AttributeValue::Float(f)) => Some(*f),
+            _ => None,
+        })
+        .filter(|l| l.is_finite() && *l >= 0.0)
+        .unwrap_or(crate::dwa::DEFAULT_DWA_LEVEL)
+}
+
 /// Encode a width × height RGBA-float scanline EXR with the requested
 /// compression. `samples` is `width * height * 4` long, in `R, G, B, A`
 /// pixel order.
@@ -429,11 +471,13 @@ fn encode_rgba_float_impl(
             | Compression::Rle
             | Compression::Pxr24
             | Compression::Piz
+            | Compression::Dwaa
+            | Compression::Dwab
             | Compression::B44
             | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + PIZ + B44/B44A; DWA deferred)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + PIZ + DWAA/DWAB + B44/B44A)"
         )));
     }
 
@@ -521,11 +565,13 @@ pub fn encode_exr_scanline(
             | Compression::Rle
             | Compression::Pxr24
             | Compression::Piz
+            | Compression::Dwaa
+            | Compression::Dwab
             | Compression::B44
             | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
-            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + PIZ + B44/B44A)"
+            "compression {compression:?} (encoder supports NONE + ZIP + ZIPS + RLE + PXR24 + PIZ + DWAA/DWAB + B44/B44A)"
         )));
     }
 
@@ -548,6 +594,7 @@ pub fn encode_exr_scanline(
 
     let block_h = compression.scanlines_per_block();
     let num_blocks = height.div_ceil(block_h) as usize;
+    let dwa_level = dwa_level_from_attributes(&attributes);
 
     // Emit the header.
     let header_bytes = encode_header(VersionField::from_u32(2), &attributes);
@@ -671,7 +718,12 @@ pub fn encode_exr_scanline(
                 // §2) and shares the raw fallback rule.
                 piz_payload_or_raw(raw, channels, width, row0, lines_in_block)?
             }
-            _ => unreachable!("filtered above"),
+            Compression::Dwaa | Compression::Dwab => {
+                // DWA also consumes the native interleaved stream
+                // (observer-spec §3); the two codes differ only in
+                // scanlines per chunk, handled by `block_h` above.
+                dwa_payload_or_raw(raw, channels, width, row0, lines_in_block, dwa_level)?
+            }
         };
         block_payloads.push(payload);
     }

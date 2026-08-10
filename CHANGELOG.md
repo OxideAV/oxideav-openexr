@@ -29,6 +29,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/piz_validation.rs`, auto-skips when the tool is absent):
   reference-encoded PIZ decodes bit-exact, and our PIZ encoding is
   accepted and decoded bit-exact by the reference.
+- Round-439 **DWAA / DWAB compression — decode AND encode** for
+  single-part scanline images (`Compression::Dwaa` 32 /
+  `Compression::Dwab` 256 scanlines per chunk — the only wire
+  difference), from the staged trace
+  `docs/image/openexr/openexr-piz-dwa-observer-spec.md` §3 and the nine
+  staged tables. `src/dwa.rs` implements the 88-byte eleven-slot chunk
+  header, the version-2 channel-rule block (plus the staged legacy rule
+  set for version-0/1 chunks), the four sub-streams (verbatim / AC /
+  DC / RLE), (suffix, pixel-type) channel classification, BT.709 CSC
+  triples, the binary32 perceptual half LUTs (computed at runtime from
+  the staged closed form incl. the six documented binary32 patch
+  entries), the 8×8 DCT with the staged truncated-π butterfly
+  constants, plane-major DC + per-block-interleaved AC coding with the
+  half-NaN zero-run escapes and end-of-block form, the ZIP byte
+  preconditioning on DC, whole-region byte-plane split + byte RLE, and
+  the shared raw fallback. Encoder emits version-2 chunks with
+  static-Huffman AC, honours `dwaCompressionLevel` (default 45), and
+  quantises with a set-bit-reducing search under the staged
+  quantisation matrices. Stream orderings the spec leaves implicit were
+  pinned by black-box observation of reference-produced chunks and are
+  recorded in `tests/dwa_observer_notes.md` — including the
+  wire-exactness finding that the IDCT DC pair folds `a·(c0 ± c4)`.
+  Validation: reference-encoded DWAA/DWAB files (smooth, noisy, CSC
+  triples, FLOAT, mixed schemes, multi-chunk DWAB) decode **bit-exactly
+  equal** to the reference's own decode, and our encoded chunks are
+  accepted and decoded bit-identically by the reference
+  (`tests/dwa_decode_validation.rs`, `tests/dwa_encode_validation.rs`,
+  auto-skip without the tool).
 - Round-439 **PIZ across the full flat surface**: single-part tiled
   (ONE_LEVEL / MIPMAP / RIPMAP), multi-part scanline, multi-part tiled
   (ONE_LEVEL and the dedicated MIPMAP / RIPMAP writers, which move from
