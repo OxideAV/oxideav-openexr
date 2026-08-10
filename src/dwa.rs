@@ -501,8 +501,9 @@ fn csc_forward(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 /// Inverse colour transform with the staged binary32 BT.709 constants
-/// (1.5747 / 1.8556 / −0.1873 / −0.4682 — see the GAP-TRACKER's Round-A
-/// inventory of `internal_dwa_simd.h`).
+/// (1.5747 / 1.8556 / −0.1873 / −0.4682 — the Rec. ITU-R BT.709
+/// inverse-matrix values recorded in the staged docs' GAP-TRACKER
+/// Round-A inventory).
 #[inline]
 fn csc_inverse(y: f32, c1: f32, c2: f32) -> (f32, f32, f32) {
     let r = y + 1.5747 * c2;
