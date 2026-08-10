@@ -113,11 +113,15 @@ pub fn encode_exr_multipart_tiled_ripmap(parts: &[MultipartRipmapTiledPart]) -> 
         }
         if !matches!(
             p.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Piz
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part ripmap tiled part '{}': compression {:?} \
-                 (encoder supports NONE/ZIP/ZIPS/RLE)",
+                 (encoder supports NONE/ZIP/ZIPS/RLE/PIZ)",
                 p.name, p.compression
             )));
         }
@@ -319,7 +323,13 @@ pub fn encode_exr_multipart_tiled_ripmap(parts: &[MultipartRipmapTiledPart]) -> 
                                 }
                             }
                         }
-                        let payload = compress_tile_payload(raw, p.compression)?;
+                        let payload = if p.compression == Compression::Piz {
+                            // PIZ consumes the native interleaved tile stream directly
+                            // (observer-spec §2) with the shared raw fallback.
+                            crate::encoder::piz_payload_or_raw(raw, &p.channels, tw as u32, 0, th)?
+                        } else {
+                            compress_tile_payload(raw, p.compression)?
+                        };
                         all_tiles.push(TilePayload {
                             part_idx: part_idx as u32,
                             tx,
@@ -709,10 +719,12 @@ mod tests {
 
     #[test]
     fn ripmap_multipart_rejects_unsupported_compression() {
-        let mut p = build_part("piz", 8, 8, 0.0, Compression::None, 4);
-        p.compression = Compression::Piz;
+        // PIZ became a supported scheme in round 439; DWAA is the
+        // remaining unsupported one on this path.
+        let mut p = build_part("dwaa", 8, 8, 0.0, Compression::None, 4);
+        p.compression = Compression::Dwaa;
         let err = encode_exr_multipart_tiled_ripmap(&[p]).unwrap_err();
-        assert!(format!("{err}").contains("NONE/ZIP/ZIPS/RLE"));
+        assert!(format!("{err}").contains("NONE/ZIP/ZIPS/RLE/PIZ"));
     }
 
     #[test]

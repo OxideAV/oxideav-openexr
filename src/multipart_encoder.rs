@@ -112,12 +112,13 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Pxr24
+                | Compression::Piz
                 | Compression::B44
                 | Compression::B44a
         ) {
             return Err(ExrError::unsupported(format!(
                 "part '{}': compression {:?} \
-                 (multipart encoder supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)",
+                 (multipart encoder supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)",
                 p.name, p.compression
             )));
         }
@@ -239,6 +240,16 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
                         packed
                     }
                 }
+                // PIZ consumes the native interleaved chunk stream
+                // directly (observer-spec §2) with the shared raw
+                // fallback.
+                Compression::Piz => crate::encoder::piz_payload_or_raw(
+                    raw,
+                    &p.channels,
+                    p.width,
+                    row0,
+                    lines_in_block,
+                )?,
                 _ => compress_block(raw, p.compression)?,
             };
             blocks.push(payload);

@@ -183,6 +183,7 @@ pub fn encode_exr_tiled_rgba_float_with(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
@@ -403,6 +404,7 @@ pub fn encode_exr_tiled_with_line_order(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
@@ -500,6 +502,11 @@ pub fn encode_exr_tiled_with_line_order(
                     }
                     let refs: Vec<&[f32]> = sub_planes.iter().map(|p| p.as_slice()).collect();
                     compress_tile_payload_reorg(raw, channels, &refs, tw as u32, th, compression)?
+                }
+                // PIZ consumes the native interleaved tile stream directly
+                // (observer-spec §2) with the shared raw fallback.
+                Compression::Piz => {
+                    crate::encoder::piz_payload_or_raw(raw, channels, tw as u32, 0, th)?
                 }
                 _ => compress_tile_payload(raw, compression)?,
             };

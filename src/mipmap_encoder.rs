@@ -244,6 +244,7 @@ pub fn encode_exr_tiled_mipmap_with_line_order(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
@@ -527,6 +528,9 @@ fn compress_multilevel_tile_payload(
                 compression,
             )
         }
+        // PIZ consumes the native interleaved tile stream directly
+        // (observer-spec §2) with the shared raw fallback.
+        Compression::Piz => crate::encoder::piz_payload_or_raw(raw, channels, tw as u32, 0, th),
         _ => compress_tile_payload(raw, compression),
     }
 }
@@ -898,6 +902,7 @@ pub fn encode_exr_tiled_ripmap_with_line_order(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
@@ -1456,13 +1461,21 @@ mod tests {
 
     #[test]
     fn ripmap_rejects_unsupported_compression() {
+        // PIZ became a supported multilevel scheme in round 439; DWAA is
+        // the remaining unsupported one on this path.
         let w = 16u32;
         let h = 16u32;
         let samples = make_image(w, h);
-        let err =
-            encode_exr_tiled_rgba_float_ripmap_box_filter(w, h, &samples, Compression::Piz, 16, 16)
-                .unwrap_err();
+        let err = encode_exr_tiled_rgba_float_ripmap_box_filter(
+            w,
+            h,
+            &samples,
+            Compression::Dwaa,
+            16,
+            16,
+        )
+        .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("Piz") || msg.contains("ripmap"), "got: {msg}");
+        assert!(msg.contains("Dwaa") || msg.contains("ripmap"), "got: {msg}");
     }
 }

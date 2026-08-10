@@ -501,12 +501,13 @@ fn validate_tiled_common(
             | Compression::Zips
             | Compression::Rle
             | Compression::Pxr24
+            | Compression::Piz
             | Compression::B44
             | Compression::B44a
     ) {
         return Err(ExrError::unsupported(format!(
             "mixed multi-part {label} part '{name}': compression {compression:?} \
-             (encoder supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)"
+             (encoder supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)"
         )));
     }
     if tile_x == 0 || tile_y == 0 {
@@ -765,12 +766,13 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                         | Compression::Zips
                         | Compression::Rle
                         | Compression::Pxr24
+                        | Compression::Piz
                         | Compression::B44
                         | Compression::B44a
                 ) {
                     return Err(ExrError::unsupported(format!(
                         "mixed multi-part part '{name}': compression {compression:?} \
-                         (scanline supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)"
+                         (scanline supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)"
                     )));
                 }
                 if *width == 0 || *height == 0 {
@@ -832,12 +834,13 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                         | Compression::Zips
                         | Compression::Rle
                         | Compression::Pxr24
+                        | Compression::Piz
                         | Compression::B44
                         | Compression::B44a
                 ) {
                     return Err(ExrError::unsupported(format!(
                         "mixed multi-part part '{name}': compression {compression:?} \
-                         (ONE_LEVEL tiled supports NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A)"
+                         (ONE_LEVEL tiled supports NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A)"
                     )));
                 }
                 if *width == 0 || *height == 0 {
@@ -1544,6 +1547,25 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
                                 packed
                             }
                         }
+                        // PIZ consumes the native interleaved chunk
+                        // stream directly (observer-spec §2) with the
+                        // shared raw fallback.
+                        Compression::Piz => {
+                            let raw = scanline_block_raw(
+                                channels,
+                                &plane_refs,
+                                *width,
+                                row0,
+                                lines_in_block,
+                            );
+                            crate::encoder::piz_payload_or_raw(
+                                raw,
+                                channels,
+                                *width,
+                                row0,
+                                lines_in_block,
+                            )?
+                        }
                         _ => {
                             let raw = scanline_block_raw(
                                 channels,
@@ -2179,6 +2201,7 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 | Compression::Zips
                 | Compression::Rle
                 | Compression::Pxr24
+                | Compression::Piz
                 | Compression::B44
                 | Compression::B44a
         ) {
@@ -2294,7 +2317,7 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     // levels in spec iteration order and allocate planes.
                     // The per-level tile decoder is the shared
                     // `scatter_tile_into_planes`, which handles
-                    // NONE/ZIP/ZIPS/RLE/PXR24/B44/B44A.
+                    // NONE/ZIP/ZIPS/RLE/PXR24/PIZ/B44/B44A.
                     let round_up = tdesc.round_mode != 0;
                     let levels = enumerate_tiled_levels(
                         tdesc.level_mode,
@@ -2555,6 +2578,29 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         let uncompressed = decode_pxr24_payload(
                             payload,
                             &Pxr24RowSpec {
+                                sorted_channels,
+                                width,
+                                block_y0,
+                                lines_in_block,
+                            },
+                            uncompressed_size,
+                        )?;
+                        scatter_scanline_block_into_planes(
+                            &uncompressed,
+                            sorted_channels,
+                            planes,
+                            width,
+                            block_y0,
+                            lines_in_block,
+                        )?;
+                    }
+                    Compression::Piz => {
+                        // PIZ decodes to the interleaved native stream
+                        // (or the raw fallback), then scatters like the
+                        // other interleaved schemes.
+                        let uncompressed = crate::piz::decode_piz_payload(
+                            payload,
+                            &crate::piz::ChunkShape {
                                 sorted_channels,
                                 width,
                                 block_y0,
@@ -3717,6 +3763,12 @@ fn compress_one_level_tile(
                 push_pixel(&mut raw, v, ch.pixel_type);
             }
         }
+    }
+
+    // PIZ consumes the native interleaved tile stream directly
+    // (observer-spec §2) with the shared raw fallback.
+    if compression == Compression::Piz {
+        return crate::encoder::piz_payload_or_raw(raw, channels, tw as u32, 0, th);
     }
 
     if matches!(

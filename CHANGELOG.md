@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/piz_validation.rs`, auto-skips when the tool is absent):
   reference-encoded PIZ decodes bit-exact, and our PIZ encoding is
   accepted and decoded bit-exact by the reference.
+- Round-439 **PIZ across the full flat surface**: single-part tiled
+  (ONE_LEVEL / MIPMAP / RIPMAP), multi-part scanline, multi-part tiled
+  (ONE_LEVEL and the dedicated MIPMAP / RIPMAP writers, which move from
+  NONE/ZIP/ZIPS/RLE to NONE/ZIP/ZIPS/RLE/PIZ), and mixed multi-part
+  flat parts — decode and encode, reusing the shared chunk codec (a
+  tile is a self-contained chunk with origin row 0). Deep parts
+  deliberately stay without PIZ (the spec text forbids it for deep
+  data). Validated by bit-exact self round-trips through every reader
+  plus reference-binary conversions in both directions for the tiled
+  path (`tests/piz_tiled_multipart_validation.rs`).
 
 - Round-410 **`lineOrder` conformance — DECREASING_Y scanline write
   support** (`encode_exr_scanline_rgba_float_with_line_order`, plus

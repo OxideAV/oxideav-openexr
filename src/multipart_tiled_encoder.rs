@@ -135,11 +135,15 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
         }
         if !matches!(
             p.compression,
-            Compression::None | Compression::Zip | Compression::Zips | Compression::Rle
+            Compression::None
+                | Compression::Zip
+                | Compression::Zips
+                | Compression::Rle
+                | Compression::Piz
         ) {
             return Err(ExrError::unsupported(format!(
                 "multi-part tiled part '{}': compression {:?} \
-                 (encoder supports NONE/ZIP/ZIPS/RLE)",
+                 (encoder supports NONE/ZIP/ZIPS/RLE/PIZ)",
                 p.name, p.compression
             )));
         }
@@ -241,7 +245,13 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
                         }
                     }
                 }
-                let payload = compress_tile_payload(raw, p.compression)?;
+                let payload = if p.compression == Compression::Piz {
+                    // PIZ consumes the native interleaved tile stream directly
+                    // (observer-spec §2) with the shared raw fallback.
+                    crate::encoder::piz_payload_or_raw(raw, &p.channels, tw as u32, 0, th)?
+                } else {
+                    compress_tile_payload(raw, p.compression)?
+                };
                 all_tiles.push(TilePayload {
                     part_idx: part_idx as u32,
                     tx,
