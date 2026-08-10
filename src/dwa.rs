@@ -1532,6 +1532,126 @@ mod tests {
         assert_eq!(rules[3].scheme, DwaScheme::Rle);
     }
 
+    #[test]
+    fn version0_chunk_decodes_via_legacy_rules() {
+        // Build a v2 chunk for R/G/B HALF (classified identically by
+        // the default and legacy sets: legacy matches r/g/b
+        // case-insensitively with the same CSC slots), then rewrite it
+        // as a version-0 chunk with the rule block stripped. Decoding
+        // must fall back to the staged legacy rule set and produce the
+        // identical native stream.
+        let channels = vec![
+            ch("B", PixelType::Half),
+            ch("G", PixelType::Half),
+            ch("R", PixelType::Half),
+        ];
+        let shape = ChunkShape {
+            sorted_channels: &channels,
+            width: 24,
+            block_y0: 0,
+            lines_in_block: 16,
+        };
+        let mut raw = Vec::with_capacity(24 * 16 * 2 * 3);
+        for i in 0..24 * 16 * 3 {
+            let v = 0.25 + ((i % 37) as f32) * 0.015;
+            raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes());
+        }
+        let v2 = dwa_compress(&raw, &shape, DEFAULT_DWA_LEVEL).unwrap();
+        let expected = decode_dwa_payload(&v2, &shape, raw.len()).unwrap();
+
+        // Strip the rule block and rewrite the version field.
+        let (_, rule_block_len) = parse_rule_block(&v2[HEADER_BYTES..]).unwrap();
+        let mut v0 = Vec::with_capacity(v2.len() - rule_block_len);
+        v0.extend_from_slice(&v2[..HEADER_BYTES]);
+        v0[0..8].copy_from_slice(&0u64.to_le_bytes());
+        v0.extend_from_slice(&v2[HEADER_BYTES + rule_block_len..]);
+
+        let got = decode_dwa_payload(&v0, &shape, raw.len()).unwrap();
+        assert_eq!(got, expected, "legacy-rule decode diverged");
+    }
+
+    #[test]
+    fn p_linear_channels_skip_the_perceptual_lut() {
+        // A perceptually-linear channel must carry its half codes
+        // through the DCT chain without the LUT: for per-block-constant
+        // data the round-trip is then exact in half space.
+        let mut c = ch("Y", PixelType::Half);
+        c.p_linear = true;
+        let channels = vec![c];
+        let shape = ChunkShape {
+            sorted_channels: &channels,
+            width: 16,
+            block_y0: 0,
+            lines_in_block: 8,
+        };
+        let code = crate::half::f32_to_half(0.7371); // not a LUT fixed point
+        let mut raw = Vec::new();
+        for _ in 0..16 * 8 {
+            raw.extend_from_slice(&code.to_le_bytes());
+        }
+        let payload = dwa_compress(&raw, &shape, DEFAULT_DWA_LEVEL).unwrap();
+        let back = decode_dwa_payload(&payload, &shape, raw.len()).unwrap();
+        // Constant blocks survive DCT + quantisation near-exactly; with
+        // pLinear set there is no LUT wobble on top, so demand the
+        // exact code back.
+        for chunk in back.chunks_exact(2) {
+            let got = u16::from_le_bytes([chunk[0], chunk[1]]);
+            let a = crate::half::half_to_f32(got);
+            let b = crate::half::half_to_f32(code);
+            assert!(
+                (a - b).abs() <= b * 0.001,
+                "pLinear constant drifted: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn subsampled_lossy_channels_roundtrip() {
+        // 2x2-subsampled BY/RY with full-res Y: per-channel chunk
+        // extents differ, so the block grids and stream sizes must
+        // account for the sub-sampled dims.
+        let mut by = ch("BY", PixelType::Half);
+        by.x_sampling = 2;
+        by.y_sampling = 2;
+        let mut ry = ch("RY", PixelType::Half);
+        ry.x_sampling = 2;
+        ry.y_sampling = 2;
+        let y = ch("Y", PixelType::Half);
+        let channels = vec![by, ry, y];
+        let shape = ChunkShape {
+            sorted_channels: &channels,
+            width: 32,
+            block_y0: 0,
+            lines_in_block: 20,
+        };
+        // Build the native interleaved stream (rows, channels present
+        // on that row).
+        let mut raw = Vec::new();
+        for line in 0..20u32 {
+            for ch in &channels {
+                if line % (ch.y_sampling as u32) != 0 {
+                    continue;
+                }
+                let nx = crate::decoder::subsampled_dim(32, ch.x_sampling as u32);
+                for x in 0..nx {
+                    let v = 0.3 + 0.01 * ((x + line) % 23) as f32;
+                    raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes());
+                }
+            }
+        }
+        let payload = dwa_compress(&raw, &shape, DEFAULT_DWA_LEVEL).unwrap();
+        let back = decode_dwa_payload(&payload, &shape, raw.len()).unwrap();
+        assert_eq!(back.len(), raw.len());
+        for (i, (a, b)) in raw.chunks_exact(2).zip(back.chunks_exact(2)).enumerate() {
+            let va = crate::half::half_to_f32(u16::from_le_bytes([a[0], a[1]]));
+            let vb = crate::half::half_to_f32(u16::from_le_bytes([b[0], b[1]]));
+            assert!(
+                (va - vb).abs() <= 0.05 * va.abs().max(1.0),
+                "sample {i}: {va} vs {vb}"
+            );
+        }
+    }
+
     fn roundtrip_close(
         channels: &[Channel],
         width: u32,

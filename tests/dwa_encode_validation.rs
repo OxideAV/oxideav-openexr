@@ -302,6 +302,26 @@ fn our_dwaa_odd_dims_edge_mirror_is_reference_compatible() {
 }
 
 #[test]
+fn our_dwaa_p_linear_channel_is_reference_compatible() {
+    // A perceptually-linear channel skips the forward/inverse LUT on
+    // both sides; the reference's decode of our chunk must still agree
+    // bit-exactly.
+    let (w, h) = (48u32, 32u32);
+    let mut y = ch("Y", PixelType::Half);
+    y.p_linear = true;
+    run_case(
+        "pLinear Y",
+        vec![y],
+        vec![smooth_plane(w, h, 2.0, 0.2)],
+        vec![false],
+        w,
+        h,
+        Compression::Dwaa,
+        0.05,
+    );
+}
+
+#[test]
 fn dwa_compression_level_attribute_is_honoured() {
     // A higher dwaCompressionLevel must not break decodability and
     // should not enlarge the file.
