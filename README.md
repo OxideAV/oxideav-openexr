@@ -19,6 +19,8 @@ Clean-room from the public OpenEXR file-format specification.
 | Compression: `ZIPS` (1 line/blk)    | parse + write (zlib)                             |
 | Compression: `RLE`                  | parse + write (byte-RLE + spec preprocessing)    |
 | Compression: `PXR24` (16 lines/blk) | **parse + write** (scanline + tiled + multi-part) — encode: FLOAT→24-bit reduction (round mantissa to 15 bits) + byte-plane horizontal-delta + zlib deflate with raw fallback; decode: zlib inflate + prefix-sum + 24-bit reconstruction. HALF/UINT lossless. Decode validated bit-exact against the staged observer-spec's 24-bit reduction; encode round-trips through our decoder AND is accepted + decoded identically by a reference EXR validator binary. r410: the raw fallback now stores/detects the NATIVE chunk bytes (`compressed_len == uncompressed_len`), matching conforming readers — incompressible chunks carry FLOAT at full precision |
+| Compression: `PIZ` (32 lines/blk)   | **parse + write** (scanline + tiled — ONE_LEVEL / MIPMAP / RIPMAP — + multi-part + mixed) — lossless: occupancy bitmap + chunk-derived range-compaction LUT + hierarchical 2D wavelet (14-bit and modulo-2^16 variants, selection recomputed from the bitmap) + canonical static Huffman (58-bit max codes, run-length escape at `iM`); HALF/FLOAT/UINT + sub-sampled channels; shared raw fallback. Landed r439 from the staged trace `openexr-piz-dwa-observer-spec.md` §2. Validated **bit-exact both directions** against a reference EXR binary (opaque process): reference-encoded PIZ decodes identically, and our PIZ files are accepted + decoded identically |
+| Compression: `DWAA` (32 lines/blk) / `DWAB` (256 lines/blk) | **parse + write** (scanline + tiled — ONE_LEVEL / MIPMAP / RIPMAP — + multi-part + mixed) — 88-byte eleven-slot chunk header, version-2 rule block (+ staged legacy rule set for v0/v1), verbatim / AC / DC / RLE sub-streams, (suffix, pixel-type) channel classification, BT.709 CSC triples, binary32 perceptual half LUTs, staged truncated-π IDCT butterfly, plane-major DC + per-block AC with half-NaN run escapes, whole-region byte-plane RLE split; encoder emits v2 + static-Huffman AC, honours `dwaCompressionLevel` (default 45). Landed r439 (trace §3 + nine staged tables; implicit stream orderings observer-derived, record in `tests/dwa_observer_notes.md`). Decode validated **bit-exact** vs the reference's own decode of reference-encoded files; our chunks accepted + decoded bit-identically by the reference |
 | Compression: `B44` / `B44A` (32 lines/blk) | **parse + write** (scanline + tiled + multi-part) — per-channel planes; HALF 4×4 blocks (14-byte packed + B44A 3-byte flat), edge replication, optional pLinear exp/log quantisation (tables computed bit-exact vs staged 65 536-entry CSVs); FLOAT/UINT copied raw; shared raw fallback. Encode searches the smallest 6-bit shift, applies the non-linear `exactmax` `t[0]` correction, and emits 3-byte flat blocks for B44A. Decode validated bit-exact against the staged observer-spec's B44 reduction; encode round-trips through our decoder AND is accepted + decoded identically by a reference EXR validator binary (b44/b44a) |
 | Single-part scanline                | parse + write                                    |
 | Single-part tiled (`ONE_LEVEL`)     | parse + write                                    |
@@ -35,11 +37,11 @@ Clean-room from the public OpenEXR file-format specification.
 
 ## What this crate does NOT yet cover
 
-* Compression types `PIZ`, `DWAA`, `DWAB` — recognised in the type enum
-  but rejected on parse. (`PXR24` and `B44`/`B44A` decode + encode now
-  cover scanline, tiled — ONE_LEVEL / MIPMAP / RIPMAP, single- and
-  multi-part — and multi-part scanline. PIZ/DWAA/DWAB remain
-  DOCS-GAPPED: the staged observer-spec covers only PXR24 + B44/B44A.)
+* (Resolved r439.) `PIZ`, `DWAA` and `DWAB` — the last blocked
+  compression schemes — now decode AND encode across every flat
+  surface; the ten-code compression matrix is complete for flat
+  images. Deep parts deliberately stay NONE / ZIPS / RLE (the spec
+  text forbids PIZ for deep data and the validators reject deep ZIP).
 * A reference EXR B44A decoder zeroes pLinear channels (its
   plain-B44 decoder of identical data does not); our codec follows the
   observer-spec, so pLinear validation runs on the self-consistent
@@ -105,10 +107,13 @@ cargo +nightly fuzz run parse_multipart_mixed
 
 `parse_flat` attacks the single-part flat readers — `parse_exr`
 (scanline + tiled ONE_LEVEL) and `parse_exr_tiled_multilevel`
-(MIPMAP / RIPMAP) — the only route into the PXR24 byte-plane/delta and
-B44/B44A 4×4-block decode arithmetic; its overlay mode splices fuzz
-bytes over the offset-table + chunk region of writer-produced valid
-files across shape × compression × lineOrder combinations.
+(MIPMAP / RIPMAP) — the only route into the PXR24 byte-plane/delta,
+B44/B44A 4×4-block, PIZ (bitmap / range LUT / wavelet /
+canonical-Huffman) and DWAA/DWAB (rule block / sub-streams / AC run
+coding / IDCT) decode arithmetic; its overlay mode splices fuzz bytes
+over the offset-table + chunk region of writer-produced valid files
+across shape × compression × lineOrder combinations (all ten
+compression codes since r439).
 `parse_deep_scanline` attacks the deep scanline chunk walk.
 `parse_multipart_mixed` attacks the mixed multi-part reader — the
 per-part chunk-shape dispatch (flat scanline / flat + deep tiled at

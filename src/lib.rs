@@ -346,10 +346,13 @@
 //! order, with mixed per-part compression, and on edge-tile (13×9)
 //! tiled-part-after-scanline-part layouts.
 //!
-//! Round-4+ followups still open: PIZ / DWAA / DWAB compression (PIZ
-//! blocked on a clean-room wavelet+Huffman trace doc; DWA on the DCT/
-//! gamma trace) and HDR pixel-format integration with `oxideav-core`.
-//! (PXR24 and B44 / B44A now cover scanline, tiled ONE_LEVEL / MIPMAP /
+//! Round-439: PIZ and DWAA / DWAB landed — decode AND encode across
+//! every flat surface (scanline, tiled ONE_LEVEL / MIPMAP / RIPMAP,
+//! multi-part, mixed) from the staged clean-room trace
+//! `openexr-piz-dwa-observer-spec.md`; the compression matrix is now
+//! complete for flat images. Remaining followup: HDR pixel-format
+//! integration with `oxideav-core`.
+//! (PXR24 and B44 / B44A cover scanline, tiled ONE_LEVEL / MIPMAP /
 //! RIPMAP, and multi-part — including the mixed writer; mixed-with-deep
 //! and mixed-multi-level landed in rounds 232-382. Round 410 added
 //! observer-derived `lineOrder` storage-order support — DECREASING_Y

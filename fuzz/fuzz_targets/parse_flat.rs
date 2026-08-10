@@ -5,10 +5,11 @@
 //! and `oxideav_openexr::parse_exr_tiled_multilevel` (MIPMAP / RIPMAP
 //! pyramids). These are the oldest public readers but — unlike the
 //! deep and mixed walkers — were never fuzzed, and they are the ONLY
-//! route into the PXR24 byte-plane/delta and B44/B44A 4×4-block
-//! decoders, whose per-chunk arithmetic (reorg-size accounting, block
-//! bit-unpacking, raw-fallback length discrimination) is entirely
-//! attacker-controlled.
+//! route into the PXR24 byte-plane/delta, B44/B44A 4×4-block, PIZ
+//! (bitmap / range LUT / wavelet / canonical-Huffman) and DWAA/DWAB
+//! (rule block / sub-streams / AC run coding / IDCT) decoders, whose
+//! per-chunk arithmetic (reorg-size accounting, block bit-unpacking,
+//! raw-fallback length discrimination) is entirely attacker-controlled.
 //!
 //! Contract under test: every byte slice produces either `Ok(..)` or
 //! `Err(ExrError::*)`. Panics, debug-mode integer overflows,
@@ -20,8 +21,9 @@
 //!   1. Raw mode — hand the fuzz bytes to both entry points.
 //!   2. Overlay mode — build a small structurally valid file with the
 //!      crate's own writers (first byte selects among scanline / tiled
-//!      / mipmap / ripmap shapes, compression schemes including PXR24
-//!      and B44/B44A, and the three lineOrder storage layouts), then
+//!      / mipmap / ripmap shapes, compression schemes including PXR24,
+//!      B44/B44A, PIZ and DWAA/DWAB, and the three lineOrder storage
+//!      layouts), then
 //!      splice the remaining fuzz bytes over everything past the
 //!      header (offset table + chunk region) so the fuzzer reaches the
 //!      per-chunk decode arithmetic without rediscovering a valid
@@ -29,7 +31,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_openexr::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_scanline_rgba_float_with,
+    build_box_filter_pyramid, build_box_filter_ripmap,
     encode_exr_scanline_rgba_float_with_line_order, encode_exr_tiled_mipmap,
     encode_exr_tiled_rgba_float_with_line_order, encode_exr_tiled_ripmap, parse_exr,
     parse_exr_tiled_multilevel, Channel, Compression, LineOrder, PixelType,
@@ -54,24 +56,30 @@ fn gray_channel(pt: PixelType) -> Vec<Channel> {
 /// Build one of a spread of valid single-part flat files. `sel` picks
 /// the shape × compression × line-order combination.
 fn base_file(sel: u8) -> Option<Vec<u8>> {
-    let comp = match sel % 6 {
+    let comp = match sel % 9 {
         0 => Compression::None,
         1 => Compression::Zip,
         2 => Compression::Rle,
         3 => Compression::Pxr24,
         4 => Compression::B44,
-        _ => Compression::B44a,
+        5 => Compression::B44a,
+        // Round 439: PIZ (bitmap/LUT/wavelet/Huffman) and DWAA/DWAB
+        // (rule block, four sub-streams, AC/DC coding, IDCT) are decode
+        // arithmetic wholly driven by attacker-controlled chunk bytes.
+        6 => Compression::Piz,
+        7 => Compression::Dwaa,
+        _ => Compression::Dwab,
     };
-    let lo = match (sel / 6) % 2 {
+    let lo = match (sel / 9) % 2 {
         0 => LineOrder::IncreasingY,
         _ => LineOrder::DecreasingY,
     };
-    match (sel / 12) % 4 {
+    match (sel / 18) % 4 {
         // Scanline 9×37 (partial final block for every block height).
         0 => encode_exr_scanline_rgba_float_with_line_order(9, 37, &rgba(9, 37), comp, lo).ok(),
         // Tiled ONE_LEVEL with edge tiles; exercise RANDOM_Y too.
         1 => {
-            let lo = if (sel / 6) % 2 == 0 {
+            let lo = if (sel / 9) % 2 == 0 {
                 LineOrder::RandomY
             } else {
                 lo

@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted and decoded bit-identically by the reference
   (`tests/dwa_decode_validation.rs`, `tests/dwa_encode_validation.rs`,
   auto-skip without the tool).
+- Round-439 **`parse_flat` fuzz coverage for PIZ + DWAA/DWAB**: the
+  overlay mode's shape × compression spread now includes all ten
+  compression codes, reaching the PIZ bitmap / range-LUT / wavelet /
+  canonical-Huffman and DWA rule-block / sub-stream / AC-run / IDCT
+  decode arithmetic; a bounded local session (131k execs, 5 min,
+  address-sanitised) ran clean.
 - Round-439 **DWAA / DWAB across the full flat surface**: single-part
   tiled (ONE_LEVEL / MIPMAP / RIPMAP), multi-part scanline, multi-part
   tiled incl. the dedicated mipmap/ripmap writers, and mixed

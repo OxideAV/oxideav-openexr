@@ -20,7 +20,7 @@ pub enum ExrError {
     /// offset table inconsistent with dataWindow, etc.).
     InvalidData(String),
     /// Byte stream uses a feature this crate doesn't implement yet
-    /// (PIZ / RLE / B44 / DWAA / DWAB compression; tiled format;
+    /// (deep-data compression restrictions; exotic tiled layouts;
     /// multi-part files; deep data; UINT pixel type; subsampled
     /// channels with sampling != 1).
     Unsupported(String),

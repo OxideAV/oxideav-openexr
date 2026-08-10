@@ -11,10 +11,12 @@
 //! then concatenated per-part offset tables, then chunks prefixed with
 //! a 4-byte part number. Use [`parse_exr_multipart`] to parse them.
 //!
-//! Compression coverage: NONE, ZIP, ZIPS, RLE, PXR24, and B44 / B44A
-//! (PXR24 + B44/B44A decode for single-part scanline images — see
-//! [`decode_pxr24_payload`] and [`crate::b44`]). PIZ / DWAA / DWAB:
-//! header-parsed and rejected on parse with a clear unsupported message.
+//! Compression coverage: NONE, ZIP, ZIPS, RLE, PXR24, B44 / B44A
+//! ([`decode_pxr24_payload`] and [`crate::b44`]), PIZ
+//! ([`crate::piz`] — bitmap + range LUT + wavelet + canonical
+//! Huffman), and DWAA / DWAB ([`crate::dwa`] — rule-classified
+//! verbatim / lossy-DCT / RLE sub-streams). The full ten-code matrix
+//! decodes on every flat path.
 //!
 //! ZIP-family compression pre-applies two reversible transforms
 //! documented in the OpenEXR file-format spec:
