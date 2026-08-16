@@ -326,7 +326,11 @@ fn exrheader_text(bytes: &[u8]) -> Option<String> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("oxideav-openexr-optattr-{nanos}.exr"));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let path =
+        std::env::temp_dir().join(format!("oxideav-openexr-optattr-{nanos}-{pid}-{seq}.exr"));
     std::fs::write(&path, bytes).unwrap();
     let output = Command::new("exrheader")
         .arg(&path)

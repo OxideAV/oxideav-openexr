@@ -298,6 +298,9 @@ fn tempfile_path(suffix: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    p.push(format!("{nanos}-{suffix}"));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    p.push(format!("{nanos}-{pid}-{seq}-{suffix}"));
     p
 }

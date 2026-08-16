@@ -333,7 +333,10 @@ fn exrheader_renders_envmap_and_preview() {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = dir.join(format!("oxideav-openexr-attr-{nanos}.exr"));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let path = dir.join(format!("oxideav-openexr-attr-{nanos}-{pid}-{seq}.exr"));
         std::fs::write(&path, &bytes).unwrap();
         let out = Command::new("exrheader")
             .arg(&path)
