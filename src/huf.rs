@@ -77,7 +77,13 @@ impl BitWriter {
 
 struct BitReader<'a> {
     data: &'a [u8],
-    /// Next bit index (MSB of byte 0 is bit 0).
+    /// Next byte of `data` not yet loaded into `acc`.
+    byte_pos: usize,
+    /// Upcoming bits, left-aligned (the next bit to read is bit 63).
+    acc: u64,
+    /// Valid bits currently held in `acc`.
+    nacc: u32,
+    /// Bits consumed so far (MSB of byte 0 is bit 0).
     pos: u64,
     /// Total available bits.
     limit: u64,
@@ -87,46 +93,81 @@ impl<'a> BitReader<'a> {
     fn new(data: &'a [u8], limit_bits: u64) -> Self {
         BitReader {
             data,
+            byte_pos: 0,
+            acc: 0,
+            nacc: 0,
             pos: 0,
             limit: limit_bits.min(data.len() as u64 * 8),
         }
     }
 
+    /// Top up the accumulator to at least 56 valid bits (or to the end
+    /// of the data). Bulk path loads up to seven bytes from one
+    /// unaligned eight-byte read; the tail falls back to per-byte
+    /// loads.
     #[inline]
-    fn bit_at(&self, idx: u64) -> u64 {
-        let byte = self.data[(idx >> 3) as usize];
-        ((byte >> (7 - (idx & 7))) & 1) as u64
+    fn refill(&mut self) {
+        if self.nacc <= 55 {
+            if let Some(chunk) = self.data.get(self.byte_pos..self.byte_pos + 8) {
+                let w = u64::from_be_bytes(chunk.try_into().unwrap());
+                let fill = (63 - self.nacc) >> 3; // whole bytes that fit (>= 1)
+                self.acc |= (w & (!0u64 << (64 - fill * 8))) >> self.nacc;
+                self.byte_pos += fill as usize;
+                self.nacc += fill * 8;
+            } else {
+                while self.nacc <= 55 && self.byte_pos < self.data.len() {
+                    self.acc |= (self.data[self.byte_pos] as u64) << (56 - self.nacc);
+                    self.byte_pos += 1;
+                    self.nacc += 8;
+                }
+            }
+        }
     }
 
-    /// Read `n` bits MSB-first. Errors past the declared bit limit.
+    /// Read `n` bits (1..=56) MSB-first. Errors past the declared bit
+    /// limit.
+    #[inline]
     fn get(&mut self, n: u32) -> Result<u64> {
+        debug_assert!((1..=56).contains(&n));
         if self.pos + n as u64 > self.limit {
             return Err(ExrError::invalid(
                 "Huffman payload: bit stream exhausted".to_string(),
             ));
         }
-        let mut v = 0u64;
-        for _ in 0..n {
-            v = (v << 1) | self.bit_at(self.pos);
-            self.pos += 1;
-        }
+        self.refill();
+        debug_assert!(self.nacc >= n);
+        let v = self.acc >> (64 - n);
+        self.acc <<= n;
+        self.nacc -= n;
+        self.pos += n as u64;
         Ok(v)
     }
 
-    /// Peek up to `n` bits without consuming; missing bits (past the
-    /// limit) read as zero and `avail` reports how many were real.
+    /// Peek `n` bits (1..=56) without consuming; bits past the limit
+    /// read as zero.
     #[inline]
-    fn peek(&self, n: u32) -> (u64, u32) {
+    fn peek(&mut self, n: u32) -> u64 {
+        debug_assert!((1..=56).contains(&n));
+        self.refill();
+        let raw = self.acc >> (64 - n);
         let avail = (self.limit - self.pos).min(n as u64) as u32;
-        let mut v = 0u64;
-        for i in 0..avail {
-            v = (v << 1) | self.bit_at(self.pos + i as u64);
+        if avail >= n {
+            raw
+        } else if avail == 0 {
+            0
+        } else {
+            // The final loaded byte may carry padding past the declared
+            // bit count; zero it so table lookups see the same window
+            // the bit-exact reader would.
+            (raw >> (n - avail)) << (n - avail)
         }
-        (v << (n - avail), avail)
     }
 
     #[inline]
     fn skip(&mut self, n: u32) {
+        debug_assert!(self.nacc >= n);
+        self.acc <<= n;
+        self.nacc -= n;
         self.pos += n as u64;
     }
 }
@@ -311,7 +352,7 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
     let mut out: Vec<u16> = Vec::with_capacity(expected);
     let escape = i_m as u32;
     while out.len() < expected {
-        let (peeked, _avail) = r.peek(FAST_BITS as u32);
+        let peeked = r.peek(FAST_BITS as u32);
         let entry = fast[peeked as usize];
         let sym: u32;
         if entry != 0 {

@@ -478,6 +478,47 @@ fn idct8x8(block: &mut [f32; 64]) {
     }
 }
 
+/// One 8-point inverse pass over a lane whose only non-zero input is
+/// `c0` — [`idct8`] with every zero term constant-folded, keeping the
+/// exact IEEE operation sequence on the `c0`-dependent values (the
+/// folded terms are literal `+0.0` products and sums, so every output
+/// bit — including negative-zero and NaN propagation — matches the
+/// general butterfly).
+#[inline]
+fn idct8_dc(c0: f32) -> [f32; 8] {
+    let s0 = DCT_A * (c0 + 0.0);
+    let s1 = DCT_A * (c0 - 0.0);
+    let g0 = s0 + 0.0;
+    let g3 = s0 - 0.0;
+    let g1 = s1 + 0.0;
+    let g2 = s1 - 0.0;
+    [
+        g0 + 0.0,
+        g1 + 0.0,
+        g2 + 0.0,
+        g3 + 0.0,
+        g3 - 0.0,
+        g2 - 0.0,
+        g1 - 0.0,
+        g0 - 0.0,
+    ]
+}
+
+/// Inverse 8×8 DCT of a block whose only non-zero coefficient sits at
+/// scan position 0 (the DC slot, raster index 0). Bit-exactly equal to
+/// [`idct8x8`] on that block: the row pass leaves rows 1..7 all `+0.0`
+/// and turns row 0 into [`idct8_dc`] of the DC, and every column then
+/// sees a single-coefficient lane again.
+fn idct8x8_dc_only(block: &mut [f32; 64]) {
+    let row0 = idct8_dc(block[0]);
+    for (j, &r) in row0.iter().enumerate() {
+        let col = idct8_dc(r);
+        for (i, &v) in col.iter().enumerate() {
+            block[i * 8 + j] = v;
+        }
+    }
+}
+
 /// Separable forward 8×8 DCT (encoder side): rows then columns.
 fn fdct8x8(block: &mut [f32; 64]) {
     for row in 0..8 {
@@ -851,11 +892,15 @@ pub(crate) fn decode_dwa_payload(
             for (comp, block) in blocks.iter_mut().enumerate() {
                 // Scan-order coefficients: DC from the plane-major DC
                 // stream, AC un-RLE'd from the block-interleaved AC
-                // stream.
-                let mut scan = [0u16; 64];
-                scan[0] = *dc
-                    .get(dc_pos + comp * nblocks + blk)
-                    .ok_or_else(|| ExrError::invalid("DWA: DC stream exhausted".to_string()))?;
+                // stream. Non-zero codes go straight through the inverse
+                // zig-zag into the raster block (a zero code decodes to
+                // +0.0, which the zero-initialised raster already holds).
+                let mut raster = [0.0f32; 64];
+                raster[0] = crate::half::half_to_f32(
+                    *dc.get(dc_pos + comp * nblocks + blk)
+                        .ok_or_else(|| ExrError::invalid("DWA: DC stream exhausted".to_string()))?,
+                );
+                let mut any_ac = false;
                 let mut pos = 1usize;
                 while pos < 64 {
                     let elem = *ac
@@ -873,16 +918,18 @@ pub(crate) fn decode_dwa_payload(
                             })?;
                         }
                     } else {
-                        scan[pos] = elem;
+                        if elem != 0 {
+                            raster[ZIGZAG_RASTER[pos]] = crate::half::half_to_f32(elem);
+                            any_ac = true;
+                        }
                         pos += 1;
                     }
                 }
-                // Inverse zig-zag into raster order, half -> f32.
-                let mut raster = [0.0f32; 64];
-                for (k, &code) in scan.iter().enumerate() {
-                    raster[ZIGZAG_RASTER[k]] = crate::half::half_to_f32(code);
+                if any_ac {
+                    idct8x8(&mut raster);
+                } else {
+                    idct8x8_dc_only(&mut raster);
                 }
-                idct8x8(&mut raster);
                 *block = raster;
             }
             // Inverse colour transform for triples, then half + inverse
@@ -1433,6 +1480,41 @@ mod tests {
         assert!(seen.iter().all(|&s| s));
         // First few entries of the T.81 order.
         assert_eq!(&ZIGZAG_RASTER[..8], &[0, 1, 8, 16, 9, 2, 3, 10]);
+    }
+
+    #[test]
+    fn dc_only_idct_is_bit_exact() {
+        // The DC-only fast path must reproduce the general butterfly
+        // bit for bit — including negative zero, infinities and NaN
+        // codes, whose +0.0 interactions are why the folded terms keep
+        // the exact operation sequence.
+        let dc_codes: &[u16] = &[
+            0x0000, 0x8000, // +0.0 / -0.0
+            0x0001, 0x8001, // subnormals
+            0x3C00, 0xBC00, // +-1.0
+            0x7BFF, 0xFBFF, // +-max finite
+            0x7C00, 0xFC00, // +-inf
+            0x7C01, 0xFE00, // NaNs
+            0x1234, 0xABCD, 0x5555,
+        ];
+        for &code in dc_codes {
+            let dcv = crate::half::half_to_f32(code);
+            let mut full = [0.0f32; 64];
+            full[0] = dcv;
+            idct8x8(&mut full);
+            let mut fast = [0.0f32; 64];
+            fast[0] = dcv;
+            idct8x8_dc_only(&mut fast);
+            for i in 0..64 {
+                assert_eq!(
+                    full[i].to_bits(),
+                    fast[i].to_bits(),
+                    "DC code {code:#06x} diverges at raster index {i}: {} vs {}",
+                    full[i],
+                    fast[i]
+                );
+            }
+        }
     }
 
     #[test]

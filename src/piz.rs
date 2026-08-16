@@ -183,7 +183,24 @@ fn wav_encode(
     oy: usize,
     use16: bool,
 ) {
-    let w = if use16 { wenc16 } else { wenc14 };
+    // Monomorphize per variant so the step function inlines into the
+    // innermost loop (a runtime fn pointer defeats inlining).
+    if use16 {
+        wav_encode_impl(buf, base, nx, ny, ox, oy, wenc16);
+    } else {
+        wav_encode_impl(buf, base, nx, ny, ox, oy, wenc14);
+    }
+}
+
+fn wav_encode_impl<W: Fn(u16, u16) -> (u16, u16) + Copy>(
+    buf: &mut [u16],
+    base: usize,
+    nx: usize,
+    ny: usize,
+    ox: usize,
+    oy: usize,
+    w: W,
+) {
     for p in level_steps(nx.min(ny)) {
         let p2 = p * 2;
         let mut y = 0usize;
@@ -245,7 +262,22 @@ fn wav_decode(
     oy: usize,
     use16: bool,
 ) {
-    let w = if use16 { wdec16 } else { wdec14 };
+    if use16 {
+        wav_decode_impl(buf, base, nx, ny, ox, oy, wdec16);
+    } else {
+        wav_decode_impl(buf, base, nx, ny, ox, oy, wdec14);
+    }
+}
+
+fn wav_decode_impl<W: Fn(u16, u16) -> (u16, u16) + Copy>(
+    buf: &mut [u16],
+    base: usize,
+    nx: usize,
+    ny: usize,
+    ox: usize,
+    oy: usize,
+    w: W,
+) {
     for &p in level_steps(nx.min(ny)).iter().rev() {
         let p2 = p * 2;
         let mut y = 0usize;
