@@ -934,36 +934,43 @@ pub(crate) fn decode_dwa_payload(
             }
             // Inverse colour transform for triples, then half + inverse
             // perceptual LUT per component channel, cropping mirrored
-            // edge texels.
-            for yy in 0..8usize {
-                let py = by0 + yy;
-                if py >= ny {
-                    continue;
-                }
-                for xx in 0..8usize {
-                    let px = bx0 + xx;
-                    if px >= nx {
-                        continue;
-                    }
-                    let idx = yy * 8 + xx;
-                    match set {
-                        LossySet::Triple(t) => {
+            // edge texels. The set dispatch and pLinear flags are
+            // hoisted out of the per-texel loop.
+            let ylim = (ny - by0).min(8);
+            let xlim = (nx - bx0).min(8);
+            match set {
+                LossySet::Triple(t) => {
+                    let lut: [bool; 3] = [
+                        !shape.sorted_channels[t[0]].p_linear,
+                        !shape.sorted_channels[t[1]].p_linear,
+                        !shape.sorted_channels[t[2]].p_linear,
+                    ];
+                    for yy in 0..ylim {
+                        let row = (by0 + yy) * nx + bx0;
+                        for xx in 0..xlim {
+                            let idx = yy * 8 + xx;
                             let (r, g, b) =
                                 csc_inverse(blocks[0][idx], blocks[1][idx], blocks[2][idx]);
-                            for (comp, (&chi, v)) in t.iter().zip([r, g, b]).enumerate() {
+                            for (comp, v) in [r, g, b].into_iter().enumerate() {
                                 let mut code = crate::half::f32_to_half(v);
-                                if !shape.sorted_channels[chi].p_linear {
+                                if lut[comp] {
                                     code = to_linear(code);
                                 }
-                                planes[comp][py * nx + px] = code;
+                                planes[comp][row + xx] = code;
                             }
                         }
-                        LossySet::Single(chi) => {
-                            let mut code = crate::half::f32_to_half(blocks[0][idx]);
-                            if !shape.sorted_channels[*chi].p_linear {
+                    }
+                }
+                LossySet::Single(chi) => {
+                    let lut = !shape.sorted_channels[*chi].p_linear;
+                    for yy in 0..ylim {
+                        let row = (by0 + yy) * nx + bx0;
+                        for xx in 0..xlim {
+                            let mut code = crate::half::f32_to_half(blocks[0][yy * 8 + xx]);
+                            if lut {
                                 code = to_linear(code);
                             }
-                            planes[0][py * nx + px] = code;
+                            planes[0][row + xx] = code;
                         }
                     }
                 }
@@ -1270,25 +1277,34 @@ pub(crate) fn dwa_compress(raw: &[u8], shape: &ChunkShape, level: f32) -> Result
             let by0 = (blk / bx) * 8;
             for (comp, plane) in planes.iter().enumerate() {
                 // Gather the 8x8 block with mirrored edges
-                // (v -> 2L - v, clamped; no edge repeat).
+                // (v -> 2L - v, clamped; no edge repeat). Interior
+                // blocks skip the per-texel mirror arithmetic and copy
+                // whole rows.
                 let mut block = [0.0f32; 64];
-                for yy in 0..8usize {
-                    let mut sy = by0 + yy;
-                    if sy >= ny {
-                        sy = (2 * (ny - 1)).wrapping_sub(sy);
-                        if sy >= ny {
-                            sy = ny - 1;
-                        }
+                if by0 + 8 <= ny && bx0 + 8 <= nx {
+                    for yy in 0..8usize {
+                        let src = (by0 + yy) * nx + bx0;
+                        block[yy * 8..yy * 8 + 8].copy_from_slice(&plane[src..src + 8]);
                     }
-                    for xx in 0..8usize {
-                        let mut sx = bx0 + xx;
-                        if sx >= nx {
-                            sx = (2 * (nx - 1)).wrapping_sub(sx);
-                            if sx >= nx {
-                                sx = nx - 1;
+                } else {
+                    for yy in 0..8usize {
+                        let mut sy = by0 + yy;
+                        if sy >= ny {
+                            sy = (2 * (ny - 1)).wrapping_sub(sy);
+                            if sy >= ny {
+                                sy = ny - 1;
                             }
                         }
-                        block[yy * 8 + xx] = plane[sy * nx + sx];
+                        for xx in 0..8usize {
+                            let mut sx = bx0 + xx;
+                            if sx >= nx {
+                                sx = (2 * (nx - 1)).wrapping_sub(sx);
+                                if sx >= nx {
+                                    sx = nx - 1;
+                                }
+                            }
+                            block[yy * 8 + xx] = plane[sy * nx + sx];
+                        }
                     }
                 }
                 fdct8x8(&mut block);

@@ -33,9 +33,9 @@ const FAST_BITS: usize = 14;
 
 struct BitWriter {
     out: Vec<u8>,
-    // 7 residual bits + a 58-bit code can exceed 64 bits, so accumulate
-    // in 128.
-    acc: u128,
+    /// Pending bits, left-aligned (the next bit to emit is bit 63).
+    acc: u64,
+    /// Valid bits currently held in `acc` (< 64 between calls).
     nacc: u32,
     bits_written: u64,
 }
@@ -52,24 +52,45 @@ impl BitWriter {
 
     /// Append the low `n` bits of `v`, most-significant-first. `n` is
     /// always in 1..=58 here (6-bit table symbols, 8-bit run counts,
-    /// codes up to the 58-bit maximum).
+    /// codes up to the 58-bit maximum). Whole 8-byte accumulators are
+    /// flushed in one extend instead of per-byte pushes.
+    #[inline]
     fn put(&mut self, v: u64, n: u32) {
         debug_assert!((1..=58).contains(&n));
-        self.acc = (self.acc << n) | ((v & ((1u64 << n) - 1)) as u128);
-        self.nacc += n;
         self.bits_written += n as u64;
-        while self.nacc >= 8 {
-            self.nacc -= 8;
-            self.out.push(((self.acc >> self.nacc) & 0xFF) as u8);
+        let mut n = n;
+        let mut v = v & ((1u64 << n) - 1);
+        let room = 64 - self.nacc;
+        if n > room {
+            // Top up the accumulator to exactly 64 bits and flush it.
+            let spill = n - room; // bits that don't fit (< 64)
+            if room > 0 {
+                self.acc |= v >> spill;
+            }
+            self.out.extend_from_slice(&self.acc.to_be_bytes());
+            self.acc = 0;
+            self.nacc = 0;
+            n = spill;
+            v &= (1u64 << spill) - 1;
+        }
+        if n > 0 {
+            self.acc |= v << (64 - self.nacc - n);
+            self.nacc += n;
+        }
+        if self.nacc == 64 {
+            self.out.extend_from_slice(&self.acc.to_be_bytes());
+            self.acc = 0;
+            self.nacc = 0;
         }
     }
 
-    /// Flush the trailing partial byte left-aligned (high end filled).
+    /// Flush the trailing bytes, the final partial byte left-aligned
+    /// (high end filled).
     fn finish(mut self) -> (Vec<u8>, u64) {
-        if self.nacc > 0 {
-            let b = (((self.acc << (8 - self.nacc)) & 0xFF) as u64) as u8;
-            self.out.push(b);
-            self.nacc = 0;
+        while self.nacc > 0 {
+            self.out.push((self.acc >> 56) as u8);
+            self.acc <<= 8;
+            self.nacc = self.nacc.saturating_sub(8);
         }
         (self.out, self.bits_written)
     }
