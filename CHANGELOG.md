@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round-446 **PIZ / DWA performance pass** over the round-439
+  first-cut entropy stages, bit-exact on both sides (the reference
+  cross-validation suites pass unchanged; a new unit test pins the
+  DC-only IDCT bitwise against the general butterfly across negative
+  zero, infinity and NaN DC codes): the shared Huffman payload bit
+  reader keeps a 64-bit left-aligned accumulator refilled seven bytes
+  per unaligned load (replacing per-bit extraction), the bit writer
+  flushes whole eight-byte accumulators, the PIZ wavelet drivers
+  monomorphize over the step function so both variants inline into the
+  innermost loop, DWA AC un-RLE writes non-zero coefficients straight
+  through the inverse zig-zag into the raster block with a folded
+  single-lane IDCT for DC-only blocks, the DWA encoder copies interior
+  8×8 blocks row-wise, and the decoder hoists the channel-set dispatch
+  out of the per-texel write-back. Measured (criterion matrix, Apple
+  Silicon): PIZ scanline decode 203 → 270 MiB/s HALF / 237 → 353
+  FLOAT, tiled decode +26–40%, PIZ encode +14–17%; DWAA/DWAB decode
+  +9–14%, DWAB encode +8–12%. `BENCHMARKS.md` carries the full
+  refreshed matrix. A bounded `parse_flat` fuzz session over the
+  reworked decode arithmetic (93.8k runs, 5 min, address-sanitised)
+  ran clean.
+
+### Fixed
+
+- Round-446 **temp-path collisions between parallel validation
+  tests**: the suites named their scratch dirs/files with a wall-clock
+  nanosecond stamp alone, and macOS SystemTime's microsecond
+  granularity let two tests starting together share a directory and
+  clobber each other's `.exr` files (observed as a spurious
+  `mipmap_b44a_half` failure reading the sibling b44 test's file). All
+  29 remaining test files now join the process id and a per-process
+  sequence number to the stamp, matching the pattern the four
+  `multipart_*` suites already used.
+
 ### Added
 
 - Round-439 **PIZ compression — decode AND encode** for single-part

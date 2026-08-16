@@ -93,8 +93,9 @@ A Criterion harness (`benches/codec_benchmarks.rs`) measures decode /
 encode throughput across every compression scheme for HALF and FLOAT,
 scanline and tiled — see [`BENCHMARKS.md`](BENCHMARKS.md) for the
 current numbers (scanline HALF NONE decode 2.6 GiB/s, FLOAT NONE
-19.7 GiB/s, PXR24 1.1–2.4 GiB/s, PIZ ~0.2 GiB/s and DWAA/DWAB
-0.19–0.4 GiB/s first-cut on Apple Silicon).
+19.7 GiB/s, PXR24 1.1–2.4 GiB/s, PIZ 0.27–0.35 GiB/s and DWAA/DWAB
+0.21–0.44 GiB/s after the round-446 optimisation pass, on Apple
+Silicon).
 
 ## Fuzzing
 
