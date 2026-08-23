@@ -271,8 +271,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // 2. Overlay mode.
-    let Some(mut file) = base_file(data[0]) else {
+    // 2. Overlay mode. The writer-built bases depend only on the
+    // selector byte, so build each of the 256 possibilities once and
+    // clone from the memo: the per-exec cost becomes one memcpy, which
+    // multiplies the fuzzer's wall-clock throughput.
+    static BASES: std::sync::OnceLock<Vec<Option<Vec<u8>>>> = std::sync::OnceLock::new();
+    let bases = BASES.get_or_init(|| (0..=255u8).map(base_file).collect());
+    let Some(mut file) = bases[data[0] as usize].clone() else {
         return;
     };
     let overlay = &data[1..];

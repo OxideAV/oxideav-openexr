@@ -145,19 +145,28 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // 2. Overlay mode. First byte selects the base compression; the
-    // rest is spliced over everything after the header chain (offset
-    // tables + chunk bodies). Selectors 0-2 keep their historical
-    // mapping; 3-5 (round 450) put PIZ / DWAA / DWAB on the flat parts.
-    let compression = match data[0] % 6 {
-        0 => Compression::None,
-        1 => Compression::Rle,
-        2 => Compression::Zips,
-        3 => Compression::Piz,
-        4 => Compression::Dwaa,
-        _ => Compression::Dwab,
-    };
-    let Some(mut file) = base_file(compression) else {
+    // 2. Overlay mode. First byte selects the base compression
+    // (0-2 keep their historical NONE/RLE/ZIPS mapping; 3-5, added in
+    // round 450, put PIZ / DWAA / DWAB on the flat parts); the rest is
+    // spliced over everything after the header chain (offset tables +
+    // chunk bodies).
+    // The six writer-built bases are selector-pure; memoize them so the
+    // per-exec cost is one memcpy instead of a full multi-part encode.
+    static BASES: std::sync::OnceLock<Vec<Option<Vec<u8>>>> = std::sync::OnceLock::new();
+    let bases = BASES.get_or_init(|| {
+        [
+            Compression::None,
+            Compression::Rle,
+            Compression::Zips,
+            Compression::Piz,
+            Compression::Dwaa,
+            Compression::Dwab,
+        ]
+        .into_iter()
+        .map(base_file)
+        .collect()
+    });
+    let Some(mut file) = bases[(data[0] % 6) as usize].clone() else {
         return;
     };
     let overlay = &data[1..];
