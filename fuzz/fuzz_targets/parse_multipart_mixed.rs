@@ -28,11 +28,12 @@
 //!
 //!   1. Raw mode — hand the fuzz bytes straight to the decoder.
 //!   2. Overlay mode — build a structurally valid mixed file (flat
-//!      scanline part + multi-level deep MIPMAP tiled part) with the
-//!      crate's own writer, then splice fuzz bytes over the offset
-//!      tables + chunk region so the fuzzer reaches the per-part
-//!      chunk-dispatch arithmetic without rediscovering two valid
-//!      part headers from scratch.
+//!      scanline part + flat tiled part + multi-level deep MIPMAP
+//!      tiled part, the flat parts covering PIZ / DWAA / DWAB as well
+//!      as NONE / RLE / ZIPS) with the crate's own writer, then splice
+//!      fuzz bytes over the offset tables + chunk region so the fuzzer
+//!      reaches the per-part chunk-dispatch arithmetic without
+//!      rediscovering the valid part headers from scratch.
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_openexr::deep::DeepMipmapTiledLevelInput;
@@ -60,17 +61,25 @@ fn mk_channels() -> Vec<Channel> {
     ]
 }
 
-/// Build a small valid mixed file: one flat scanline part + one deep
-/// MIPMAP tiled part (8×8, tile 4×4 → levels 8/4/2/1 → 4+1+1+1 = 7
-/// deep chunks). Returns `None` if the writer rejects the inputs.
+/// Build a small valid mixed file: one flat scanline part + one flat
+/// tiled ONE_LEVEL part + one deep MIPMAP tiled part (8×8, tile 4×4 →
+/// levels 8/4/2/1 → 4+1+1+1 = 7 deep chunks). The flat parts take the
+/// fuzz-selected compression — including PIZ / DWAA / DWAB since round
+/// 450, so the lossy per-chunk decoders are reachable through the
+/// multi-part chunk dispatch too — while the deep part maps anything
+/// deep-illegal to ZIPS. Returns `None` if the writer rejects the
+/// inputs.
 fn base_file(compression: Compression) -> Option<Vec<u8>> {
     let w = 8u32;
     let h = 8u32;
     let pixels = (w * h) as usize;
     let flat: Vec<f32> = (0..pixels).map(|i| i as f32 * 0.125).collect();
+    let tiled: Vec<f32> = (0..pixels).map(|i| ((i * 5) % 61) as f32 / 60.0).collect();
 
-    // Per-level deep data, held alive for the borrow in the input.
-    let levels_data: Vec<(u32, u32, Vec<u32>, Vec<f32>, Vec<f32>)> = (0..4u32)
+    // Per-level deep data, held alive for the borrow in the input:
+    // (width, height, samples-per-pixel, A samples, Z samples).
+    type DeepLevelData = (u32, u32, Vec<u32>, Vec<f32>, Vec<f32>);
+    let levels_data: Vec<DeepLevelData> = (0..4u32)
         .map(|l| {
             let lw = (w >> l).max(1);
             let lh = (h >> l).max(1);
@@ -101,6 +110,16 @@ fn base_file(compression: Compression) -> Option<Vec<u8>> {
             planes: vec![&flat, &flat],
             compression,
         },
+        MultipartMixedPart::Tiled {
+            name: "ftile".to_string(),
+            width: w,
+            height: h,
+            tile_x: 5,
+            tile_y: 4,
+            channels: mk_channels(),
+            planes: vec![&tiled, &tiled],
+            compression,
+        },
         MultipartMixedPart::DeepTiledMipmap {
             name: "dmip".to_string(),
             tile_x: 4,
@@ -128,11 +147,15 @@ fuzz_target!(|data: &[u8]| {
 
     // 2. Overlay mode. First byte selects the base compression; the
     // rest is spliced over everything after the header chain (offset
-    // tables + chunk bodies).
-    let compression = match data[0] % 3 {
+    // tables + chunk bodies). Selectors 0-2 keep their historical
+    // mapping; 3-5 (round 450) put PIZ / DWAA / DWAB on the flat parts.
+    let compression = match data[0] % 6 {
         0 => Compression::None,
         1 => Compression::Rle,
-        _ => Compression::Zips,
+        2 => Compression::Zips,
+        3 => Compression::Piz,
+        4 => Compression::Dwaa,
+        _ => Compression::Dwab,
     };
     let Some(mut file) = base_file(compression) else {
         return;
