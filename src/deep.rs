@@ -2360,15 +2360,12 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
         // valid pixel data either way.
         let entries = (tw * th) as usize;
         let full_entries = full_tw * full_th;
-        let row_stride;
-        let unpacked_table_size;
-        if compression == Compression::None && packed_table == full_entries * 4 {
-            unpacked_table_size = full_entries * 4;
-            row_stride = full_tw;
-        } else {
-            unpacked_table_size = entries * 4;
-            row_stride = tw as usize;
-        }
+        let (unpacked_table_size, row_stride) =
+            if compression == Compression::None && packed_table == full_entries * 4 {
+                (full_entries * 4, full_tw)
+            } else {
+                (entries * 4, tw as usize)
+            };
 
         let table_start = block_off + 40;
         let (table_end, data_end) =
@@ -3360,15 +3357,12 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
         // Same NONE-padding accommodation as the single-part reader.
         let entries = (tw * th) as usize;
         let full_entries = full_tw * full_th;
-        let row_stride;
-        let unpacked_table_size;
-        if ps.compression == Compression::None && packed_table == full_entries * 4 {
-            unpacked_table_size = full_entries * 4;
-            row_stride = full_tw;
-        } else {
-            unpacked_table_size = entries * 4;
-            row_stride = tw as usize;
-        }
+        let (unpacked_table_size, row_stride) =
+            if ps.compression == Compression::None && packed_table == full_entries * 4 {
+                (full_entries * 4, full_tw)
+            } else {
+                (entries * 4, tw as usize)
+            };
 
         let table_start = scan_pos + 44;
         let (table_end, data_end) =
@@ -4293,15 +4287,12 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
         let full_th = tile_y as usize;
         let entries = (tw * th) as usize;
         let full_entries = full_tw * full_th;
-        let row_stride;
-        let unpacked_table_size;
-        if compression == Compression::None && packed_table == full_entries * 4 {
-            unpacked_table_size = full_entries * 4;
-            row_stride = full_tw;
-        } else {
-            unpacked_table_size = entries * 4;
-            row_stride = tw as usize;
-        }
+        let (unpacked_table_size, row_stride) =
+            if compression == Compression::None && packed_table == full_entries * 4 {
+                (full_entries * 4, full_tw)
+            } else {
+                (entries * 4, tw as usize)
+            };
 
         let table_start = block_off + 40;
         let (table_end, data_end) =
@@ -5271,15 +5262,12 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
         let full_th = tile_y as usize;
         let entries = (tw * th) as usize;
         let full_entries = full_tw * full_th;
-        let row_stride;
-        let unpacked_table_size;
-        if compression == Compression::None && packed_table == full_entries * 4 {
-            unpacked_table_size = full_entries * 4;
-            row_stride = full_tw;
-        } else {
-            unpacked_table_size = entries * 4;
-            row_stride = tw as usize;
-        }
+        let (unpacked_table_size, row_stride) =
+            if compression == Compression::None && packed_table == full_entries * 4 {
+                (full_entries * 4, full_tw)
+            } else {
+                (entries * 4, tw as usize)
+            };
 
         let table_start = block_off + 40;
         let (table_end, data_end) =
@@ -6368,15 +6356,12 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
         let full_th = ps.tile_y as usize;
         let entries = (tw * th) as usize;
         let full_entries = full_tw * full_th;
-        let row_stride;
-        let unpacked_table_size;
-        if ps.compression == Compression::None && packed_table == full_entries * 4 {
-            unpacked_table_size = full_entries * 4;
-            row_stride = full_tw;
-        } else {
-            unpacked_table_size = entries * 4;
-            row_stride = tw as usize;
-        }
+        let (unpacked_table_size, row_stride) =
+            if ps.compression == Compression::None && packed_table == full_entries * 4 {
+                (full_entries * 4, full_tw)
+            } else {
+                (entries * 4, tw as usize)
+            };
 
         let table_start = scan_pos + 44;
         let (table_end, data_end) =
@@ -7497,15 +7482,12 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
         let full_th = ps.tile_y as usize;
         let entries = (tw * th) as usize;
         let full_entries = full_tw * full_th;
-        let row_stride;
-        let unpacked_table_size;
-        if ps.compression == Compression::None && packed_table == full_entries * 4 {
-            unpacked_table_size = full_entries * 4;
-            row_stride = full_tw;
-        } else {
-            unpacked_table_size = entries * 4;
-            row_stride = tw as usize;
-        }
+        let (unpacked_table_size, row_stride) =
+            if ps.compression == Compression::None && packed_table == full_entries * 4 {
+                (full_entries * 4, full_tw)
+            } else {
+                (entries * 4, tw as usize)
+            };
 
         let table_start = scan_pos + 44;
         let (table_end, data_end) =
