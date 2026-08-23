@@ -132,6 +132,16 @@ entry yields an error rather than wrapping past its EOF guard — see
 `tests/offset_table_overflow_hardening.rs` and
 `tests/multipart_mixed_hardening.rs`.
 
+Sustained fuzzing of the DWA decode path surfaced three defects, all
+fixed and pinned by unit tests: two reservation out-of-memories where a
+chunk header's declared inflated size / symbol count sized an
+allocation before any bytes were produced (the shared inflate helper
+and the static-Huffman decoder now cap the eager reservation and let
+the buffer grow only to what the stream yields), and an out-of-bounds
+panic where an over-subscribed code-length table produced a Huffman
+code that did not fit its bit length (the length distribution is now
+validated as a proper prefix code before it indexes the decode table).
+
 ## License
 
 MIT — see `LICENSE`.
