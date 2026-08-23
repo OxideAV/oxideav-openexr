@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Out-of-bounds panic on over-subscribed Huffman code lengths** (a
+  third fuzz finding on the DWA AC path). The static-Huffman decoder
+  built its canonical codes from the wire-supplied code-length table
+  without checking that the lengths form a valid prefix code. A table
+  that over-subscribes the code space (Kraft sum above one) yields a
+  code that does not fit in its bit length, which ran the fast
+  decode-table fill past its end and panicked. The distribution is now
+  validated — for every length the highest assigned code must still fit
+  in that many bits — and an over-subscribed table is rejected with an
+  error. A unit test builds such a table directly.
 - **Unbounded Huffman-output reservation on hostile DWA chunks** (a
   second finding from the same address-sanitised fuzz session). The
   shared static-Huffman decoder reserved its output vector at the

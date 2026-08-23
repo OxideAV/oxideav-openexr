@@ -351,6 +351,23 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
         per_len_syms[l].push(s);
     }
 
+    // Validate the code-length distribution before it indexes anything.
+    // The lengths arrive over the wire and are only meaningful as a
+    // canonical prefix code if they do not over-subscribe the code
+    // space: for each length `l`, the highest code assigned is
+    // `first[l] + n[l] - 1`, which must still fit in `l` bits. An
+    // over-subscribed table (Kraft sum above one) otherwise produces a
+    // code `>= 2^l`, which would run the fast-table fill past its end
+    // and, more fundamentally, is not a decodable code at all.
+    for l in 1..=MAX_CODE_LEN {
+        let n = n_per_len[l] as u64;
+        if n != 0 && first[l] + n > (1u64 << l) {
+            return Err(ExrError::invalid(format!(
+                "Huffman payload: code lengths over-subscribe the code space at length {l}"
+            )));
+        }
+    }
+
     // Fast table: (symbol_index_u32 << 6) | length for codes <= FAST_BITS.
     // Escape is stored as the sentinel symbol value ALPHABET-1 marker via
     // a parallel "is escape" bit: encode entry as (sym << 7) | (is_esc << 6)?
@@ -665,6 +682,34 @@ mod tests {
     #[test]
     fn rejects_truncated_header() {
         assert!(huf_decompress(&[0u8; 10], 5).is_err());
+    }
+
+    #[test]
+    fn rejects_over_subscribed_code_lengths() {
+        // Hand-build a payload whose code-length table assigns three
+        // symbols a length of 1 bit. Only two distinct 1-bit codes
+        // exist, so the table over-subscribes the code space; the
+        // canonical assignment would need a code of 2 in one bit, which
+        // must be rejected rather than run the fast table past its end.
+        let im = 0usize;
+        let i_m = 2usize;
+        let mut body = BitWriter::new();
+        // Three explicit 6-bit lengths, all 1.
+        for _ in 0..3 {
+            body.put(1, 6);
+        }
+        let (table, _) = body.finish();
+        // Header: im, iM, table byte length, a nonzero bit count, zero.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(im as u32).to_le_bytes());
+        payload.extend_from_slice(&(i_m as u32).to_le_bytes());
+        payload.extend_from_slice(&(table.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&8u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&table);
+        payload.push(0); // one byte of entropy data so the bit check passes
+        let err = huf_decompress(&payload, 4).unwrap_err();
+        assert!(format!("{err}").contains("over-subscribe"));
     }
 
     #[test]
