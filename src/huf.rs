@@ -370,7 +370,11 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
     }
 
     let mut r = BitReader::new(data, n_bits);
-    let mut out: Vec<u16> = Vec::with_capacity(expected);
+    // `expected` is bounded by `n_bits` above, but `n_bits` can itself be
+    // large; reserve modestly and let the buffer grow to what the stream
+    // actually decodes rather than to the header's claim.
+    const RESERVE_CAP: usize = 1 << 20;
+    let mut out: Vec<u16> = Vec::with_capacity(expected.min(RESERVE_CAP));
     let escape = i_m as u32;
     while out.len() < expected {
         let peeked = r.peek(FAST_BITS as u32);
@@ -661,6 +665,18 @@ mod tests {
     #[test]
     fn rejects_truncated_header() {
         assert!(huf_decompress(&[0u8; 10], 5).is_err());
+    }
+
+    #[test]
+    fn huge_symbol_count_does_not_over_reserve() {
+        // A well-formed payload for 100 symbols, but the caller declares
+        // billions (as a hostile DWA AC count can). The reservation must
+        // stay bounded and the decode must terminate with an ordinary
+        // error when the short bit stream runs out — never OOM on the
+        // up-front allocation.
+        let vals: Vec<u16> = (0..100).collect();
+        let payload = huf_compress(&vals).unwrap();
+        assert!(huf_decompress(&payload, 4 << 30).is_err());
     }
 
     #[test]

@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Unbounded Huffman-output reservation on hostile DWA chunks** (a
+  second finding from the same address-sanitised fuzz session). The
+  shared static-Huffman decoder reserved its output vector at the
+  caller-declared symbol count, which for a DWA AC sub-stream is a
+  header field read straight off the wire and only checked against the
+  real block geometry *after* decoding. A chunk declaring billions of
+  AC symbols reserved billions of `u16` before decoding a single one
+  (out-of-memory). The reservation is now capped; the decode loop was
+  already bounded by the coded-bit budget and its run-escape guard, so
+  the buffer grows only to what the entropy data yields and a short
+  stream terminates with an ordinary error. A unit test pins the bound.
 - **Unbounded inflate reservation on hostile compressed chunks**
   (found by an address-sanitised `parse_flat` fuzz session over the
   DWA decode path). The shared zlib inflate helper reserved its output
