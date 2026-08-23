@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Unbounded inflate reservation on hostile compressed chunks**
+  (found by an address-sanitised `parse_flat` fuzz session over the
+  DWA decode path). The shared zlib inflate helper reserved its output
+  buffer at the caller-declared uncompressed size, and several of those
+  sizes are read straight off the wire — a DWA chunk header's RLE /
+  DC / AC counts among them — validated only *after* inflation. A chunk
+  carrying a few bytes of deflate stream while declaring a multi-gigabyte
+  inflated size therefore triggered a multi-gigabyte reservation before
+  a single byte was produced (out-of-memory). The helper now caps its
+  eager reservation and reads at most one byte past the exact size every
+  caller requires, so memory stays proportional to the stream rather
+  than to the claim; an over-producing stream is rejected with an
+  ordinary error. Unit tests pin both bounds and the fuzz seed is kept
+  in the corpus.
 - Round-446 **temp-path collisions between parallel validation
   tests**: the suites named their scratch dirs/files with a wall-clock
   nanosecond stamp alone, and macOS SystemTime's microsecond

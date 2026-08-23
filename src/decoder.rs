@@ -2699,23 +2699,85 @@ pub(crate) fn zlib_inflate_pub(data: &[u8], expected_size: usize) -> Result<Vec<
     zlib_inflate(data, expected_size)
 }
 
-/// zlib-decompress `data` into a buffer at most `expected_size` bytes
-/// long. We use `flate2`'s `ZlibDecoder` (pure-Rust `miniz_oxide`
-/// backend per Cargo.toml).
+/// zlib-decompress `data` into a buffer that must inflate to exactly
+/// `expected_size` bytes. We use `flate2`'s `ZlibDecoder` (pure-Rust
+/// `miniz_oxide` backend per Cargo.toml).
+///
+/// `expected_size` is frequently an attacker-controlled length read
+/// straight off the wire (DWA header counts, deep block sizes), so it
+/// must never be trusted as an allocation amount: a chunk can declare a
+/// multi-gigabyte inflated size while carrying only a few bytes of
+/// deflate stream. Two bounds keep memory proportional to the input
+/// rather than the claim: the initial reservation is capped, and the
+/// decoder is only ever asked for `expected_size + 1` bytes — one past
+/// the exact size every caller requires — so a stream that would keep
+/// producing output (a decompression bomb, or a size that simply does
+/// not match) is rejected instead of read to completion.
 fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
 
-    let mut out = Vec::with_capacity(expected_size);
-    let mut dec = ZlibDecoder::new(data);
+    /// Upper bound on the eagerly reserved capacity. The buffer still
+    /// grows on demand up to what the stream actually produces; this
+    /// only stops a huge declared size from reserving before a single
+    /// byte is inflated.
+    const RESERVE_CAP: usize = 1 << 20;
+
+    let mut out = Vec::with_capacity(expected_size.min(RESERVE_CAP));
+    // Read at most one byte past the exact size the caller needs: every
+    // caller rejects a length mismatch anyway, and this ceiling bounds
+    // the work (and the buffer) to `expected_size` even for a stream
+    // that would otherwise inflate without end.
+    let limit = expected_size as u64 + 1;
+    let mut dec = ZlibDecoder::new(data).take(limit);
     dec.read_to_end(&mut out)
         .map_err(|e| ExrError::invalid(format!("zlib inflate failed: {e}")))?;
+    if out.len() as u64 == limit {
+        return Err(ExrError::invalid(format!(
+            "zlib inflate produced more than the expected {expected_size} bytes"
+        )));
+    }
     Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zlib_inflate_bounds_a_huge_declared_size() {
+        // A valid deflate of three bytes, but the caller declares a
+        // multi-gigabyte expected size (as a hostile DWA/deep chunk
+        // header can). The reservation must stay bounded and the call
+        // must return an ordinary error, never OOM.
+        let compressed = {
+            use flate2::write::ZlibEncoder;
+            use std::io::Write;
+            let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(b"abc").unwrap();
+            e.finish().unwrap()
+        };
+        // Correct size still works.
+        let out = zlib_inflate(&compressed, 3).unwrap();
+        assert_eq!(out, b"abc");
+        // A wildly oversized claim inflates the same three bytes without
+        // reserving for the claim; the caller's own length check then
+        // rejects the mismatch.
+        let out = zlib_inflate(&compressed, 4 << 30).unwrap();
+        assert_eq!(out, b"abc");
+    }
+
+    #[test]
+    fn zlib_inflate_rejects_output_past_expected() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(&vec![0u8; 4096]).unwrap();
+        let compressed = e.finish().unwrap();
+        // Declaring fewer bytes than the stream yields must error at the
+        // ceiling rather than allocate the full output.
+        assert!(zlib_inflate(&compressed, 16).is_err());
+    }
 
     #[test]
     fn predictor_roundtrip() {
