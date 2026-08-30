@@ -59,17 +59,29 @@ Clean-room from the public OpenEXR file-format specification.
   deep tiled) — deep parts stay NONE / ZIP / ZIPS / RLE. (All **flat**
   mixed parts — scanline + ONE_LEVEL / MIPMAP / RIPMAP tiled — now carry
   the lossy schemes; see the capability matrix.)
-* True-HDR pixel-format integration with `oxideav-core` — the
-  `Decoder` / `Encoder` shims now clamp to `Rgba64Le` (16-bit per
-  channel) for previews, which keeps far more tonal precision than the
-  earlier 8-bit path but still tone-maps to [0, 1]. Full floating-point
-  HDR awaits an `Rgba128Float`-style pixel format in core.
+* Framework frames for channel sets outside RGB(A) / `Y`: `RY` / `BY`
+  luminance-chroma parts, depth-only (`Z`) and AOV-only parts, and
+  layer-prefixed names (`diffuse.R` …) have no `PixelFormat` mapping
+  and decode `Unsupported` through the registry — the standalone
+  `parse_exr` API still returns every channel. Deep parts likewise
+  (variable samples per pixel); use `parse_exr_deep_*`.
 
 ## Standalone vs registry-integrated
 
 The default `registry` Cargo feature pulls in `oxideav-core` and
 exposes the framework `Decoder` / `Encoder` trait surface plus a
-`registry::register` entry point.
+`registry::register` entry point. The framework path is true HDR
+(`oxideav-core` 0.1.35+): the decoder emits scene-referred linear
+`RgbaF32Le` / `RgbF32Le` / `GrayF32Le` frames — HALF widened exactly,
+FLOAT copied bit-for-bit, UINT converted, never clamped or tone-mapped —
+choosing the format from the part's channel set (`R G B A` → RGBA,
+`R G B` → RGB, `Y` → gray, `Y A` → RGBA with `Y` replicated). The
+`part` decoder option picks a part in multi-part files (multi-level
+parts contribute level 0; deep parts are `Unsupported`). The encoder
+accepts the same three formats and writes `A B G R` / `B G R` / `Y`
+scanline channels; `pixel_type` selects `float` (default, lossless
+round trip) or `half`, and `compression` any of `none rle zips zip piz
+pxr24 b44 b44a dwaa dwab`. See `src/registry.rs` for the full rules.
 
 For image-library callers that don't want the framework dependency,
 build with `default-features = false`:

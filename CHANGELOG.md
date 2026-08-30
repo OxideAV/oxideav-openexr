@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Framework integration is now true HDR** on the `oxideav-core`
+  0.1.35 scene-referred float family. The registry decoder emits
+  `RgbaF32Le` / `RgbF32Le` / `GrayF32Le` frames (IEEE binary32 LE,
+  linear light, no clamp and no tone-map: HALF widened exactly, FLOAT
+  bit-for-bit, UINT converted) in place of the `Rgba64Le`
+  clamp-to-unit preview, choosing the format from the part's channel
+  set — `R G B A` → RGBA, `R G B` → RGB, `Y` → gray, `Y A` → RGBA with
+  `Y` replicated; any other set (partial triples, `RY`/`BY`, `Z`-only,
+  AOV-only), sub-sampled colour channels and deep parts are
+  `Unsupported`. A new `part` decoder option selects the part of a
+  multi-part file (flat scanline / tiled, or level 0 of a multi-level
+  tiled part). The registry encoder accepts the same three formats,
+  writes `A B G R` / `B G R` / `Y` scanline channels, and gains
+  `pixel_type` (`float` default / `half`) and `compression` (all ten
+  scanline codes) options; the advertised capability set is the float
+  trio. `Rgba64Le` input is no longer accepted by the encoder.
+  Registry tests cover unclamped HDR excursions, every mapping rule
+  and rejection, bit-exact FLOAT round trips across the five lossless
+  codecs for all three formats, half-rounded HALF round trips, the
+  five lossy codecs in both types, padded strides, deep rejection and
+  multi-part part selection.
+
 - Round-446 **PIZ / DWA performance pass** over the round-439
   first-cut entropy stages, bit-exact on both sides (the reference
   cross-validation suites pass unchanged; a new unit test pins the
