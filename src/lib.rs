@@ -27,7 +27,10 @@
 //!
 //! The crate's default `registry` Cargo feature pulls in `oxideav-core`
 //! and exposes the framework `Decoder` / `Encoder` trait surface plus a
-//! [`registry::register`] entry point. Disable the feature
+//! [`registry::register`] entry point speaking the scene-referred
+//! `RgbaF32Le` / `RgbF32Le` / `GrayF32Le` float family (see the
+//! `registry` module docs for the channel-mapping, part and encoder
+//! option rules). Disable the feature
 //! (`default-features = false`) for an `oxideav-core`-free build that
 //! still exposes the standalone [`parse_exr`] /
 //! [`encode_exr_scanline_rgba_float`] API plus crate-local [`ExrImage`]
