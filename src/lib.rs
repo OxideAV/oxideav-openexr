@@ -362,6 +362,9 @@
 //! everywhere, RANDOM_Y for tiled — via the `*_with_line_order` writer
 //! entry points.)
 
+// Internal B44/B44A plumbing (no public items) — hidden from
+// rustdoc/semver (fleet rule 2026-09-01).
+#[doc(hidden)]
 pub mod b44;
 pub mod decoder;
 pub mod deep;
@@ -381,6 +384,9 @@ pub mod multipart_tiled_encoder;
 pub(crate) mod piz;
 #[cfg(feature = "registry")]
 pub mod registry;
+// Internal RLE compression plumbing (like `piz`/`huf`/`dwa`) — hidden
+// from rustdoc/semver (fleet rule 2026-09-01).
+#[doc(hidden)]
 pub mod rle;
 pub mod tile_encoder;
 pub mod tiled;
@@ -443,4 +449,7 @@ pub use types::{
 };
 
 #[cfg(feature = "registry")]
-pub use registry::{__oxideav_entry, register, register_codecs, register_containers};
+#[doc(hidden)]
+pub use registry::__oxideav_entry;
+#[cfg(feature = "registry")]
+pub use registry::{register, register_codecs, register_containers};
