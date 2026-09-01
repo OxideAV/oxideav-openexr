@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.5...v0.0.6) - 2026-08-30
+
+### Added
+
+- DWAA/DWAB across tiled, multilevel, multi-part and mixed flat paths; fix no-default-features cfg slip
+- DWAA/DWAB decode + encode for scanline images (staged observer-spec §3 + tables)
+- PIZ across tiled, multilevel, multi-part and mixed flat paths
+- PIZ decode + encode for scanline images (staged observer-spec §2)
+- lossy PXR24/B44/B44A for single-part multilevel writers; fix: PXR24 raw-fallback conformance
+- multilevel (MIPMAP/RIPMAP) lineOrder write support
+- tiled DECREASING_Y + RANDOM_Y write support (canonical-keyed offset table)
+- DECREASING_Y scanline write + lineOrder conformance (observer-derived)
+
+### Fixed
+
+- reject over-subscribed Huffman code-length tables
+- cap the Huffman decoder output reservation
+- bound the zlib inflate reservation against hostile declared sizes
+- deep-scanline multi-part readers misordered sample lists for non-canonical chunk storage
+- extend file-global displayWindow fix to the four deep multipart writers
+- multi-part displayWindow must be file-global (unequal-sized parts were unreadable)
+
+### Other
+
+- framework round trips through the registry for the float family
+- describe the true-HDR framework path, retire the pending-core prose
+- emit and accept the core 0.1.35 scene-referred float family
+- fold deep-tile late-init pairs into tuple bindings for clippy 1.98
+- record the round-450 DWA-path fuzz findings in the README
+- fold the round-450 session corpus growth
+- memoize the writer-built overlay bases
+- reference-produced HTJ2K files must be rejected cleanly
+- lossy flat parts + a flat tiled part in the parse_multipart_mixed overlay base
+- sub-sampled-chroma and mixed-classification base shapes in the parse_flat overlay spread
+- fold the round-446 parse_flat session corpus growth in
+- refresh BENCHMARKS.md with the round-446 PIZ/DWA numbers; CHANGELOG + README notes
+- 64-bit Huffman bit writer, interior-block gather fast path, hoisted DWA write-back dispatch
+- buffered Huffman bit reader, monomorphized wavelet steps, sparse DWA block fill + DC-only IDCT
+- collision-proof temp paths — pid + per-process sequence joins the timestamp
+- cite the staged GAP-TRACKER inventory for the inverse-CSC constants without naming a reference source file
+- DWA depth coverage — legacy v0 chunk decode, pLinear semantics, sub-sampled lossy channels
+- PIZ + DWAA/DWAB rows in the codec matrix and BENCHMARKS.md
+- PIZ/DWA in the parse_flat overlay spread; README + module prose reflect the completed compression matrix
+- refresh the stale round-4 followups note (lossy coverage + lineOrder landed)
+- lineOrder capability row, multilevel lossy + PXR24 fallback notes, parse_flat fuzz target
+- parse_flat target for scanline/tiled/multilevel + lossy decoders; clean bounded sessions
+- independent-reader cross-validation via exrinfo (OpenEXRCore) + exr2aces chromaticities
+- add CI / crates.io / docs.rs / MIT-license badges
+
 ### Changed
 
 - **Framework integration is now true HDR** on the `oxideav-core`
