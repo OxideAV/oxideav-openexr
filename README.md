@@ -96,7 +96,11 @@ scanline channels — or, with `colour=luma_chroma`, `A BY RY Y` /
 `BY RY Y` with the chroma sub-sampled by `chroma_sampling` (default
 2×2); `pixel_type` selects `float` (default, lossless round trip) or
 `half`, and `compression` any of `none rle zips zip piz pxr24 b44 b44a
-dwaa dwab`. See `src/registry.rs` for the full rules.
+dwaa dwab`. `tile_size=N` writes a tiled file (`levels=one|mipmap|ripmap`,
+reduced levels box-filtered from the frame) and `line_order` picks
+`increasing_y` / `decreasing_y` / tiled `random_y` storage. Deep parts
+and multi-part files have no frame mapping (one sample per pixel, one
+image per packet). See `src/registry.rs` for the full rules.
 
 For image-library callers that don't want the framework dependency,
 build with `default-features = false`:
