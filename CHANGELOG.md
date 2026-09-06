@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - registry encoder `colour=luma_chroma` option (+ `chroma_sampling`): RGB(A) frames written as `Y RY BY` (+ `A`) with 2×2 (or any) chroma sub-sampling; accepted by the reference tools and cross-checked against the RGB path
 - layered channel names: new `layers` module (`enumerate_layers` / `ExrImage::layers` — typed layer enumeration with colour shape and multi-view tagging); registry decoder `layer` option selects a prefixed layer or the default view, encoder `layer` option prefixes the written channels; validated against reference-produced multi-view files
 - registry encoder part-shape options: `tile_size` (tiled ONE_LEVEL), `levels` (`mipmap` / `ripmap`, box-filtered from the frame) and `line_order` (`decreasing_y`, tiled `random_y`) across every compression scheme
+- registry decoder `part_name` option: select a multi-part part by its `name` attribute (multi-part stereo `left` / `right`), overriding `part`
 
 ### Fixed
 

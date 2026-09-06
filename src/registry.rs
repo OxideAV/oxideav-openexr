@@ -67,7 +67,9 @@
 //!
 //! Single-part flat files (scanline or tiled) decode directly. In a
 //! multi-part file the `part` decoder option (default `0`) selects the
-//! part to emit; flat scanline / tiled parts decode as above and a
+//! part to emit — or `part_name` selects it by its `name` attribute
+//! (the way multi-part stereo files label their `left` / `right`
+//! parts), overriding `part` when set; flat scanline / tiled parts decode as above and a
 //! multi-level (MIPMAP / RIPMAP) tiled part contributes its level
 //! `(0, 0)` full-resolution image. Deep parts (single-part deep files,
 //! or a deep part selected in a multi-part file) carry a variable
@@ -112,7 +114,7 @@ use oxideav_core::{
 use crate::decoder::parse_exr;
 use crate::encoder::encode_exr_scanline;
 use crate::error::ExrError;
-use crate::header::VersionField;
+use crate::header::{parse_header, parse_multipart_headers, VersionField};
 use crate::image::ExrPlane;
 use crate::layers::{enumerate_layers, find_layer};
 use crate::luma_chroma::{
@@ -205,6 +207,10 @@ pub struct ExrDecoderOptions {
     /// `beauty.spec`), the default view's name, or `""` for the base
     /// layer of unprefixed channels.
     pub layer: String,
+    /// Part to decode by its `name` attribute (multi-part files); when
+    /// non-empty it overrides `part`. Unknown names error listing the
+    /// file's part names.
+    pub part_name: String,
 }
 
 impl CodecOptionsStruct for ExrDecoderOptions {
@@ -222,11 +228,19 @@ impl CodecOptionsStruct for ExrDecoderOptions {
             help: "layer (channel-name prefix such as diffuse or right, or the default view's \
                    name) to decode; empty = the base layer of unprefixed channels",
         },
+        OptionField {
+            name: "part_name",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "part to decode by its name attribute (multi-part files); overrides part when \
+                   set",
+        },
     ];
     fn apply(&mut self, key: &str, value: &OptionValue) -> oxideav_core::Result<()> {
         match key {
             "part" => self.part = value.as_u32()?,
             "layer" => self.layer = value.as_str()?.to_string(),
+            "part_name" => self.part_name = value.as_str()?.to_string(),
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
@@ -481,7 +495,12 @@ impl Decoder for ExrDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let flat = decode_flat_part(&packet.data, self.opts.part)?;
+        let part = if self.opts.part_name.is_empty() {
+            self.opts.part
+        } else {
+            part_index_by_name(&packet.data, &self.opts.part_name)?
+        };
+        let flat = decode_flat_part(&packet.data, part)?;
         let (_format, frame) = flat_to_video_frame(&flat, &self.opts.layer)?;
         self.pending = Some(frame);
         Ok(())
@@ -513,6 +532,45 @@ struct FlatPixels {
     planes: Vec<ExrPlane>,
     /// The part's header attributes (chromaticities, multiView, …).
     attributes: Vec<Attribute>,
+}
+
+/// Resolve a part `name` attribute to its index from the file's
+/// headers alone (no pixel decode). Single-part files may carry a
+/// `name` too; otherwise the request is an error listing what exists.
+fn part_index_by_name(bytes: &[u8], name: &str) -> oxideav_core::Result<u32> {
+    if bytes.len() < 8 {
+        return Err(oxideav_core::Error::invalid(
+            "OpenEXR: packet shorter than the magic + version field",
+        ));
+    }
+    let version = VersionField::from_u32(u32::from_le_bytes(bytes[4..8].try_into().unwrap()));
+    let headers = if version.multipart {
+        parse_multipart_headers(bytes)?
+    } else {
+        vec![parse_header(bytes)?]
+    };
+    let part_name = |attrs: &[Attribute]| -> Option<String> {
+        attrs.iter().find_map(|a| match (&a.name[..], &a.value) {
+            ("name", AttributeValue::String(n)) => Some(n.clone()),
+            _ => None,
+        })
+    };
+    let names: Vec<Option<String>> = headers.iter().map(|h| part_name(&h.attributes)).collect();
+    if let Some(idx) = names.iter().position(|n| n.as_deref() == Some(name)) {
+        return Ok(idx as u32);
+    }
+    let listed: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| match n {
+            Some(n) => format!("{i}: {n:?}"),
+            None => format!("{i}: (unnamed)"),
+        })
+        .collect();
+    Err(oxideav_core::Error::invalid(format!(
+        "OpenEXR decoder: no part named {name:?}; the file has [{}]",
+        listed.join(", ")
+    )))
 }
 
 /// Decode part `part` of `bytes` as a flat image.
@@ -1647,9 +1705,30 @@ mod tests {
         let vf = decode_frame(bytes.clone(), Some(1)).unwrap();
         assert_eq!(f32_at(&vf, 0, 1, 0), 8.0);
         assert!(matches!(
-            decode_frame(bytes, Some(2)).unwrap_err(),
+            decode_frame(bytes.clone(), Some(2)).unwrap_err(),
             oxideav_core::Error::InvalidData(_)
         ));
+        // By name, overriding `part`.
+        let by_name = |name: &str| {
+            let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+            params.options.insert("part", "0");
+            params.options.insert("part_name", name);
+            let mut dec = make_decoder(&params)?;
+            dec.send_packet(&Packet::new(0, TimeBase::new(1, 1), bytes.clone()))?;
+            match dec.receive_frame()? {
+                Frame::Video(v) => Ok::<_, oxideav_core::Error>(v),
+                _ => panic!("expected video frame"),
+            }
+        };
+        assert_eq!(f32_at(&by_name("right").unwrap(), 1, 1, 0), 16.0);
+        assert_eq!(f32_at(&by_name("left").unwrap(), 1, 1, 0), 0.5);
+        match by_name("centre").unwrap_err() {
+            oxideav_core::Error::InvalidData(msg) => {
+                assert!(msg.contains("0: \"left\""), "{msg}");
+                assert!(msg.contains("1: \"right\""), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -87,10 +87,10 @@ FLOAT copied bit-for-bit, UINT converted, never clamped or tone-mapped —
 choosing the format from the part's channel set (`R G B A` → RGBA,
 `R G B` → RGB, `Y RY BY` → RGB reconstructed from luminance/chroma,
 `Y` → gray, `Y A` → RGBA with `Y` replicated). The
-`part` decoder option picks a part in multi-part files (multi-level
-parts contribute level 0; deep parts are `Unsupported`) and the `layer`
-option a channel-name prefix (`diffuse`, `right`, …) or the default
-view. The encoder
+`part` decoder option (or `part_name`, by the part's `name` attribute)
+picks a part in multi-part files (multi-level parts contribute level 0;
+deep parts are `Unsupported`) and the `layer` option a channel-name
+prefix (`diffuse`, `right`, …) or the default view. The encoder
 accepts the same three formats and writes `A B G R` / `B G R` / `Y`
 scanline channels — or, with `colour=luma_chroma`, `A BY RY Y` /
 `BY RY Y` with the chroma sub-sampled by `chroma_sampling` (default
