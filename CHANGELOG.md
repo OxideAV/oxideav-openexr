@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.6...v0.0.7) - 2026-09-06
+
+### Added
+
+- registry decoder part_name option — select a multi-part part by its name attribute
+- registry encoder part-shape options — tiled ONE_LEVEL / MIPMAP / RIPMAP + line orders
+- layered / multi-view channel names — typed layer enumeration + registry layer option
+- registry encoder colour=luma_chroma — RGB(A) frames written as Y RY BY (+A) with sub-sampled chroma
+- luminance/chroma (Y RY BY) colour reconstruction on the framework decode path
+
+### Fixed
+
+- f32_to_half rounds (2^-25, 2^-24) up to the smallest subnormal half
+
+### Other
+
+- branch-light f32_to_half + hoisted DWA inverse LUT — DWA decode +69..94%
+- fold the round-457 parse_flat session corpus growth
+- decode_chunk target — compressed-chunk decoders in isolation (PIZ / DWA / B44 / PXR24 / ZIP / RLE)
+- recycled zlib states, fused ZIP unpredict pass, register-resident Huffman reader with direct long-code matching
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Added
 
 - luminance/chroma colour reconstruction: new `luma_chroma` module (chromaticities-derived luminance weights, `Y RY BY` ↔ RGB, bilinear chroma reconstruction + tent reduction); the registry decoder now maps `Y` + `RY` + `BY` (+ `A`) parts to `RgbF32Le` / `RgbaF32Le`, validated against a reference EXR tool as an opaque process
