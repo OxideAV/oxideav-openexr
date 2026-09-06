@@ -29,6 +29,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Multi-part EXR (scanline parts)     | parse + write                                    |
 | Multi-part EXR (flat tiled parts)   | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware |
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write — lossless AND lossy (PXR24 / B44 / B44A) scanline paths; luminance/chroma (`Y` + 2×2 `BY`/`RY`) layouts validated bit-exact against a reference EXR validator binary. Note: the reference reader requires sub-sampled data-window extents divisible by the sampling factor; our reader additionally accepts ceil-sized odd extents |
+| Luminance/chroma colour (`Y` + `RY` + `BY` ↔ RGB) | **decode + encode** (`luma_chroma` module + registry decoder) — `RY = (R − Y) / Y`, `BY = (B − Y) / Y` with luminance weights derived from the `chromaticities` attribute (BT.709 when absent); chroma reconstructed bilinearly from any `(xSampling, ySampling)`, reduced with a centred tent filter. Validated against a reference EXR tool (opaque process): chroma ratios and luminance match to HALF precision on constant-chroma images (filter-independent), smooth gradients agree to a colour-level tolerance; our files are accepted by the reference |
 | Deep scanline (`deepscanline`)      | parse + write — NONE / RLE / ZIPS; single- and multi-part |
 | Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part |
 | Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL / MIPMAP / RIPMAP) in any order. Multi-level flat **and deep** tiled parts now carry their full pyramid/grid inline (`MultipartMixedPart::DeepTiledMipmap` / `DeepTiledRipmap`, surfaced as `MultipartMixedImage::DeepTiledMipmap` / `DeepTiledRipmap`). Flat `scanlineimage` and `tiledimage` parts (ONE_LEVEL, MIPMAP, RIPMAP) also carry `PXR24` / `B44` / `B44A` (alongside NONE / ZIP / ZIPS / RLE), reusing the shared block builders + decoders; **deep** parts (scanline, ONE_LEVEL / MIPMAP / RIPMAP tiled) stay NONE / ZIPS / RLE |
@@ -59,12 +60,17 @@ Clean-room from the public OpenEXR file-format specification.
   deep tiled) — deep parts stay NONE / ZIP / ZIPS / RLE. (All **flat**
   mixed parts — scanline + ONE_LEVEL / MIPMAP / RIPMAP tiled — now carry
   the lossy schemes; see the capability matrix.)
-* Framework frames for channel sets outside RGB(A) / `Y`: `RY` / `BY`
-  luminance-chroma parts, depth-only (`Z`) and AOV-only parts, and
-  layer-prefixed names (`diffuse.R` …) have no `PixelFormat` mapping
-  and decode `Unsupported` through the registry — the standalone
-  `parse_exr` API still returns every channel. Deep parts likewise
-  (variable samples per pixel); use `parse_exr_deep_*`.
+* Framework frames for channel sets outside RGB(A) / `Y` / `Y RY BY`:
+  depth-only (`Z`) and AOV-only parts, and layer-prefixed names
+  (`diffuse.R` …) have no `PixelFormat` mapping and decode
+  `Unsupported` through the registry — the standalone `parse_exr` API
+  still returns every channel. Deep parts likewise (variable samples
+  per pixel); use `parse_exr_deep_*`.
+* The luminance/chroma colour reconstruction uses bilinear chroma
+  interpolation (decode) and a centred tent reduction (encode); a
+  reference EXR reader applies a different filter, so colour-level
+  agreement is to a tolerance (tight in the interior, loosest at the
+  image edges) while the container level stays bit-exact.
 
 ## Standalone vs registry-integrated
 
@@ -75,7 +81,8 @@ exposes the framework `Decoder` / `Encoder` trait surface plus a
 `RgbaF32Le` / `RgbF32Le` / `GrayF32Le` frames — HALF widened exactly,
 FLOAT copied bit-for-bit, UINT converted, never clamped or tone-mapped —
 choosing the format from the part's channel set (`R G B A` → RGBA,
-`R G B` → RGB, `Y` → gray, `Y A` → RGBA with `Y` replicated). The
+`R G B` → RGB, `Y RY BY` → RGB reconstructed from luminance/chroma,
+`Y` → gray, `Y A` → RGBA with `Y` replicated). The
 `part` decoder option picks a part in multi-part files (multi-level
 parts contribute level 0; deep parts are `Unsupported`). The encoder
 accepts the same three formats and writes `A B G R` / `B G R` / `Y`

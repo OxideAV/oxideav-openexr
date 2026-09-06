@@ -26,18 +26,24 @@
 //!    A per pixel).
 //! 2. `R`, `G`, `B` present, no `A` → `RgbF32Le`. A missing alpha is
 //!    *not* synthesised; the frame format says so instead.
-//! 3. `Y` present (no `R`/`G`/`B`) → `GrayF32Le` from the `Y` channel.
-//!    If an `A` channel accompanies `Y` the frame is `RgbaF32Le` with
-//!    `Y` replicated into R, G and B, so the alpha is not dropped.
-//! 4. Anything else — a partial colour triple, `RY`/`BY` chroma
-//!    channels, depth-only (`Z`) or AOV-only parts — is
-//!    `Error::Unsupported` naming the channel list. Extra channels
-//!    alongside a recognised set (`Z`, motion vectors, ids …) are
-//!    ignored; they are still reachable through the standalone
-//!    [`crate::parse_exr`] API.
+//! 3. `Y`, `RY` and `BY` present (no `R`/`G`/`B`) → luminance/chroma:
+//!    RGB is reconstructed with the image's luminance weights (its
+//!    `chromaticities` attribute, else BT.709) and the chroma planes are
+//!    interpolated up from their declared sampling — see
+//!    [`crate::luma_chroma`]. The frame is `RgbF32Le`, or `RgbaF32Le`
+//!    when an `A` channel accompanies the triple.
+//! 4. `Y` present (no `R`/`G`/`B`, no chroma) → `GrayF32Le` from the
+//!    `Y` channel. If an `A` channel accompanies `Y` the frame is
+//!    `RgbaF32Le` with `Y` replicated into R, G and B, so the alpha is
+//!    not dropped.
+//! 5. Anything else — a partial colour triple, a lone `RY` or `BY`,
+//!    depth-only (`Z`) or AOV-only parts — is `Error::Unsupported`
+//!    naming the channel list. Extra channels alongside a recognised
+//!    set (`Z`, motion vectors, ids …) are ignored; they are still
+//!    reachable through the standalone [`crate::parse_exr`] API.
 //!
-//! Every mapped channel must be at 1×1 sampling; sub-sampled colour
-//! channels are rejected because the frame formats are full-resolution.
+//! Every directly-mapped channel (`R G B A Y`) must be at 1×1
+//! sampling; only the `RY` / `BY` chroma planes may be sub-sampled.
 //!
 //! # Parts
 //!
@@ -72,6 +78,7 @@ use crate::encoder::encode_exr_scanline;
 use crate::error::ExrError;
 use crate::header::VersionField;
 use crate::image::ExrPlane;
+use crate::luma_chroma::{luma_chroma_to_rgb, luminance_weights_of, ChromaPlane, RgbPlanes};
 use crate::multipart_mixed_encoder::{parse_exr_multipart_mixed, MultipartMixedImage};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 use crate::CODEC_ID_STR;
@@ -304,6 +311,8 @@ struct FlatPixels {
     height: u32,
     channels: Vec<Channel>,
     planes: Vec<ExrPlane>,
+    /// The part's header attributes (chromaticities, multiView, …).
+    attributes: Vec<Attribute>,
 }
 
 /// Decode part `part` of `bytes` as a flat image.
@@ -333,6 +342,7 @@ fn decode_flat_part(bytes: &[u8], part: u32) -> oxideav_core::Result<FlatPixels>
             height: img.height(),
             channels: img.channels,
             planes: img.planes,
+            attributes: img.attributes,
         });
     }
     let mut parts = parse_exr_multipart_mixed(bytes)?;
@@ -349,6 +359,7 @@ fn decode_flat_part(bytes: &[u8], part: u32) -> oxideav_core::Result<FlatPixels>
             height: img.height(),
             channels: img.channels,
             planes: img.planes,
+            attributes: img.attributes,
         }),
         MultipartMixedImage::TiledMipmap(p) | MultipartMixedImage::TiledRipmap(p) => {
             let level = p
@@ -365,6 +376,7 @@ fn decode_flat_part(bytes: &[u8], part: u32) -> oxideav_core::Result<FlatPixels>
                 height: level.height,
                 channels: p.channels,
                 planes: level.planes,
+                attributes: p.attributes,
             })
         }
         MultipartMixedImage::DeepScanline(_)
@@ -385,25 +397,14 @@ fn decode_flat_part(bytes: &[u8], part: u32) -> oxideav_core::Result<FlatPixels>
 fn flat_to_video_frame(img: &FlatPixels) -> oxideav_core::Result<(PixelFormat, VideoFrame)> {
     let find = |name: &str| img.planes.iter().position(|p| p.name == name);
     let (r, g, b, a, y) = (find("R"), find("G"), find("B"), find("A"), find("Y"));
-
-    let (format, sources): (PixelFormat, Vec<usize>) = match (r, g, b, a, y) {
-        (Some(r), Some(g), Some(b), Some(a), _) => (PixelFormat::RgbaF32Le, vec![r, g, b, a]),
-        (Some(r), Some(g), Some(b), None, _) => (PixelFormat::RgbF32Le, vec![r, g, b]),
-        (None, None, None, Some(a), Some(y)) => (PixelFormat::RgbaF32Le, vec![y, y, y, a]),
-        (None, None, None, None, Some(y)) => (PixelFormat::GrayF32Le, vec![y]),
-        _ => {
-            let names: Vec<&str> = img.channels.iter().map(|c| c.name.as_str()).collect();
-            return Err(oxideav_core::Error::Unsupported(format!(
-                "OpenEXR decoder: channel set [{}] has no RGB(A) / Y frame mapping",
-                names.join(", ")
-            )));
-        }
-    };
-
+    let (ry, by) = (find("RY"), find("BY"));
     let w = img.width;
     let h = img.height;
     let pixels = (w as usize) * (h as usize);
-    for &idx in &sources {
+
+    // Every directly-mapped channel must be full-resolution and sized
+    // for the data window.
+    let full_res = |idx: usize| -> oxideav_core::Result<&[f32]> {
         let ch = &img.channels[idx];
         if ch.x_sampling != 1 || ch.y_sampling != 1 {
             return Err(oxideav_core::Error::Unsupported(format!(
@@ -412,22 +413,81 @@ fn flat_to_video_frame(img: &FlatPixels) -> oxideav_core::Result<(PixelFormat, V
                 ch.name, ch.x_sampling, ch.y_sampling
             )));
         }
-        if img.planes[idx].samples.len() != pixels {
+        let samples = &img.planes[idx].samples;
+        if samples.len() != pixels {
             return Err(oxideav_core::Error::invalid(format!(
                 "OpenEXR decoder: channel '{}' holds {} samples for {w}x{h}",
                 ch.name,
-                img.planes[idx].samples.len()
+                samples.len()
             )));
         }
-    }
+        Ok(samples.as_slice())
+    };
+    // A chroma channel keeps whatever sampling the file declares; the
+    // conversion reconstructs full resolution.
+    let chroma = |idx: usize| -> oxideav_core::Result<ChromaPlane<'_>> {
+        let ch = &img.channels[idx];
+        if ch.x_sampling <= 0 || ch.y_sampling <= 0 {
+            return Err(oxideav_core::Error::invalid(format!(
+                "OpenEXR decoder: chroma channel '{}' declares sampling {}x{}",
+                ch.name, ch.x_sampling, ch.y_sampling
+            )));
+        }
+        Ok(ChromaPlane {
+            samples: &img.planes[idx].samples,
+            x_sampling: ch.x_sampling as u32,
+            y_sampling: ch.y_sampling as u32,
+        })
+    };
+
+    let converted: Option<RgbPlanes>;
+    let (format, sources): (PixelFormat, Vec<&[f32]>) = match (r, g, b, a, y, ry, by) {
+        (Some(r), Some(g), Some(b), Some(a), ..) => (
+            PixelFormat::RgbaF32Le,
+            vec![full_res(r)?, full_res(g)?, full_res(b)?, full_res(a)?],
+        ),
+        (Some(r), Some(g), Some(b), None, ..) => (
+            PixelFormat::RgbF32Le,
+            vec![full_res(r)?, full_res(g)?, full_res(b)?],
+        ),
+        (None, None, None, a, Some(y), Some(ry), Some(by)) => {
+            // Luminance/chroma: reconstruct RGB with the image's own
+            // luminance weights (chromaticities attribute, else BT.709).
+            let weights = luminance_weights_of(&img.attributes);
+            let rgb = luma_chroma_to_rgb(w, h, full_res(y)?, chroma(ry)?, chroma(by)?, weights)?;
+            converted = Some(rgb);
+            let rgb = converted.as_ref().unwrap();
+            match a {
+                Some(a) => (
+                    PixelFormat::RgbaF32Le,
+                    vec![&rgb.r, &rgb.g, &rgb.b, full_res(a)?],
+                ),
+                None => (PixelFormat::RgbF32Le, vec![&rgb.r, &rgb.g, &rgb.b]),
+            }
+        }
+        (None, None, None, Some(a), Some(y), None, None) => {
+            let y = full_res(y)?;
+            (PixelFormat::RgbaF32Le, vec![y, y, y, full_res(a)?])
+        }
+        (None, None, None, None, Some(y), None, None) => {
+            (PixelFormat::GrayF32Le, vec![full_res(y)?])
+        }
+        _ => {
+            let names: Vec<&str> = img.channels.iter().map(|c| c.name.as_str()).collect();
+            return Err(oxideav_core::Error::Unsupported(format!(
+                "OpenEXR decoder: channel set [{}] has no RGB(A) / Y / Y RY BY frame mapping",
+                names.join(", ")
+            )));
+        }
+    };
 
     let stride = format.plane_row_bytes(0, w).ok_or_else(|| {
         oxideav_core::Error::invalid(format!("OpenEXR decoder: {w}x{h} frame size overflows"))
     })?;
     let mut data = Vec::with_capacity(stride * h as usize);
     for px in 0..pixels {
-        for &idx in &sources {
-            data.extend_from_slice(&img.planes[idx].samples[px].to_le_bytes());
+        for src in &sources {
+            data.extend_from_slice(&src[px].to_le_bytes());
         }
     }
     Ok((
@@ -879,6 +939,14 @@ mod tests {
             decode_frame(bytes, None).unwrap_err(),
             oxideav_core::Error::Unsupported(_)
         ));
+        // Lone chroma channel without its partner.
+        let chs = vec![mk("RY", 1), mk("Y", 1)];
+        let attrs = scanline_attributes(w, h, &chs, Compression::None);
+        let bytes = encode_exr_scanline(w, h, &chs, &[&z, &z], Compression::None, attrs).unwrap();
+        assert!(matches!(
+            decode_frame(bytes, None).unwrap_err(),
+            oxideav_core::Error::Unsupported(_)
+        ));
         // Sub-sampled Y.
         let chs = vec![mk("Y", 2)];
         let ysub = [3.0f32];
@@ -888,6 +956,124 @@ mod tests {
             decode_frame(bytes, None).unwrap_err(),
             oxideav_core::Error::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn decoder_reconstructs_rgb_from_luma_chroma() {
+        use crate::luma_chroma::{luminance_weights, rgb_to_luma_chroma, BT709_CHROMATICITIES};
+        let (w, h) = (6u32, 4u32);
+        let n = (w * h) as usize;
+        // Constant chroma so the 2×2 reduction is exact everywhere.
+        let k = |i: usize| 0.1 + (i as f32) * 0.2;
+        let r: Vec<f32> = (0..n).map(|i| 0.7 * k(i)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.4 * k(i)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.2 * k(i)).collect();
+        let wts = luminance_weights(&BT709_CHROMATICITIES);
+        let yc = rgb_to_luma_chroma(w, h, [&r, &g, &b], wts, (2, 2)).unwrap();
+        let mk = |name: &str, s: i32| Channel {
+            name: name.to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: s,
+            y_sampling: s,
+        };
+        let chs = vec![mk("BY", 2), mk("RY", 2), mk("Y", 1)];
+        let attrs = scanline_attributes(w, h, &chs, Compression::Zip);
+        let bytes = encode_exr_scanline(
+            w,
+            h,
+            &chs,
+            &[&yc.by, &yc.ry, &yc.y],
+            Compression::Zip,
+            attrs,
+        )
+        .unwrap();
+        let vf = decode_frame(bytes, None).unwrap();
+        assert_eq!(vf.planes[0].stride, w as usize * 12);
+        for px in 0..n {
+            for (c, expect) in [r[px], g[px], b[px]].iter().enumerate() {
+                let got = f32_at(&vf, px, 3, c);
+                assert!(
+                    (got - expect).abs() <= 1e-5 * (1.0 + expect.abs()),
+                    "px{px} c{c} {got} vs {expect}"
+                );
+            }
+        }
+        // With alpha → RgbaF32Le; chroma at 1×1 is fine too.
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) / (n as f32)).collect();
+        let yc1 = rgb_to_luma_chroma(w, h, [&r, &g, &b], wts, (1, 1)).unwrap();
+        let chs = vec![mk("A", 1), mk("BY", 1), mk("RY", 1), mk("Y", 1)];
+        let attrs = scanline_attributes(w, h, &chs, Compression::None);
+        let bytes = encode_exr_scanline(
+            w,
+            h,
+            &chs,
+            &[&a, &yc1.by, &yc1.ry, &yc1.y],
+            Compression::None,
+            attrs,
+        )
+        .unwrap();
+        let vf = decode_frame(bytes, None).unwrap();
+        assert_eq!(vf.planes[0].stride, w as usize * 16);
+        for px in 0..n {
+            assert!((f32_at(&vf, px, 4, 0) - r[px]).abs() <= 1e-5 * (1.0 + r[px]));
+            assert_eq!(f32_at(&vf, px, 4, 3), a[px]);
+        }
+    }
+
+    #[test]
+    fn decoder_honours_the_chromaticities_attribute_for_luma_chroma() {
+        use crate::luma_chroma::{luminance_weights, rgb_to_luma_chroma};
+        use crate::types::Chromaticities;
+        let wide = Chromaticities {
+            red_x: 0.7347,
+            red_y: 0.2653,
+            green_x: 0.0,
+            green_y: 1.0,
+            blue_x: 0.0001,
+            blue_y: -0.077,
+            white_x: 0.32168,
+            white_y: 0.33767,
+        };
+        let (w, h) = (4u32, 2u32);
+        let n = (w * h) as usize;
+        let r: Vec<f32> = (0..n).map(|i| 0.3 + 0.05 * i as f32).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.9 - 0.04 * i as f32).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.1 + 0.08 * i as f32).collect();
+        let wts = luminance_weights(&wide);
+        let yc = rgb_to_luma_chroma(w, h, [&r, &g, &b], wts, (1, 1)).unwrap();
+        let mk = |name: &str| Channel {
+            name: name.to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        };
+        let chs = vec![mk("BY"), mk("RY"), mk("Y")];
+        let mut attrs = scanline_attributes(w, h, &chs, Compression::None);
+        attrs.push(Attribute {
+            name: "chromaticities".to_string(),
+            value: AttributeValue::Chromaticities(wide),
+        });
+        let bytes = encode_exr_scanline(
+            w,
+            h,
+            &chs,
+            &[&yc.by, &yc.ry, &yc.y],
+            Compression::None,
+            attrs,
+        )
+        .unwrap();
+        let vf = decode_frame(bytes, None).unwrap();
+        for (px, &expect) in g.iter().enumerate() {
+            // G depends on the weights: BT.709 weights would be off by
+            // far more than the tolerance here.
+            let got = f32_at(&vf, px, 3, 1);
+            assert!(
+                (got - expect).abs() <= 1e-5 * (1.0 + expect),
+                "px{px} G {got} vs {expect}"
+            );
+        }
     }
 
     #[test]

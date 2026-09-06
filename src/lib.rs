@@ -375,6 +375,7 @@ pub mod half;
 pub mod header;
 pub(crate) mod huf;
 pub mod image;
+pub mod luma_chroma;
 pub mod mipmap_encoder;
 pub mod multipart_encoder;
 pub mod multipart_mipmap_encoder;
@@ -423,6 +424,11 @@ pub use header::{
     encode_header, parse_header, parse_multipart_headers, ParsedHeader, VersionField,
 };
 pub use image::{ExrImage, ExrPlane};
+pub use luma_chroma::{
+    chromaticities_of, downsample_tent, luma_chroma_to_rgb, luminance_weights,
+    luminance_weights_of, rgb_to_luma_chroma, upsample_bilinear, ChromaPlane, LumaChromaPlanes,
+    RgbPlanes, BT709_CHROMATICITIES,
+};
 pub use mipmap_encoder::{
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap,
     encode_exr_tiled_mipmap_with_line_order, encode_exr_tiled_rgba_float_mipmap_box_filter,
