@@ -92,13 +92,16 @@ pub fn f32_to_half(f: f32) -> u16 {
         let rounded = (abs + 0x0fff + lsb) >> 13;
         return sign | (rounded - (112 << 10)) as u16;
     }
-    if abs < 0x3380_0000 {
-        // Below 2^-24: underflow to signed zero.
+    if abs < 0x3300_0000 {
+        // Below 2^-25: further than half the smallest subnormal from
+        // it, so round-to-nearest gives signed zero. (2^-25 itself is
+        // the tie and rounds to even = zero through the path below.)
         return sign;
     }
     // Subnormal half: insert the implicit one and shift out
-    // `126 - exponent` bits (13 plus the extra exponent deficit),
-    // rounding to nearest-even; a carry to 0x400 is the smallest normal.
+    // `126 - exponent` bits (13 plus the extra exponent deficit, up to
+    // 24 for the [2^-25, 2^-24) octave), rounding to nearest-even; a
+    // carry to 0x400 is the smallest normal.
     let m = (abs & 0x007f_ffff) | 0x0080_0000;
     let shift = 126 - (abs >> 23);
     let lsb = (m >> shift) & 1;
@@ -107,8 +110,10 @@ pub fn f32_to_half(f: f32) -> u16 {
 }
 
 /// Straight-line reference encoder (the crate's original
-/// implementation): explicit range tests and [`round_to_nearest_even`].
-/// Kept as the oracle for the fast path.
+/// implementation, with its underflow cutoff corrected to 2^-25 — see
+/// `subnormal_boundary_rounds_to_nearest_like_the_reference_tool`):
+/// explicit range tests and [`round_to_nearest_even`]. Kept as the
+/// oracle for the fast path.
 #[cfg(test)]
 pub(crate) fn f32_to_half_reference(f: f32) -> u16 {
     let bits = f.to_bits();
@@ -153,8 +158,10 @@ pub(crate) fn f32_to_half_reference(f: f32) -> u16 {
         }
         return (sign << 15) | (exp_h << 10) | mant;
     }
-    // Subnormal half (or zero).
-    if unbiased < -24 {
+    // Subnormal half (or zero). Values in (2^-25, 2^-24) round up to the
+    // smallest subnormal (2^-24) under round-to-nearest-even; only
+    // values at or below 2^-25 (half of it) round to zero.
+    if unbiased < -25 {
         // Underflow to signed zero.
         return sign << 15;
     }
@@ -193,6 +200,34 @@ fn round_to_nearest_even(value: u32, shift: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subnormal_boundary_rounds_to_nearest_like_the_reference_tool() {
+        // Values in (2^-25, 2^-24) are nearer the smallest subnormal
+        // half (2^-24, code 0x0001) than zero, so IEEE 754
+        // round-to-nearest-even yields 0x0001; exactly 2^-25 is the tie
+        // and rounds to even (zero). Pinned to what a reference EXR tool
+        // produced converting these FLOAT samples to HALF (opaque
+        // process; see tests/half_subnormal_rounding.rs). The crate's
+        // encoder previously flushed the whole octave to zero.
+        for (bits, expect) in [
+            (0x3340_0000u32, 0x0001u16), // 1.5 · 2^-25
+            (0x3301_47ae, 0x0001),       // 1.01 · 2^-25
+            (0x3300_0000, 0x0000),       // 2^-25: tie → even
+            (0x337f_be77, 0x0001),       // 0.999 · 2^-24
+            (0x3380_0000, 0x0001),       // 2^-24
+            (0x33c0_0000, 0x0002),       // 1.5 · 2^-24: tie → even
+            (0x32ff_ffff, 0x0000),       // just below 2^-25
+            (0xb340_0000, 0x8001),       // −1.5 · 2^-25
+        ] {
+            assert_eq!(f32_to_half(f32::from_bits(bits)), expect, "{bits:#010x}");
+            assert_eq!(
+                f32_to_half_reference(f32::from_bits(bits)),
+                expect,
+                "{bits:#010x}"
+            );
+        }
+    }
 
     #[test]
     fn fast_f32_to_half_matches_the_reference() {
