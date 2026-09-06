@@ -29,6 +29,7 @@ Clean-room from the public OpenEXR file-format specification.
 | Multi-part EXR (scanline parts)     | parse + write                                    |
 | Multi-part EXR (flat tiled parts)   | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware |
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write — lossless AND lossy (PXR24 / B44 / B44A) scanline paths; luminance/chroma (`Y` + 2×2 `BY`/`RY`) layouts validated bit-exact against a reference EXR validator binary. Note: the reference reader requires sub-sampled data-window extents divisible by the sampling factor; our reader additionally accepts ceil-sized odd extents |
+| Layered / multi-view channel names (`diffuse.R`, `left.R` / `right.R`, `a.b.c.Y` …) | **typed enumeration + framework mapping** — `layers` module groups the channel list by prefix (arbitrary depth), classifies each layer (RGBA / RGB / luma-chroma / gray / depth / other) and tags views from `multiView`; the registry decoder's `layer` option selects a layer (or the default view) and the encoder's `layer` option writes prefixed names. Validated against reference-produced multi-view files |
 | Luminance/chroma colour (`Y` + `RY` + `BY` ↔ RGB) | **decode + encode** (`luma_chroma` module + registry decoder) — `RY = (R − Y) / Y`, `BY = (B − Y) / Y` with luminance weights derived from the `chromaticities` attribute (BT.709 when absent); chroma reconstructed bilinearly from any `(xSampling, ySampling)`, reduced with a centred tent filter. Validated against a reference EXR tool (opaque process): chroma ratios and luminance match to HALF precision on constant-chroma images (filter-independent), smooth gradients agree to a colour-level tolerance; our files are accepted by the reference |
 | Deep scanline (`deepscanline`)      | parse + write — NONE / RLE / ZIPS; single- and multi-part |
 | Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part |
@@ -61,11 +62,14 @@ Clean-room from the public OpenEXR file-format specification.
   mixed parts — scanline + ONE_LEVEL / MIPMAP / RIPMAP tiled — now carry
   the lossy schemes; see the capability matrix.)
 * Framework frames for channel sets outside RGB(A) / `Y` / `Y RY BY`:
-  depth-only (`Z`) and AOV-only parts, and layer-prefixed names
-  (`diffuse.R` …) have no `PixelFormat` mapping and decode
-  `Unsupported` through the registry — the standalone `parse_exr` API
-  still returns every channel. Deep parts likewise (variable samples
-  per pixel); use `parse_exr_deep_*`.
+  depth-only (`Z`) and AOV-only layers have no `PixelFormat` mapping
+  and decode `Unsupported` through the registry — the standalone
+  `parse_exr` API still returns every channel. Deep parts likewise
+  (variable samples per pixel); use `parse_exr_deep_*`.
+* One layer per decode: the framework fixes a stream's pixel format
+  once, so the registry decoder cannot emit every layer of a layered /
+  multi-view image as separate frames — select each with the `layer`
+  option (enumerate them with `ExrImage::layers`).
 * The luminance/chroma colour reconstruction uses bilinear chroma
   interpolation (decode) and a centred tent reduction (encode); a
   reference EXR reader applies a different filter, so colour-level
@@ -84,7 +88,9 @@ choosing the format from the part's channel set (`R G B A` → RGBA,
 `R G B` → RGB, `Y RY BY` → RGB reconstructed from luminance/chroma,
 `Y` → gray, `Y A` → RGBA with `Y` replicated). The
 `part` decoder option picks a part in multi-part files (multi-level
-parts contribute level 0; deep parts are `Unsupported`). The encoder
+parts contribute level 0; deep parts are `Unsupported`) and the `layer`
+option a channel-name prefix (`diffuse`, `right`, …) or the default
+view. The encoder
 accepts the same three formats and writes `A B G R` / `B G R` / `Y`
 scanline channels — or, with `colour=luma_chroma`, `A BY RY Y` /
 `BY RY Y` with the chroma sub-sampled by `chroma_sampling` (default

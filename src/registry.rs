@@ -45,6 +45,24 @@
 //! Every directly-mapped channel (`R G B A Y`) must be at 1×1
 //! sampling; only the `RY` / `BY` chroma planes may be sub-sampled.
 //!
+//! # Layers
+//!
+//! Channel names of the form `<layer>.<base>` (`diffuse.R`, `right.R`,
+//! `beauty.spec.Y`, …) group into layers — see [`crate::layers`]. The
+//! `layer` decoder option (default `""`, the base layer of unprefixed
+//! names) selects which layer the rules above are applied to; a
+//! multi-view file's default view (the first `multiView` entry) may be
+//! named too, since its channels are the unprefixed ones. An unknown
+//! layer name is `Error::InvalidData` listing the layers the part
+//! actually has, with their colour shape. Only one layer decodes per
+//! packet: a frame carries a single pixel format fixed at the stream
+//! level, so the framework has no construct for emitting every layer
+//! of one image as separate frames — enumerate them with
+//! [`crate::enumerate_layers`] / [`crate::ExrImage::layers`] and decode
+//! each with its own `layer` option instead. The encoder's `layer`
+//! option (default `""`) prefixes every channel it writes with
+//! `<layer>.`.
+//!
 //! # Parts
 //!
 //! Single-part flat files (scanline or tiled) decode directly. In a
@@ -87,6 +105,7 @@ use crate::encoder::encode_exr_scanline;
 use crate::error::ExrError;
 use crate::header::VersionField;
 use crate::image::ExrPlane;
+use crate::layers::{enumerate_layers, find_layer};
 use crate::luma_chroma::{
     luma_chroma_to_rgb, luminance_weights, luminance_weights_of, rgb_to_luma_chroma, ChromaPlane,
     RgbPlanes, BT709_CHROMATICITIES,
@@ -162,24 +181,38 @@ oxideav_core::register!("openexr", register);
 // Options
 // ---------------------------------------------------------------------------
 
-/// Decoder tuning knobs (see the module docs, *Parts*).
+/// Decoder tuning knobs (see the module docs, *Layers* and *Parts*).
 #[derive(Debug, Clone, Default)]
 pub struct ExrDecoderOptions {
     /// Zero-based part index to emit from a multi-part file. Ignored
     /// (must be 0) for single-part files.
     pub part: u32,
+    /// Layer to decode: a channel-name prefix (`diffuse`, `right`,
+    /// `beauty.spec`), the default view's name, or `""` for the base
+    /// layer of unprefixed channels.
+    pub layer: String,
 }
 
 impl CodecOptionsStruct for ExrDecoderOptions {
-    const SCHEMA: &'static [OptionField] = &[OptionField {
-        name: "part",
-        kind: OptionKind::U32,
-        default: OptionValue::U32(0),
-        help: "zero-based part index to decode from a multi-part file",
-    }];
+    const SCHEMA: &'static [OptionField] = &[
+        OptionField {
+            name: "part",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(0),
+            help: "zero-based part index to decode from a multi-part file",
+        },
+        OptionField {
+            name: "layer",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "layer (channel-name prefix such as diffuse or right, or the default view's \
+                   name) to decode; empty = the base layer of unprefixed channels",
+        },
+    ];
     fn apply(&mut self, key: &str, value: &OptionValue) -> oxideav_core::Result<()> {
         match key {
             "part" => self.part = value.as_u32()?,
+            "layer" => self.layer = value.as_str()?.to_string(),
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
@@ -210,6 +243,9 @@ pub struct ExrEncoderOptions {
     /// [`ColourLayout::LumaChroma`]; `1` keeps the chroma at full
     /// resolution. Ignored for [`ColourLayout::Rgb`].
     pub chroma_sampling: u32,
+    /// Layer prefix for every written channel (`diffuse` → `diffuse.R`
+    /// …); empty writes unprefixed names.
+    pub layer: String,
 }
 
 impl Default for ExrEncoderOptions {
@@ -219,6 +255,7 @@ impl Default for ExrEncoderOptions {
             compression: Compression::Zip,
             colour: ColourLayout::Rgb,
             chroma_sampling: 2,
+            layer: String::new(),
         }
     }
 }
@@ -273,6 +310,13 @@ impl CodecOptionsStruct for ExrEncoderOptions {
             help: "RY/BY sampling factor for colour=luma_chroma (1 = full-resolution chroma); \
                    the frame width and height must be multiples of it",
         },
+        OptionField {
+            name: "layer",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "layer prefix for the written channel names (diffuse -> diffuse.R ...); empty \
+                   = unprefixed",
+        },
     ];
     fn apply(&mut self, key: &str, value: &OptionValue) -> oxideav_core::Result<()> {
         match key {
@@ -286,6 +330,16 @@ impl CodecOptionsStruct for ExrEncoderOptions {
                         )))
                     }
                 }
+            }
+            "layer" => {
+                let v = value.as_str()?;
+                if v.ends_with('.') || v.starts_with('.') || v.contains("..") {
+                    return Err(oxideav_core::Error::invalid(format!(
+                        "OpenEXR encoder: layer '{v}' must not start or end with '.' or contain \
+                         an empty component"
+                    )));
+                }
+                self.layer = v.to_string();
             }
             "chroma_sampling" => {
                 let v = value.as_u32()?;
@@ -348,7 +402,7 @@ impl Decoder for ExrDecoder {
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
         let flat = decode_flat_part(&packet.data, self.opts.part)?;
-        let (_format, frame) = flat_to_video_frame(&flat)?;
+        let (_format, frame) = flat_to_video_frame(&flat, &self.opts.layer)?;
         self.pending = Some(frame);
         Ok(())
     }
@@ -460,8 +514,35 @@ fn decode_flat_part(bytes: &[u8], part: u32) -> oxideav_core::Result<FlatPixels>
 /// Map a flat image's channel set to a frame (module docs, *Decoder
 /// channel mapping*). Returns the chosen pixel format alongside the
 /// packed frame.
-fn flat_to_video_frame(img: &FlatPixels) -> oxideav_core::Result<(PixelFormat, VideoFrame)> {
-    let find = |name: &str| img.planes.iter().position(|p| p.name == name);
+fn flat_to_video_frame(
+    img: &FlatPixels,
+    layer: &str,
+) -> oxideav_core::Result<(PixelFormat, VideoFrame)> {
+    let layers = enumerate_layers(&img.channels, &img.attributes);
+    let Some(sel) = find_layer(&layers, layer) else {
+        let available: Vec<String> = layers
+            .iter()
+            .map(|l| {
+                let name = if l.name.is_empty() {
+                    "\"\""
+                } else {
+                    l.name.as_str()
+                };
+                match &l.view {
+                    Some(v) => format!("{name} ({:?}, view {v})", l.kind),
+                    None => format!("{name} ({:?})", l.kind),
+                }
+            })
+            .collect();
+        return Err(oxideav_core::Error::invalid(format!(
+            "OpenEXR decoder: no layer '{layer}'; the part has [{}]",
+            available.join(", ")
+        )));
+    };
+    let find = |base: &str| {
+        let name = sel.channel_name(base);
+        img.planes.iter().position(|p| p.name == name)
+    };
     let (r, g, b, a, y) = (find("R"), find("G"), find("B"), find("A"), find("Y"));
     let (ry, by) = (find("RY"), find("BY"));
     let w = img.width;
@@ -539,9 +620,15 @@ fn flat_to_video_frame(img: &FlatPixels) -> oxideav_core::Result<(PixelFormat, V
             (PixelFormat::GrayF32Le, vec![full_res(y)?])
         }
         _ => {
-            let names: Vec<&str> = img.channels.iter().map(|c| c.name.as_str()).collect();
+            let names: Vec<&str> = sel
+                .channels
+                .iter()
+                .map(|&i| img.channels[i].name.as_str())
+                .collect();
             return Err(oxideav_core::Error::Unsupported(format!(
-                "OpenEXR decoder: channel set [{}] has no RGB(A) / Y / Y RY BY frame mapping",
+                "OpenEXR decoder: layer '{}' channel set [{}] has no RGB(A) / Y / Y RY BY frame \
+                 mapping",
+                sel.name,
                 names.join(", ")
             )));
         }
@@ -694,7 +781,11 @@ impl Encoder for ExrEncoder {
         }
 
         let mk = |name: &str, sampling: u32| Channel {
-            name: name.to_string(),
+            name: if self.opts.layer.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}.{name}", self.opts.layer)
+            },
             pixel_type: self.opts.pixel_type,
             p_linear: false,
             x_sampling: sampling as i32,
@@ -1197,6 +1288,155 @@ mod tests {
                 (got - expect).abs() <= 1e-5 * (1.0 + expect),
                 "px{px} G {got} vs {expect}"
             );
+        }
+    }
+
+    #[test]
+    fn decoder_layer_option_selects_prefixed_channels() {
+        let (w, h) = (3u32, 2u32);
+        let n = (w * h) as usize;
+        let mk = |name: &str| Channel {
+            name: name.to_string(),
+            pixel_type: PixelType::Float,
+            p_linear: false,
+            x_sampling: 1,
+            y_sampling: 1,
+        };
+        // Base RGBA + a `diffuse` RGB layer + a `right` gray+alpha
+        // layer + a depth-only layer, all in one part.
+        let names = [
+            "A",
+            "B",
+            "G",
+            "R",
+            "depth.Z",
+            "diffuse.B",
+            "diffuse.G",
+            "diffuse.R",
+            "right.A",
+            "right.Y",
+        ];
+        let chs: Vec<Channel> = names.iter().map(|n| mk(n)).collect();
+        let planes: Vec<Vec<f32>> = (0..names.len())
+            .map(|c| (0..n).map(|px| (c * 100 + px) as f32).collect())
+            .collect();
+        let refs: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
+        let mut attrs = scanline_attributes(w, h, &chs, Compression::Zips);
+        attrs.push(Attribute {
+            name: "multiView".to_string(),
+            value: AttributeValue::StringVector(vec!["left".to_string(), "right".to_string()]),
+        });
+        let bytes = encode_exr_scanline(w, h, &chs, &refs, Compression::Zips, attrs).unwrap();
+
+        let decode_layer = |layer: &str| {
+            let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+            params.options.insert("layer", layer.to_string());
+            let mut dec = make_decoder(&params).unwrap();
+            dec.send_packet(&Packet::new(0, TimeBase::new(1, 1), bytes.clone()))?;
+            match dec.receive_frame()? {
+                Frame::Video(v) => Ok::<_, oxideav_core::Error>(v),
+                _ => panic!("expected video frame"),
+            }
+        };
+        // Base layer: RGBA (R is channel 3, A channel 0).
+        let vf = decode_layer("").unwrap();
+        assert_eq!(vf.planes[0].stride, w as usize * 16);
+        assert_eq!(f32_at(&vf, 4, 4, 0), 304.0);
+        assert_eq!(f32_at(&vf, 4, 4, 3), 4.0);
+        // The default view name resolves to the base layer too.
+        let vf = decode_layer("left").unwrap();
+        assert_eq!(f32_at(&vf, 1, 4, 1), 201.0);
+        // diffuse → RGB from the prefixed channels.
+        let vf = decode_layer("diffuse").unwrap();
+        assert_eq!(vf.planes[0].stride, w as usize * 12);
+        assert_eq!(f32_at(&vf, 5, 3, 0), 705.0);
+        assert_eq!(f32_at(&vf, 5, 3, 1), 605.0);
+        assert_eq!(f32_at(&vf, 5, 3, 2), 505.0);
+        // right → Y + A replicated into RGBA.
+        let vf = decode_layer("right").unwrap();
+        assert_eq!(vf.planes[0].stride, w as usize * 16);
+        assert_eq!(f32_at(&vf, 2, 4, 0), 902.0);
+        assert_eq!(f32_at(&vf, 2, 4, 2), 902.0);
+        assert_eq!(f32_at(&vf, 2, 4, 3), 802.0);
+        // depth → Unsupported (no colour), unknown → InvalidData naming
+        // the layers.
+        assert!(matches!(
+            decode_layer("depth").unwrap_err(),
+            oxideav_core::Error::Unsupported(_)
+        ));
+        let err = decode_layer("beauty").unwrap_err();
+        match err {
+            oxideav_core::Error::InvalidData(msg) => {
+                assert!(msg.contains("diffuse (Rgb)"), "{msg}");
+                assert!(msg.contains("right (GrayAlpha, view right)"), "{msg}");
+                assert!(msg.contains("depth (Depth)"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoder_layer_option_prefixes_channel_names() {
+        let (w, h) = (4u32, 2u32);
+        let value = |px: usize, c: usize| px as f32 + c as f32 * 0.25;
+        let src = packed_frame(w, h, 4, value);
+        let bytes = encode_frame(
+            src.clone(),
+            w,
+            h,
+            PixelFormat::RgbaF32Le,
+            &[("layer", "beauty.spec")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let names: Vec<&str> = img.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "beauty.spec.A",
+                "beauty.spec.B",
+                "beauty.spec.G",
+                "beauty.spec.R"
+            ]
+        );
+        let layers = img.layers();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "beauty.spec");
+        assert_eq!(layers[0].kind, crate::layers::LayerKind::Rgba);
+        // The base layer is empty now, so a default decode fails
+        // loudly and the prefixed decode round-trips.
+        let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        params.options.insert("layer", "beauty.spec");
+        let mut dec = make_decoder(&params).unwrap();
+        dec.send_packet(&Packet::new(0, TimeBase::new(1, 1), bytes.clone()))
+            .unwrap();
+        match dec.receive_frame().unwrap() {
+            Frame::Video(v) => assert_eq!(v.planes[0].data, src.planes[0].data),
+            _ => panic!(),
+        }
+        assert!(matches!(
+            decode_frame(bytes, None).unwrap_err(),
+            oxideav_core::Error::InvalidData(_)
+        ));
+        // Luma/chroma under a layer prefix.
+        let src = packed_frame(w, h, 3, |_, c| [0.5f32, 0.25, 0.125][c]);
+        let bytes = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::RgbF32Le,
+            &[("layer", "left"), ("colour", "luma_chroma")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let names: Vec<&str> = img.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["left.BY", "left.RY", "left.Y"]);
+        assert_eq!(img.layers()[0].kind, crate::layers::LayerKind::LumaChroma);
+        // Malformed prefixes are rejected at construction.
+        for bad in [".x", "x.", "a..b"] {
+            let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+            params.options.insert("layer", bad);
+            assert!(make_encoder(&params).is_err(), "{bad}");
         }
     }
 

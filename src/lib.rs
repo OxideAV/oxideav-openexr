@@ -375,6 +375,7 @@ pub mod half;
 pub mod header;
 pub(crate) mod huf;
 pub mod image;
+pub mod layers;
 pub mod luma_chroma;
 pub mod mipmap_encoder;
 pub mod multipart_encoder;
@@ -424,6 +425,9 @@ pub use header::{
     encode_header, parse_header, parse_multipart_headers, ParsedHeader, VersionField,
 };
 pub use image::{ExrImage, ExrPlane};
+pub use layers::{
+    enumerate_layers, find_layer, multi_view, split_channel_name, ExrLayer, LayerKind,
+};
 pub use luma_chroma::{
     chromaticities_of, downsample_tent, luma_chroma_to_rgb, luminance_weights,
     luminance_weights_of, rgb_to_luma_chroma, upsample_bilinear, ChromaPlane, LumaChromaPlanes,

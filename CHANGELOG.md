@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - luminance/chroma colour reconstruction: new `luma_chroma` module (chromaticities-derived luminance weights, `Y RY BY` ↔ RGB, bilinear chroma reconstruction + tent reduction); the registry decoder now maps `Y` + `RY` + `BY` (+ `A`) parts to `RgbF32Le` / `RgbaF32Le`, validated against a reference EXR tool as an opaque process
 - registry encoder `colour=luma_chroma` option (+ `chroma_sampling`): RGB(A) frames written as `Y RY BY` (+ `A`) with 2×2 (or any) chroma sub-sampling; accepted by the reference tools and cross-checked against the RGB path
+- layered channel names: new `layers` module (`enumerate_layers` / `ExrImage::layers` — typed layer enumeration with colour shape and multi-view tagging); registry decoder `layer` option selects a prefixed layer or the default view, encoder `layer` option prefixes the written channels; validated against reference-produced multi-view files
 
 ## [0.0.6](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.5...v0.0.6) - 2026-08-30
 

@@ -50,4 +50,10 @@ impl ExrImage {
     pub fn height(&self) -> u32 {
         self.data_window.height()
     }
+    /// The layers of this image's channel list (see [`crate::layers`]):
+    /// the base layer first, then every `prefix.` layer, each with its
+    /// channel indices, colour shape and view.
+    pub fn layers(&self) -> Vec<crate::layers::ExrLayer> {
+        crate::layers::enumerate_layers(&self.channels, &self.attributes)
+    }
 }
