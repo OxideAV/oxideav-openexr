@@ -163,34 +163,6 @@ impl<'a> BitReader<'a> {
         self.pos += n as u64;
         Ok(v)
     }
-
-    /// Peek `n` bits (1..=56) without consuming; bits past the limit
-    /// read as zero.
-    #[inline]
-    fn peek(&mut self, n: u32) -> u64 {
-        debug_assert!((1..=56).contains(&n));
-        self.refill();
-        let raw = self.acc >> (64 - n);
-        let avail = (self.limit - self.pos).min(n as u64) as u32;
-        if avail >= n {
-            raw
-        } else if avail == 0 {
-            0
-        } else {
-            // The final loaded byte may carry padding past the declared
-            // bit count; zero it so table lookups see the same window
-            // the bit-exact reader would.
-            (raw >> (n - avail)) << (n - avail)
-        }
-    }
-
-    #[inline]
-    fn skip(&mut self, n: u32) {
-        debug_assert!(self.nacc >= n);
-        self.acc <<= n;
-        self.nacc -= n;
-        self.pos += n as u64;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,11 +300,17 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
         )));
     }
 
-    // Coded symbols in increasing index order.
-    let syms: Vec<u32> = (im..=i_m)
-        .filter(|&s| lengths[s] != 0)
-        .map(|s| s as u32)
-        .collect();
+    // Coded symbols in increasing index order (a plain loop over the
+    // declared range: this runs once per chunk over up to 65 537
+    // entries, so it is kept allocation-tight).
+    let mut syms: Vec<u32> = Vec::new();
+    let mut n_per_len = [0u32; MAX_CODE_LEN + 1];
+    for (s, &l) in lengths[im..=i_m].iter().enumerate() {
+        if l != 0 {
+            syms.push((im + s) as u32);
+            n_per_len[l as usize] += 1;
+        }
+    }
     if syms.is_empty() {
         return Err(ExrError::invalid(
             "Huffman payload: no coded symbols".to_string(),
@@ -342,14 +320,21 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
 
     // Per-length symbol ranges for the slow (>14-bit) path: the coded
     // symbol with rank r among length-l symbols (index order) has code
-    // first[l] + r.
-    let mut n_per_len = [0u32; MAX_CODE_LEN + 1];
-    let mut per_len_syms: Vec<Vec<u32>> = vec![Vec::new(); MAX_CODE_LEN + 1];
+    // first[l] + r. Stored flat — `per_len_syms[l]` is the slice
+    // `flat[len_start[l] .. len_start[l + 1]]` — so the setup is one
+    // allocation rather than one per length.
+    let mut len_start = [0usize; MAX_CODE_LEN + 2];
+    for l in 1..=MAX_CODE_LEN {
+        len_start[l + 1] = len_start[l] + n_per_len[l] as usize;
+    }
+    let mut flat_syms = vec![0u32; syms.len()];
+    let mut len_fill = len_start;
     for &s in &syms {
         let l = lengths[s as usize] as usize;
-        n_per_len[l] += 1;
-        per_len_syms[l].push(s);
+        flat_syms[len_fill[l]] = s;
+        len_fill[l] += 1;
     }
+    let per_len_sym = |l: usize, rank: usize| flat_syms[len_start[l] + rank];
 
     // Validate the code-length distribution before it indexes anything.
     // The lengths arrive over the wire and are only meaningful as a
@@ -386,52 +371,141 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
         }
     }
 
-    let mut r = BitReader::new(data, n_bits);
     // `expected` is bounded by `n_bits` above, but `n_bits` can itself be
     // large; reserve modestly and let the buffer grow to what the stream
     // actually decodes rather than to the header's claim.
     const RESERVE_CAP: usize = 1 << 20;
     let mut out: Vec<u16> = Vec::with_capacity(expected.min(RESERVE_CAP));
     let escape = i_m as u32;
+
+    // The bit reader state lives in plain locals for the decode loop so
+    // the compiler keeps it in registers (the method-based reader spilled
+    // every field to the stack once per symbol — the round-457 profile
+    // put ~60% of PIZ decode time in those loads and stores). The
+    // semantics are exactly those of `BitReader::peek` / `skip` / `get`:
+    // MSB-first, `limit` bits available, bits past the limit peek as
+    // zero and can never be consumed.
+    let limit: u64 = n_bits.min(data.len() as u64 * 8);
+    let mut acc: u64 = 0; // upcoming bits, left-aligned
+    let mut nacc: u32 = 0; // valid bits in `acc`
+    let mut bp: usize = 0; // next byte of `data` to load
+    let mut pos: u64 = 0; // bits consumed
+    let exhausted = || ExrError::invalid("Huffman payload: bit stream exhausted".to_string());
+
+    macro_rules! refill {
+        () => {
+            if nacc <= 55 {
+                if bp + 8 <= data.len() {
+                    let w = u64::from_be_bytes(data[bp..bp + 8].try_into().unwrap());
+                    let fill = (63 - nacc) >> 3;
+                    acc |= (w & (!0u64 << (64 - fill * 8))) >> nacc;
+                    bp += fill as usize;
+                    nacc += fill * 8;
+                } else {
+                    while nacc <= 55 && bp < data.len() {
+                        acc |= (data[bp] as u64) << (56 - nacc);
+                        bp += 1;
+                        nacc += 8;
+                    }
+                }
+            }
+        };
+    }
+    // Consume `n` (1..=56) bits, MSB-first; errors past the limit.
+    macro_rules! get {
+        ($n:expr) => {{
+            let n: u32 = $n;
+            if pos + n as u64 > limit {
+                return Err(exhausted());
+            }
+            refill!();
+            let v = acc >> (64 - n);
+            acc <<= n;
+            nacc -= n;
+            pos += n as u64;
+            v
+        }};
+    }
+
     while out.len() < expected {
-        let peeked = r.peek(FAST_BITS as u32);
+        refill!();
+        // Peek FAST_BITS; bits past the declared limit read as zero.
+        let raw = acc >> (64 - FAST_BITS);
+        let remaining = limit - pos;
+        let peeked = if remaining >= FAST_BITS as u64 {
+            raw
+        } else if remaining == 0 {
+            0
+        } else {
+            let pad = FAST_BITS as u32 - remaining as u32;
+            (raw >> pad) << pad
+        };
         let entry = fast[peeked as usize];
         let sym: u32;
         if entry != 0 {
             let e = entry - 1;
-            let l = (e & 63) as u32;
-            if r.pos + l as u64 > r.limit {
-                return Err(ExrError::invalid(
-                    "Huffman payload: bit stream exhausted".to_string(),
-                ));
+            let l = e & 63;
+            if pos + l as u64 > limit {
+                return Err(exhausted());
             }
-            r.skip(l);
+            acc <<= l;
+            nacc -= l;
+            pos += l as u64;
             sym = e >> 6;
         } else {
-            // Slow path: accumulate bits beyond FAST_BITS until a
-            // per-length range matches.
-            let mut acc = r.get(FAST_BITS as u32)?;
-            let mut l = FAST_BITS;
-            loop {
-                if l >= MAX_CODE_LEN {
-                    return Err(ExrError::invalid(
-                        "Huffman payload: invalid code (no symbol within 58 bits)".to_string(),
-                    ));
-                }
-                acc = (acc << 1) | r.get(1)?;
-                l += 1;
+            // Slow path, first attempt: the accumulator already holds up
+            // to 56 upcoming bits, so test every longer length against
+            // its canonical range directly instead of growing the code
+            // one bit at a time. This finds exactly the match the
+            // incremental scan below would find first (lengths are
+            // tried in increasing order) whenever the whole code is
+            // legitimately available; otherwise fall through to the
+            // incremental scan, which also produces the exact
+            // exhaustion error.
+            let avail = (nacc as u64).min(remaining).min(56) as usize;
+            let mut found: Option<(u32, u32)> = None;
+            for l in (FAST_BITS + 1)..=avail {
                 let n = n_per_len[l] as u64;
-                if n != 0 && acc >= first[l] && acc < first[l] + n {
-                    let rank = (acc - first[l]) as usize;
-                    sym = per_len_syms[l][rank];
-                    break;
+                if n != 0 {
+                    let code = acc >> (64 - l);
+                    if code >= first[l] && code < first[l] + n {
+                        let rank = (code - first[l]) as usize;
+                        found = Some((per_len_sym(l, rank), l as u32));
+                        break;
+                    }
+                }
+            }
+            if let Some((s, l)) = found {
+                acc <<= l;
+                nacc -= l;
+                pos += l as u64;
+                sym = s;
+            } else {
+                // Slow path: accumulate bits beyond FAST_BITS until a
+                // per-length range matches.
+                let mut acc_code = get!(FAST_BITS as u32);
+                let mut l = FAST_BITS;
+                loop {
+                    if l >= MAX_CODE_LEN {
+                        return Err(ExrError::invalid(
+                            "Huffman payload: invalid code (no symbol within 58 bits)".to_string(),
+                        ));
+                    }
+                    acc_code = (acc_code << 1) | get!(1);
+                    l += 1;
+                    let n = n_per_len[l] as u64;
+                    if n != 0 && acc_code >= first[l] && acc_code < first[l] + n {
+                        let rank = (acc_code - first[l]) as usize;
+                        sym = per_len_sym(l, rank);
+                        break;
+                    }
                 }
             }
         }
         if sym == escape {
             // Run escape: 8 raw bits = additional repeats of the previous
             // output value. Never legal as the first symbol.
-            let cnt = r.get(8)? as usize;
+            let cnt = get!(8) as usize;
             let prev = *out.last().ok_or_else(|| {
                 ExrError::invalid("Huffman payload: run escape before any value".to_string())
             })?;

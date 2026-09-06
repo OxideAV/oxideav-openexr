@@ -223,16 +223,36 @@ pub(crate) fn undo_zip_pipeline_pub(raw: Vec<u8>) -> Vec<u8> {
 /// Reverse the ZIP-family preprocessing pipeline (uninterleave +
 /// unpredict). Operates on `payload` in place after copying.
 fn undo_zip_pipeline(raw: Vec<u8>) -> Vec<u8> {
-    let mut predicted = raw;
-    apply_zip_unpredictor(&mut predicted);
-    let mut out = vec![0u8; predicted.len()];
-    apply_zip_uninterleave(&predicted, &mut out);
+    // One fused pass: the running-sum unpredictor walks the stream in
+    // order (first half, then second half) and each recovered byte goes
+    // straight to its de-interleaved slot — even positions for the
+    // first half, odd for the second — instead of an in-place pass
+    // followed by a second copy. Bit-identical to
+    // `apply_zip_unpredictor` + `apply_zip_uninterleave`.
+    let n = raw.len();
+    if n == 0 {
+        return raw;
+    }
+    let half = n.div_ceil(2);
+    let mut out = vec![0u8; n];
+    let mut prev = raw[0];
+    out[0] = prev;
+    for (k, &b) in raw[1..half].iter().enumerate() {
+        let v = (b as u32 + prev as u32).wrapping_sub(128) as u8;
+        prev = v;
+        out[2 * (k + 1)] = v;
+    }
+    for (k, &b) in raw[half..].iter().enumerate() {
+        let v = (b as u32 + prev as u32).wrapping_sub(128) as u8;
+        prev = v;
+        out[2 * k + 1] = v;
+    }
     out
 }
 
 /// Decode a ZIP / ZIPS payload (same algorithm; the per-block scanline
 /// count differs but that's handled outside).
-fn decode_zip_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8>> {
+pub(crate) fn decode_zip_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8>> {
     if payload.len() == uncompressed_size {
         // Spec: encoder may emit raw bytes if zlib doesn't shrink.
         return Ok(payload.to_vec());
@@ -248,7 +268,7 @@ fn decode_zip_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8
 }
 
 /// Decode an RLE payload (RLE → predictor → interleave inverse).
-fn decode_rle_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8>> {
+pub(crate) fn decode_rle_payload(payload: &[u8], uncompressed_size: usize) -> Result<Vec<u8>> {
     if payload.len() == uncompressed_size {
         return Ok(payload.to_vec());
     }
@@ -426,7 +446,7 @@ pub(crate) fn decode_pxr24_payload(
 /// covers. Sub-sampled channels skip image rows that aren't divisible
 /// by their `y_sampling` factor.
 #[allow(clippy::too_many_arguments)]
-fn scatter_block_into_planes(
+pub(crate) fn scatter_block_into_planes(
     uncompressed: &[u8],
     sorted_channels: &[Channel],
     planes: &mut [ExrPlane],
@@ -2714,8 +2734,8 @@ pub(crate) fn zlib_inflate_pub(data: &[u8], expected_size: usize) -> Result<Vec<
 /// producing output (a decompression bomb, or a size that simply does
 /// not match) is rejected instead of read to completion.
 fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
-    use flate2::read::ZlibDecoder;
-    use std::io::Read;
+    use flate2::{Decompress, FlushDecompress, Status};
+    use std::cell::RefCell;
 
     /// Upper bound on the eagerly reserved capacity. The buffer still
     /// grows on demand up to what the stream actually produces; this
@@ -2723,16 +2743,53 @@ fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     /// byte is inflated.
     const RESERVE_CAP: usize = 1 << 20;
 
-    let mut out = Vec::with_capacity(expected_size.min(RESERVE_CAP));
-    // Read at most one byte past the exact size the caller needs: every
-    // caller rejects a length mismatch anyway, and this ceiling bounds
-    // the work (and the buffer) to `expected_size` even for a stream
-    // that would otherwise inflate without end.
-    let limit = expected_size as u64 + 1;
-    let mut dec = ZlibDecoder::new(data).take(limit);
-    dec.read_to_end(&mut out)
-        .map_err(|e| ExrError::invalid(format!("zlib inflate failed: {e}")))?;
-    if out.len() as u64 == limit {
+    // One inflater per thread, reset per call: a ZIPS file inflates one
+    // scanline per chunk, and building a fresh decompressor state (plus
+    // the reader's 32 KiB buffer) per chunk cost more than the inflate
+    // itself (round-457 profile).
+    thread_local! {
+        static INFLATER: RefCell<Decompress> = RefCell::new(Decompress::new(true));
+    }
+
+    // Produce at most one byte past the exact size the caller needs:
+    // every caller rejects a length mismatch anyway, and this ceiling
+    // bounds the work (and the buffer) to `expected_size` even for a
+    // stream that would otherwise inflate without end.
+    let limit = expected_size.saturating_add(1);
+    let mut out: Vec<u8> = Vec::with_capacity(limit.min(RESERVE_CAP));
+    INFLATER.with(|inflater| -> Result<()> {
+        let mut d = inflater.borrow_mut();
+        d.reset(true);
+        let mut consumed = 0usize;
+        loop {
+            if out.len() == out.capacity() {
+                if out.len() >= limit {
+                    break;
+                }
+                out.reserve((limit - out.len()).min(RESERVE_CAP.max(out.len())));
+            }
+            let (in_before, out_before) = (d.total_in(), d.total_out());
+            let status = d
+                .decompress_vec(&data[consumed..], &mut out, FlushDecompress::None)
+                .map_err(|e| ExrError::invalid(format!("zlib inflate failed: {e}")))?;
+            consumed += (d.total_in() - in_before) as usize;
+            match status {
+                Status::StreamEnd => break,
+                Status::Ok | Status::BufError => {
+                    let progressed = d.total_in() != in_before || d.total_out() != out_before;
+                    if !progressed && out.len() < out.capacity() {
+                        // No input consumed, no output produced, room to
+                        // spare: the stream is truncated.
+                        return Err(ExrError::invalid(
+                            "zlib inflate failed: stream truncated".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if out.len() >= limit {
         return Err(ExrError::invalid(format!(
             "zlib inflate produced more than the expected {expected_size} bytes"
         )));
@@ -2743,6 +2800,18 @@ fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fused_zip_pipeline_matches_the_two_step_reference() {
+        for n in [0usize, 1, 2, 3, 7, 8, 255, 256, 1001] {
+            let raw: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
+            let mut predicted = raw.clone();
+            apply_zip_unpredictor(&mut predicted);
+            let mut expect = vec![0u8; n];
+            apply_zip_uninterleave(&predicted, &mut expect);
+            assert_eq!(undo_zip_pipeline(raw), expect, "n={n}");
+        }
+    }
 
     #[test]
     fn zlib_inflate_bounds_a_huge_declared_size() {

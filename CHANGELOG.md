@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - layered channel names: new `layers` module (`enumerate_layers` / `ExrImage::layers` — typed layer enumeration with colour shape and multi-view tagging); registry decoder `layer` option selects a prefixed layer or the default view, encoder `layer` option prefixes the written channels; validated against reference-produced multi-view files
 - registry encoder part-shape options: `tile_size` (tiled ONE_LEVEL), `levels` (`mipmap` / `ripmap`, box-filtered from the frame) and `line_order` (`decreasing_y`, tiled `random_y`) across every compression scheme
 
+### Changed
+
+- perf: per-thread recycled zlib inflater/deflater, fused ZIP unpredict + de-interleave pass, register-resident Huffman bit reader with direct long-code matching and flat per-length tables, sparse PIZ LUT build — ZIPS decode +39%, ZIP +28%, RLE +15–37%, PIZ +13–28%, ZIPS encode +24%, PIZ encode +17% (byte-identical output; see BENCHMARKS.md)
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.5...v0.0.6) - 2026-08-30
 
 ### Added

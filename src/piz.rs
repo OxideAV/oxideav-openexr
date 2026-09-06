@@ -89,10 +89,19 @@ const BITMAP_BYTES: usize = 8192;
 fn forward_lut(bitmap: &[u8; BITMAP_BYTES]) -> (Vec<u16>, u16) {
     let mut lut = vec![0u16; 65536];
     let mut k = 0u32;
-    for v in 0..65536usize {
-        if v == 0 || (bitmap[v >> 3] & (1 << (v & 7))) != 0 {
-            lut[v] = k as u16;
-            k += 1;
+    // Code 0 is always present; every other present code sets its bit.
+    lut[0] = 0;
+    k += 1;
+    for (byte_idx, &byte) in bitmap.iter().enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        for bit in 0..8 {
+            let v = byte_idx * 8 + bit;
+            if v != 0 && byte & (1 << bit) != 0 {
+                lut[v] = k as u16;
+                k += 1;
+            }
         }
     }
     (lut, (k - 1) as u16)
@@ -102,10 +111,18 @@ fn forward_lut(bitmap: &[u8; BITMAP_BYTES]) -> (Vec<u16>, u16) {
 fn inverse_lut(bitmap: &[u8; BITMAP_BYTES]) -> (Vec<u16>, u16) {
     let mut lut = vec![0u16; 65536];
     let mut k = 0u32;
-    for v in 0..65536usize {
-        if v == 0 || (bitmap[v >> 3] & (1 << (v & 7))) != 0 {
-            lut[k as usize] = v as u16;
-            k += 1;
+    lut[0] = 0;
+    k += 1;
+    for (byte_idx, &byte) in bitmap.iter().enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        for bit in 0..8 {
+            let v = byte_idx * 8 + bit;
+            if v != 0 && byte & (1 << bit) != 0 {
+                lut[k as usize] = v as u16;
+                k += 1;
+            }
         }
     }
     (lut, (k - 1) as u16)

@@ -17,16 +17,16 @@ treat them as relative guides, not absolutes.
 
 | Scheme | HALF | FLOAT |
 | ------ | ---- | ----- |
-| NONE   | 2.61 GiB/s | 19.7 GiB/s |
-| RLE    | 570 MiB/s  | 1.00 GiB/s |
-| ZIPS   | 267 MiB/s  | 337 MiB/s  |
-| ZIP    | 656 MiB/s  | 697 MiB/s  |
-| PXR24  | 1.07 GiB/s | 2.36 GiB/s |
-| PIZ    | 270 MiB/s  | 353 MiB/s  |
-| B44    | 1.07 GiB/s | 30.8 GiB/s¹ |
-| B44A   | 1.12 GiB/s | 29.8 GiB/s¹ |
-| DWAA   | 213 MiB/s  | 390 MiB/s² |
-| DWAB   | 239 MiB/s  | 443 MiB/s² |
+| NONE   | 2.50 GiB/s | 19.84 GiB/s |
+| RLE    | 639 MiB/s | 1.33 GiB/s |
+| ZIPS   | 377 MiB/s | 412 MiB/s |
+| ZIP    | 779 MiB/s | 823 MiB/s |
+| PXR24  | 1.04 GiB/s | 2.56 GiB/s |
+| PIZ    | 306 MiB/s | 369 MiB/s |
+| B44    | 1.06 GiB/s | 32.05 GiB/s¹ |
+| B44A   | 1.11 GiB/s | 31.85 GiB/s¹ |
+| DWAA   | 223 MiB/s | 422 MiB/s² |
+| DWAB   | 250 MiB/s | 458 MiB/s² |
 
 ¹ B44 stores FLOAT channels uncompressed (the scheme only packs HALF),
 so the FLOAT rows measure the raw-copy path.
@@ -35,37 +35,37 @@ so the FLOAT rows measure the raw-copy path.
 same half DCT pipeline (twice the accounted bytes per sample explains
 the higher apparent FLOAT throughput). PIZ and DWA rows reflect the
 round-446 optimisation pass over the round-439 first-cut entropy
-stages.
+stages; every row reflects the round-457 pass (below).
 
 ## Tiled ONE_LEVEL decode (64×64 tiles)
 
 | Scheme | HALF | FLOAT |
 | ------ | ---- | ----- |
-| NONE   | 2.54 GiB/s | 15.3 GiB/s |
-| RLE    | 562 MiB/s  | 1.01 GiB/s |
-| ZIPS   | 610 MiB/s  | 711 MiB/s  |
-| ZIP    | 626 MiB/s  | 709 MiB/s  |
-| PXR24  | 1.02 GiB/s | 2.26 GiB/s |
-| PIZ    | 224 MiB/s  | 305 MiB/s  |
-| B44    | 1.08 GiB/s | 8.5 GiB/s¹ |
-| B44A   | 1.13 GiB/s | 8.4 GiB/s¹ |
-| DWAA   | 188 MiB/s  | 351 MiB/s² |
-| DWAB   | 183 MiB/s  | 349 MiB/s² |
+| NONE   | 2.57 GiB/s | 17.67 GiB/s |
+| RLE    | 631 MiB/s | 1.32 GiB/s |
+| ZIPS   | 741 MiB/s | 829 MiB/s |
+| ZIP    | 751 MiB/s | 825 MiB/s |
+| PXR24  | 1.05 GiB/s | 2.32 GiB/s |
+| PIZ    | 278 MiB/s | 343 MiB/s |
+| B44    | 1.09 GiB/s | 8.15 GiB/s¹ |
+| B44A   | 1.14 GiB/s | 8.00 GiB/s¹ |
+| DWAA   | 209 MiB/s | 374 MiB/s² |
+| DWAB   | 209 MiB/s | 378 MiB/s² |
 
 ## Scanline encode (`encode_exr_scanline`)
 
 | Scheme | HALF | FLOAT |
 | ------ | ---- | ----- |
-| NONE   | 1.03 GiB/s | 4.63 GiB/s |
-| RLE    | 520 MiB/s  | 988 MiB/s  |
-| ZIPS   | 110 MiB/s  | 151 MiB/s  |
-| ZIP    | 238 MiB/s  | 309 MiB/s  |
-| PXR24  | 251 MiB/s  | 521 MiB/s  |
-| PIZ    | 208 MiB/s  | 277 MiB/s  |
-| B44    | 428 MiB/s  | 3.84 GiB/s¹ |
-| B44A   | 455 MiB/s  | 3.79 GiB/s¹ |
-| DWAA   | 161 MiB/s  | 316 MiB/s² |
-| DWAB   | 222 MiB/s  | 425 MiB/s² |
+| NONE   | 1.02 GiB/s | 4.78 GiB/s |
+| RLE    | 514 MiB/s | 991 MiB/s |
+| ZIPS   | 140 MiB/s | 174 MiB/s |
+| ZIP    | 236 MiB/s | 296 MiB/s |
+| PXR24  | 254 MiB/s | 513 MiB/s |
+| PIZ    | 223 MiB/s | 268 MiB/s |
+| B44    | 433 MiB/s | 3.84 GiB/s¹ |
+| B44A   | 442 MiB/s | 3.78 GiB/s¹ |
+| DWAA   | 163 MiB/s | 328 MiB/s² |
+| DWAB   | 223 MiB/s | 420 MiB/s² |
 
 ## Primitives
 
@@ -126,3 +126,43 @@ writer flushes whole eight-byte accumulators; (5) the DWA encoder
 copies interior 8×8 blocks row-wise and the decoder hoists the
 channel-set dispatch out of the per-texel write-back. All bit-exact:
 the reference cross-validation suites pass unchanged on both sides.
+
+## Round-457 optimisation deltas
+
+A profiling pass (sampling profiler over the chunk decoders) after the
+luminance/chroma and layer work; measured improvements over the
+pre-round code, same machine, byte-identical output on every path
+(the reference cross-validation suites pass unchanged):
+
+| Path | Change |
+| ---- | ------ |
+| ZIPS scanline decode | 272 → 377 MiB/s HALF (**+39%**), 330 → 412 FLOAT (**+25%**) |
+| ZIP scanline decode  | 608 → 779 MiB/s HALF (**+28%**), 681 → 823 FLOAT (**+21%**) |
+| RLE scanline decode  | +15% HALF / +37% FLOAT |
+| ZIP / ZIPS / RLE tiled decode | +17% … +39% |
+| PIZ decode           | 271 → 306 MiB/s HALF scanline (**+13%**), 218 → 278 tiled (**+28%**); FLOAT +11% / +17% |
+| PXR24 decode         | +6% … +11% |
+| DWAA / DWAB decode   | +2% … +16% (tiled gains most) |
+| ZIPS encode          | 113 → 140 MiB/s HALF (**+24%**), 151 → 174 FLOAT (**+15%**) |
+| PIZ encode           | 191 → 223 MiB/s HALF (**+17%**) |
+| every other encode path | +1% … +5% |
+
+Four changes produced these: (1) the zlib inflater is one
+`flate2::Decompress` state per thread, reset per chunk and driven
+through `decompress_vec` with the same capped reservation and
+one-past-expected ceiling as before — a ZIPS file inflates one
+scanline per chunk, and rebuilding the decompressor (plus the reader
+adapter's 32 KiB buffer) per chunk cost more than the inflate; (2) the
+streaming zlib encoder is likewise recycled per thread (`reset`
+restores the fresh-stream state; a unit test pins its output to a fresh
+encoder's byte-for-byte); (3) the ZIP-family unpredict + de-interleave
+is one fused pass writing each recovered byte straight to its
+de-interleaved slot; (4) the Huffman decoder keeps its bit-reader state
+in plain locals (the method-based reader spilled every field to the
+stack once per symbol), resolves codes longer than the 14-bit fast
+table by testing the accumulator against each length's canonical range
+directly instead of growing the code one bit at a time (falling back to
+the incremental scan only when the whole code is not yet available, so
+the exhaustion errors are unchanged), builds its per-length symbol
+ranges in one flat allocation, and the PIZ range-compaction LUTs skip
+empty bitmap bytes.

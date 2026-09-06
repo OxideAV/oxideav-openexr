@@ -780,11 +780,76 @@ fn zlib_deflate(data: &[u8]) -> Result<Vec<u8>> {
 pub(crate) fn zlib_deflate_pub(data: &[u8]) -> Result<Vec<u8>> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression as FlateLevel;
+    use std::cell::RefCell;
     use std::io::Write;
 
-    let mut enc = ZlibEncoder::new(Vec::new(), FlateLevel::default());
-    enc.write_all(data)
-        .map_err(|e| ExrError::invalid(format!("zlib deflate failed: {e}")))?;
-    enc.finish()
-        .map_err(|e| ExrError::invalid(format!("zlib finish failed: {e}")))
+    // One streaming encoder per thread, reset per chunk: a ZIPS file
+    // deflates one scanline per chunk, and rebuilding the compressor
+    // state (hash chains, window) every time dominated the per-chunk
+    // cost (round-457 profile). `reset` restores the fresh-stream state,
+    // so the emitted bytes are exactly what a new encoder at the default
+    // level produces (pinned by `reused_deflater_matches_a_fresh_encoder`).
+    thread_local! {
+        static DEFLATER: RefCell<Option<ZlibEncoder<Vec<u8>>>> = const { RefCell::new(None) };
+    }
+    DEFLATER.with(|slot| {
+        let mut enc = slot
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| ZlibEncoder::new(Vec::new(), FlateLevel::default()));
+        let result = enc
+            .write_all(data)
+            .map_err(|e| ExrError::invalid(format!("zlib deflate failed: {e}")))
+            .and_then(|()| {
+                enc.try_finish()
+                    .map_err(|e| ExrError::invalid(format!("zlib finish failed: {e}")))
+            });
+        // Swap the finished output out and leave a fresh stream behind
+        // for the next chunk (a failed stream is dropped, not reused).
+        match enc.reset(Vec::with_capacity(data.len() / 2 + 64)) {
+            Ok(out) => {
+                *slot.borrow_mut() = Some(enc);
+                result.map(|()| out)
+            }
+            Err(e) => Err(ExrError::invalid(format!("zlib reset failed: {e}"))),
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reused_deflater_matches_a_fresh_encoder() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let fresh = |data: &[u8]| -> Vec<u8> {
+            let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(data).unwrap();
+            e.finish().unwrap()
+        };
+        let mut inputs: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"abc".to_vec(),
+            vec![0u8; 4096],
+            (0..200_000u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+                .collect(),
+            (0..70_000u32).map(|i| (i % 251) as u8).collect(),
+        ];
+        // Interleave sizes so the reused state sees a big stream between
+        // small ones and vice versa.
+        let big = inputs[3].clone();
+        inputs.push(b"xyz".to_vec());
+        inputs.push(big);
+        for (i, data) in inputs.iter().enumerate() {
+            assert_eq!(zlib_deflate_pub(data).unwrap(), fresh(data), "input {i}");
+            assert_eq!(
+                zlib_deflate_pub(data).unwrap(),
+                fresh(data),
+                "input {i} (repeat)"
+            );
+        }
+    }
 }
