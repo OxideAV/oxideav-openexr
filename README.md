@@ -86,9 +86,11 @@ choosing the format from the part's channel set (`R G B A` → RGBA,
 `part` decoder option picks a part in multi-part files (multi-level
 parts contribute level 0; deep parts are `Unsupported`). The encoder
 accepts the same three formats and writes `A B G R` / `B G R` / `Y`
-scanline channels; `pixel_type` selects `float` (default, lossless
-round trip) or `half`, and `compression` any of `none rle zips zip piz
-pxr24 b44 b44a dwaa dwab`. See `src/registry.rs` for the full rules.
+scanline channels — or, with `colour=luma_chroma`, `A BY RY Y` /
+`BY RY Y` with the chroma sub-sampled by `chroma_sampling` (default
+2×2); `pixel_type` selects `float` (default, lossless round trip) or
+`half`, and `compression` any of `none rle zips zip piz pxr24 b44 b44a
+dwaa dwab`. See `src/registry.rs` for the full rules.
 
 For image-library callers that don't want the framework dependency,
 build with `default-features = false`:

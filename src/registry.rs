@@ -66,6 +66,15 @@
 //! round-to-nearest-even) — and `compression` picks any of the crate's
 //! scanline codecs (`none`, `rle`, `zips`, `zip` (default), `piz`,
 //! `pxr24`, `b44`, `b44a`, `dwaa`, `dwab`).
+//!
+//! `colour=luma_chroma` writes RGB(A) frames as `Y` + `RY` + `BY`
+//! (+ `A`) instead, with the chroma planes reduced by `chroma_sampling`
+//! (default `2`, i.e. 2×2 — the frame's width and height must be
+//! multiples of it; `1` keeps full-resolution chroma and round-trips
+//! exactly). Luminance uses the BT.709 weights and no `chromaticities`
+//! attribute is written (the frame model carries no primaries), so
+//! decoders reconstruct with the same weights. Gray frames write `Y`
+//! under either layout.
 
 use oxideav_core::{
     parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
@@ -78,7 +87,10 @@ use crate::encoder::encode_exr_scanline;
 use crate::error::ExrError;
 use crate::header::VersionField;
 use crate::image::ExrPlane;
-use crate::luma_chroma::{luma_chroma_to_rgb, luminance_weights_of, ChromaPlane, RgbPlanes};
+use crate::luma_chroma::{
+    luma_chroma_to_rgb, luminance_weights, luminance_weights_of, rgb_to_luma_chroma, ChromaPlane,
+    RgbPlanes, BT709_CHROMATICITIES,
+};
 use crate::multipart_mixed_encoder::{parse_exr_multipart_mixed, MultipartMixedImage};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 use crate::CODEC_ID_STR;
@@ -174,6 +186,17 @@ impl CodecOptionsStruct for ExrDecoderOptions {
     }
 }
 
+/// Colour channel layout the encoder writes (see the module docs,
+/// *Encoder*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColourLayout {
+    /// `R`, `G`, `B` (+ `A`) channels; gray frames write `Y`.
+    Rgb,
+    /// `Y`, `RY`, `BY` (+ `A`) luminance/chroma channels with the
+    /// chroma sub-sampled by `chroma_sampling`; gray frames write `Y`.
+    LumaChroma,
+}
+
 /// Encoder tuning knobs (see the module docs, *Encoder*).
 #[derive(Debug, Clone)]
 pub struct ExrEncoderOptions {
@@ -181,6 +204,12 @@ pub struct ExrEncoderOptions {
     pub pixel_type: PixelType,
     /// Scanline compression scheme.
     pub compression: Compression,
+    /// Colour channel layout.
+    pub colour: ColourLayout,
+    /// `RY` / `BY` sampling factor (both axes) for
+    /// [`ColourLayout::LumaChroma`]; `1` keeps the chroma at full
+    /// resolution. Ignored for [`ColourLayout::Rgb`].
+    pub chroma_sampling: u32,
 }
 
 impl Default for ExrEncoderOptions {
@@ -188,11 +217,14 @@ impl Default for ExrEncoderOptions {
         Self {
             pixel_type: PixelType::Float,
             compression: Compression::Zip,
+            colour: ColourLayout::Rgb,
+            chroma_sampling: 2,
         }
     }
 }
 
 const PIXEL_TYPE_NAMES: [&str; 2] = ["float", "half"];
+const COLOUR_NAMES: [&str; 2] = ["rgb", "luma_chroma"];
 const COMPRESSION_NAMES: [&str; 10] = [
     "none", "rle", "zips", "zip", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab",
 ];
@@ -227,9 +259,43 @@ impl CodecOptionsStruct for ExrEncoderOptions {
             default: OptionValue::String(String::new()),
             help: "scanline compression: none, rle, zips, zip, piz, pxr24, b44, b44a, dwaa, dwab",
         },
+        OptionField {
+            name: "colour",
+            kind: OptionKind::Enum(&COLOUR_NAMES),
+            default: OptionValue::String(String::new()),
+            help: "colour channel layout: rgb (R G B [A]) or luma_chroma (Y RY BY [A], chroma \
+                   sub-sampled by chroma_sampling)",
+        },
+        OptionField {
+            name: "chroma_sampling",
+            kind: OptionKind::U32,
+            default: OptionValue::U32(2),
+            help: "RY/BY sampling factor for colour=luma_chroma (1 = full-resolution chroma); \
+                   the frame width and height must be multiples of it",
+        },
     ];
     fn apply(&mut self, key: &str, value: &OptionValue) -> oxideav_core::Result<()> {
         match key {
+            "colour" => {
+                self.colour = match value.as_str()? {
+                    "rgb" => ColourLayout::Rgb,
+                    "luma_chroma" => ColourLayout::LumaChroma,
+                    other => {
+                        return Err(oxideav_core::Error::invalid(format!(
+                            "OpenEXR encoder: unknown colour layout '{other}'"
+                        )))
+                    }
+                }
+            }
+            "chroma_sampling" => {
+                let v = value.as_u32()?;
+                if v == 0 {
+                    return Err(oxideav_core::Error::invalid(
+                        "OpenEXR encoder: chroma_sampling must be >= 1",
+                    ));
+                }
+                self.chroma_sampling = v;
+            }
             "pixel_type" => {
                 self.pixel_type = match value.as_str()? {
                     "float" => PixelType::Float,
@@ -526,15 +592,24 @@ struct ExrEncoder {
     eof: bool,
 }
 
-/// Channel names (alphabetical, as the file layout requires) and the
-/// packed-component index feeding each one, per accepted frame format.
-fn channel_layout(format: PixelFormat) -> Option<&'static [(&'static str, usize)]> {
-    Some(match format {
-        PixelFormat::RgbaF32Le => &[("A", 3), ("B", 2), ("G", 1), ("R", 0)],
-        PixelFormat::RgbF32Le => &[("B", 2), ("G", 1), ("R", 0)],
-        PixelFormat::GrayF32Le => &[("Y", 0)],
-        _ => return None,
-    })
+/// Packed component count per accepted frame format (`None` for
+/// formats the encoder does not take).
+trait InterleavedComponents {
+    fn plane_count_interleaved(self) -> usize;
+}
+impl InterleavedComponents for PixelFormat {
+    fn plane_count_interleaved(self) -> usize {
+        match self {
+            PixelFormat::RgbaF32Le => 4,
+            PixelFormat::RgbF32Le => 3,
+            PixelFormat::GrayF32Le => 1,
+            _ => 0,
+        }
+    }
+}
+
+fn accepted_format(format: PixelFormat) -> bool {
+    FRAME_FORMATS.contains(&format)
 }
 
 impl Encoder for ExrEncoder {
@@ -556,12 +631,12 @@ impl Encoder for ExrEncoder {
         let format = self.out_params.pixel_format.ok_or_else(|| {
             oxideav_core::Error::invalid("OpenEXR encoder: pixel_format missing in CodecParameters")
         })?;
-        let layout = channel_layout(format).ok_or_else(|| {
-            oxideav_core::Error::invalid(format!(
+        if !accepted_format(format) {
+            return Err(oxideav_core::Error::invalid(format!(
                 "OpenEXR encoder: unsupported pixel format {format:?} (RgbaF32Le / RgbF32Le / \
                  GrayF32Le only)"
-            ))
-        })?;
+            )));
+        }
         let width = self.out_params.width.ok_or_else(|| {
             oxideav_core::Error::invalid("OpenEXR encoder: width missing in CodecParameters")
         })?;
@@ -600,34 +675,83 @@ impl Encoder for ExrEncoder {
             })?;
         debug_assert!(last_row_end <= plane.data.len());
 
-        // De-interleave the packed frame into one f32 plane per channel
-        // in the alphabetical order the file layout requires.
-        let components = layout.len();
+        // De-interleave the packed frame into one f32 plane per
+        // component (R, G, B, A / R, G, B / Y).
+        let components = format.plane_count_interleaved();
         let pixels = (width as usize) * (height as usize);
-        let mut planes: Vec<Vec<f32>> = (0..components)
+        let mut comps: Vec<Vec<f32>> = (0..components)
             .map(|_| Vec::with_capacity(pixels))
             .collect();
         for y in 0..height as usize {
             let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
             for px in 0..width as usize {
                 let base = px * components * 4;
-                for (dst, &(_, comp)) in planes.iter_mut().zip(layout.iter()) {
-                    let off = base + comp * 4;
+                for (c, dst) in comps.iter_mut().enumerate() {
+                    let off = base + c * 4;
                     dst.push(f32::from_le_bytes(row[off..off + 4].try_into().unwrap()));
                 }
             }
         }
 
-        let channels: Vec<Channel> = layout
-            .iter()
-            .map(|&(name, _)| Channel {
-                name: name.to_string(),
-                pixel_type: self.opts.pixel_type,
-                p_linear: false,
-                x_sampling: 1,
-                y_sampling: 1,
-            })
-            .collect();
+        let mk = |name: &str, sampling: u32| Channel {
+            name: name.to_string(),
+            pixel_type: self.opts.pixel_type,
+            p_linear: false,
+            x_sampling: sampling as i32,
+            y_sampling: sampling as i32,
+        };
+        // (channel, plane) pairs in the alphabetical order the file
+        // layout requires.
+        let (channels, planes): (Vec<Channel>, Vec<Vec<f32>>) = match (self.opts.colour, format) {
+            (ColourLayout::LumaChroma, PixelFormat::RgbaF32Le | PixelFormat::RgbF32Le) => {
+                let s = self.opts.chroma_sampling;
+                if width % s != 0 || height % s != 0 {
+                    return Err(oxideav_core::Error::invalid(format!(
+                        "OpenEXR encoder: {width}x{height} frame is not a multiple of \
+                             chroma_sampling={s} (conforming readers require sub-sampled \
+                             extents divisible by the sampling factor; use chroma_sampling=1)"
+                    )));
+                }
+                let weights = luminance_weights(&BT709_CHROMATICITIES);
+                let yc = rgb_to_luma_chroma(
+                    width,
+                    height,
+                    [&comps[0], &comps[1], &comps[2]],
+                    weights,
+                    (s, s),
+                )?;
+                let mut chs = Vec::with_capacity(4);
+                let mut pls = Vec::with_capacity(4);
+                if let Some(a) = comps.get(3) {
+                    chs.push(mk("A", 1));
+                    pls.push(a.clone());
+                }
+                chs.extend([mk("BY", s), mk("RY", s), mk("Y", 1)]);
+                pls.extend([yc.by, yc.ry, yc.y]);
+                (chs, pls)
+            }
+            (_, PixelFormat::RgbaF32Le) => {
+                let mut it = comps.into_iter();
+                let (r, g, b, a) = (
+                    it.next().unwrap(),
+                    it.next().unwrap(),
+                    it.next().unwrap(),
+                    it.next().unwrap(),
+                );
+                (
+                    vec![mk("A", 1), mk("B", 1), mk("G", 1), mk("R", 1)],
+                    vec![a, b, g, r],
+                )
+            }
+            (_, PixelFormat::RgbF32Le) => {
+                let mut it = comps.into_iter();
+                let (r, g, b) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+                (vec![mk("B", 1), mk("G", 1), mk("R", 1)], vec![b, g, r])
+            }
+            (_, PixelFormat::GrayF32Le) => (vec![mk("Y", 1)], comps),
+            _ => unreachable!("guarded by channel_layout"),
+        };
+
         let attributes = scanline_attributes(width, height, &channels, self.opts.compression);
         let plane_refs: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
         let bytes = encode_exr_scanline(
@@ -1236,6 +1360,152 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn encoder_luma_chroma_layout_writes_y_ry_by_and_round_trips() {
+        let (w, h) = (8u32, 4u32);
+        let n = (w * h) as usize;
+        // Constant chroma: the 2×2 reduction is exact so the round
+        // trip is tight.
+        let base = [0.7f32, 0.45, 0.15];
+        let value = |px: usize, c: usize| base[c] * (0.2 + px as f32 * 0.1);
+        let src = packed_frame(w, h, 3, value);
+        let bytes = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::RgbF32Le,
+            &[("colour", "luma_chroma"), ("compression", "piz")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let names: Vec<(&str, i32, i32)> = img
+            .channels
+            .iter()
+            .map(|c| (c.name.as_str(), c.x_sampling, c.y_sampling))
+            .collect();
+        assert_eq!(names, [("BY", 2, 2), ("RY", 2, 2), ("Y", 1, 1)]);
+        assert_eq!(img.planes[0].samples.len(), n / 4);
+        assert_eq!(img.planes[2].samples.len(), n);
+        let vf = decode_frame(bytes, None).unwrap();
+        for px in 0..n {
+            for c in 0..3 {
+                let expect = value(px, c);
+                let got = f32_at(&vf, px, 3, c);
+                assert!(
+                    (got - expect).abs() <= 1e-5 * (1.0 + expect),
+                    "px{px} c{c} {got} vs {expect}"
+                );
+            }
+        }
+        // RGBA keeps the alpha at full resolution ahead of the chroma.
+        let value4 = |px: usize, c: usize| {
+            if c == 3 {
+                px as f32 / n as f32
+            } else {
+                value(px, c)
+            }
+        };
+        let src = packed_frame(w, h, 4, value4);
+        let bytes = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::RgbaF32Le,
+            &[("colour", "luma_chroma"), ("pixel_type", "half")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        let names: Vec<&str> = img.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["A", "BY", "RY", "Y"]);
+        assert!(img.channels.iter().all(|c| c.pixel_type == PixelType::Half));
+        let vf = decode_frame(bytes, None).unwrap();
+        for px in 0..n {
+            assert_eq!(
+                f32_at(&vf, px, 4, 3),
+                half_to_f32(f32_to_half(value4(px, 3)))
+            );
+            let expect = value(px, 0);
+            assert!((f32_at(&vf, px, 4, 0) - expect).abs() <= 2e-3 * (1.0 + expect));
+        }
+        // Gray frames write Y under either layout.
+        let src = packed_frame(w, h, 1, |px, _| px as f32);
+        let bytes = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::GrayF32Le,
+            &[("colour", "luma_chroma")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert_eq!(img.channels.len(), 1);
+        assert_eq!(img.channels[0].name, "Y");
+    }
+
+    #[test]
+    fn encoder_luma_chroma_sampling_rules() {
+        let (w, h) = (5u32, 3u32);
+        let n = (w * h) as usize;
+        let value = |px: usize, c: usize| 0.1 + (px % 4) as f32 * 0.2 + c as f32 * 0.3;
+        // Odd extents at the default 2×2 sampling are rejected …
+        let src = packed_frame(w, h, 3, value);
+        let err = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::RgbF32Le,
+            &[("colour", "luma_chroma")],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, oxideav_core::Error::InvalidData(_)),
+            "{err:?}"
+        );
+        // … and chroma_sampling=1 round-trips any image exactly-ish.
+        let src = packed_frame(w, h, 3, value);
+        let bytes = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::RgbF32Le,
+            &[("colour", "luma_chroma"), ("chroma_sampling", "1")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert!(img
+            .channels
+            .iter()
+            .all(|c| c.x_sampling == 1 && c.y_sampling == 1));
+        let vf = decode_frame(bytes, None).unwrap();
+        for px in 0..n {
+            for c in 0..3 {
+                let expect = value(px, c);
+                assert!((f32_at(&vf, px, 3, c) - expect).abs() <= 1e-5 * (1.0 + expect));
+            }
+        }
+        // 4×4 chroma on a 8×4 frame.
+        let (w, h) = (8u32, 4u32);
+        let src = packed_frame(w, h, 3, |_, c| [0.5f32, 0.25, 0.125][c]);
+        let bytes = encode_frame(
+            src,
+            w,
+            h,
+            PixelFormat::RgbF32Le,
+            &[("colour", "luma_chroma"), ("chroma_sampling", "4")],
+        )
+        .unwrap();
+        let img = parse_exr(&bytes).unwrap();
+        assert_eq!(img.channels[0].x_sampling, 4);
+        assert_eq!(img.planes[0].samples.len(), 2);
+        // Bad option values.
+        let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        params.options.insert("chroma_sampling", "0");
+        assert!(make_encoder(&params).is_err());
+        params.options = Default::default();
+        params.options.insert("colour", "ycbcr");
+        assert!(make_encoder(&params).is_err());
     }
 
     #[test]
