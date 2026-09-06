@@ -366,6 +366,10 @@
 // rustdoc/semver (fleet rule 2026-09-01).
 #[doc(hidden)]
 pub mod b44;
+// Chunk-level decode entry points for the fuzz harness / profiling —
+// hidden from rustdoc/semver.
+#[doc(hidden)]
+pub mod chunk_api;
 pub mod decoder;
 pub mod deep;
 pub(crate) mod dwa;

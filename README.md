@@ -123,19 +123,20 @@ let img = parse_exr(&bytes).unwrap();
 A Criterion harness (`benches/codec_benchmarks.rs`) measures decode /
 encode throughput across every compression scheme for HALF and FLOAT,
 scanline and tiled — see [`BENCHMARKS.md`](BENCHMARKS.md) for the
-current numbers (scanline HALF NONE decode 2.6 GiB/s, FLOAT NONE
-19.7 GiB/s, PXR24 1.1–2.4 GiB/s, PIZ 0.27–0.35 GiB/s and DWAA/DWAB
-0.21–0.44 GiB/s after the round-446 optimisation pass, on Apple
-Silicon).
+current numbers (scanline HALF NONE decode 2.5 GiB/s, FLOAT NONE
+19.8 GiB/s, ZIP 0.78–0.82 GiB/s, PXR24 1.0–2.6 GiB/s, PIZ 0.31–0.37
+GiB/s and DWAA/DWAB 0.22–0.46 GiB/s after the round-457 optimisation
+pass, on Apple Silicon).
 
 ## Fuzzing
 
-Three coverage-guided `cargo-fuzz` targets live under `fuzz/`:
+Four coverage-guided `cargo-fuzz` targets live under `fuzz/`:
 
 ```sh
 cargo +nightly fuzz run parse_flat
 cargo +nightly fuzz run parse_deep_scanline
 cargo +nightly fuzz run parse_multipart_mixed
+cargo +nightly fuzz run decode_chunk
 ```
 
 `parse_flat` attacks the single-part flat readers — `parse_exr`
@@ -147,6 +148,12 @@ coding / IDCT) decode arithmetic; its overlay mode splices fuzz bytes
 over the offset-table + chunk region of writer-produced valid files
 across shape × compression × lineOrder combinations (all ten
 compression codes since r439).
+`decode_chunk` attacks the compressed-chunk decoders in isolation
+through the hidden `chunk_api::decode_scanline_chunk` entry point —
+PIZ, DWAA/DWAB, B44/B44A, PXR24 and the ZIP/RLE pipelines — so every
+fuzz byte lands in chunk arithmetic instead of the header parser; its
+overlay mode splices fuzz bytes over a writer-produced valid chunk of
+the chosen scheme × channel set × width.
 `parse_deep_scanline` attacks the deep scanline chunk walk.
 `parse_multipart_mixed` attacks the mixed multi-part reader — the
 per-part chunk-shape dispatch (flat scanline / flat + deep tiled at

@@ -71,3 +71,15 @@ name = "parse_flat"
 path = "fuzz_targets/parse_flat.rs"
 test = false
 doc = false
+
+# `decode_chunk` drives the compressed-chunk decoders directly through
+# the hidden `chunk_api::decode_scanline_chunk` entry point — PIZ,
+# DWAA/DWAB, B44/B44A, PXR24 and the ZIP/RLE pipelines — so every fuzz
+# byte lands in chunk arithmetic instead of the header parser. Overlay
+# mode splices fuzz bytes over a writer-produced valid chunk of the
+# chosen scheme × channel set × width.
+[[bin]]
+name = "decode_chunk"
+path = "fuzz_targets/decode_chunk.rs"
+test = false
+doc = false
