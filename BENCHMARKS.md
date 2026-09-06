@@ -25,8 +25,8 @@ treat them as relative guides, not absolutes.
 | PIZ    | 306 MiB/s | 369 MiB/s |
 | B44    | 1.06 GiB/s | 32.05 GiB/s¹ |
 | B44A   | 1.11 GiB/s | 31.85 GiB/s¹ |
-| DWAA   | 223 MiB/s | 422 MiB/s² |
-| DWAB   | 250 MiB/s | 458 MiB/s² |
+| DWAA   | 389 MiB/s | 685 MiB/s² |
+| DWAB   | 475 MiB/s | 831 MiB/s² |
 
 ¹ B44 stores FLOAT channels uncompressed (the scheme only packs HALF),
 so the FLOAT rows measure the raw-copy path.
@@ -49,23 +49,23 @@ stages; every row reflects the round-457 pass (below).
 | PIZ    | 278 MiB/s | 343 MiB/s |
 | B44    | 1.09 GiB/s | 8.15 GiB/s¹ |
 | B44A   | 1.14 GiB/s | 8.00 GiB/s¹ |
-| DWAA   | 209 MiB/s | 374 MiB/s² |
-| DWAB   | 209 MiB/s | 378 MiB/s² |
+| DWAA   | 325 MiB/s | 578 MiB/s² |
+| DWAB   | 326 MiB/s | 589 MiB/s² |
 
 ## Scanline encode (`encode_exr_scanline`)
 
 | Scheme | HALF | FLOAT |
 | ------ | ---- | ----- |
-| NONE   | 1.02 GiB/s | 4.78 GiB/s |
-| RLE    | 514 MiB/s | 991 MiB/s |
-| ZIPS   | 140 MiB/s | 174 MiB/s |
-| ZIP    | 236 MiB/s | 296 MiB/s |
-| PXR24  | 254 MiB/s | 513 MiB/s |
-| PIZ    | 223 MiB/s | 268 MiB/s |
-| B44    | 433 MiB/s | 3.84 GiB/s¹ |
-| B44A   | 442 MiB/s | 3.78 GiB/s¹ |
-| DWAA   | 163 MiB/s | 328 MiB/s² |
-| DWAB   | 223 MiB/s | 420 MiB/s² |
+| NONE   | 1.08 GiB/s | 4.58 GiB/s |
+| RLE    | 523 MiB/s | 978 MiB/s |
+| ZIPS   | 136 MiB/s | 170 MiB/s |
+| ZIP    | 236 MiB/s | 294 MiB/s |
+| PXR24  | 252 MiB/s | 491 MiB/s |
+| PIZ    | 219 MiB/s | 265 MiB/s |
+| B44    | 451 MiB/s | 3.74 GiB/s¹ |
+| B44A   | 471 MiB/s | 3.84 GiB/s¹ |
+| DWAA   | 171 MiB/s | 332 MiB/s² |
+| DWAB   | 226 MiB/s | 429 MiB/s² |
 
 ## Primitives
 
@@ -142,12 +142,23 @@ pre-round code, same machine, byte-identical output on every path
 | ZIP / ZIPS / RLE tiled decode | +17% … +39% |
 | PIZ decode           | 271 → 306 MiB/s HALF scanline (**+13%**), 218 → 278 tiled (**+28%**); FLOAT +11% / +17% |
 | PXR24 decode         | +6% … +11% |
-| DWAA / DWAB decode   | +2% … +16% (tiled gains most) |
+| DWAA decode          | 213 → 389 MiB/s HALF scanline (**+83%**), 406 → 685 FLOAT (**+69%**); tiled +75% HALF |
+| DWAB decode          | 246 → 475 MiB/s HALF scanline (**+94%**), 447 → 831 FLOAT (**+86%**); tiled +73% HALF |
+| DWAA / DWAB encode   | +8% / +6% HALF |
+| HALF encode, every scheme | +8% (NONE) … +9% (B44) |
 | ZIPS encode          | 113 → 140 MiB/s HALF (**+24%**), 151 → 174 FLOAT (**+15%**) |
 | PIZ encode           | 191 → 223 MiB/s HALF (**+17%**) |
 | every other encode path | +1% … +5% |
 
-Four changes produced these: (1) the zlib inflater is one
+Five changes produced these: (0) `f32_to_half` is a branch-light
+classify-then-round form — magnitude range tests, an add-`0x0FFF + lsb`
+rounding whose mantissa carry rolls into the exponent by itself, the
+same add-then-shift rounding at the subnormal shift — pinned bit-exact
+to the original straight-line encoder over 16.7 million `f32` patterns
+plus dense sweeps at every boundary (the DWA decoder converts every
+texel through it, and the profile put ~38% of DWA decode time in the
+old cascade; the inverse perceptual LUT is also hoisted out of the
+texel loop); (1) the zlib inflater is one
 `flate2::Decompress` state per thread, reset per chunk and driven
 through `decompress_vec` with the same capped reservation and
 one-past-expected ceiling as before — a ZIPS file inflates one

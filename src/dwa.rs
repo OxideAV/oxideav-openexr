@@ -149,7 +149,10 @@ pub(crate) fn to_nonlinear(code: u16) -> u16 {
     luts().0[code as usize]
 }
 
-/// Inverse perceptual mapping (decoder side).
+/// Inverse perceptual mapping (decoder side). The decoder indexes the
+/// LUT directly (hoisted out of its texel loop); this accessor serves
+/// the table tests.
+#[cfg(test)]
 pub(crate) fn to_linear(code: u16) -> u16 {
     luts().1[code as usize]
 }
@@ -870,6 +873,8 @@ pub(crate) fn decode_dwa_payload(
     }
 
     let mut half_planes: Vec<Option<Vec<u16>>> = vec![None; shape.sorted_channels.len()];
+    // Hoist the inverse perceptual LUT out of the per-texel loop.
+    let to_linear_lut: &[u16] = &luts().1;
     let mut ac_pos = 0usize;
     let mut dc_pos = 0usize;
     for set in &sets {
@@ -954,7 +959,7 @@ pub(crate) fn decode_dwa_payload(
                             for (comp, v) in [r, g, b].into_iter().enumerate() {
                                 let mut code = crate::half::f32_to_half(v);
                                 if lut[comp] {
-                                    code = to_linear(code);
+                                    code = to_linear_lut[code as usize];
                                 }
                                 planes[comp][row + xx] = code;
                             }
@@ -968,7 +973,7 @@ pub(crate) fn decode_dwa_payload(
                         for xx in 0..xlim {
                             let mut code = crate::half::f32_to_half(blocks[0][yy * 8 + xx]);
                             if lut {
-                                code = to_linear(code);
+                                code = to_linear_lut[code as usize];
                             }
                             planes[0][row + xx] = code;
                         }

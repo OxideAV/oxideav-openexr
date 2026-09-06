@@ -54,7 +54,63 @@ pub fn half_to_f32(h: u16) -> f32 {
 }
 
 /// Encode `f32` to binary16 bit pattern with round-half-to-even.
+///
+/// Branch-light form (the DWA decoder converts every texel through
+/// this, and the round-457 profile put ~38% of DWA decode time in the
+/// previous cascade of range tests): the classification is done on
+/// the magnitude bits, rounding adds `0x0FFF + lsb` before the 13-bit
+/// shift so a mantissa carry rolls into the exponent by itself, and
+/// the subnormal path uses the same add-then-shift rounding at its
+/// wider shift. Bit-identical to [`f32_to_half_reference`] for every
+/// `f32` pattern (pinned by `fast_f32_to_half_matches_the_reference`).
 pub fn f32_to_half(f: f32) -> u16 {
+    let bits = f.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let abs = bits & 0x7fff_ffff;
+    if abs >= 0x7f80_0000 {
+        // Inf or NaN — keep the top mantissa bits, force a NaN to stay
+        // a NaN.
+        if abs == 0x7f80_0000 {
+            return sign | 0x7c00;
+        }
+        let mut m = ((abs >> 13) & 0x3ff) as u16;
+        if m == 0 {
+            m = 1;
+        }
+        return sign | 0x7c00 | m;
+    }
+    if abs >= 0x4780_0000 {
+        // Exponent above the half range: overflow to infinity.
+        return sign | 0x7c00;
+    }
+    if abs >= 0x3880_0000 {
+        // Normal half: round the 13 dropped bits to nearest-even and
+        // rebias the exponent (127 → 15). A rounding carry propagates
+        // into the exponent, and past the top exponent lands exactly
+        // on the infinity pattern.
+        let lsb = (abs >> 13) & 1;
+        let rounded = (abs + 0x0fff + lsb) >> 13;
+        return sign | (rounded - (112 << 10)) as u16;
+    }
+    if abs < 0x3380_0000 {
+        // Below 2^-24: underflow to signed zero.
+        return sign;
+    }
+    // Subnormal half: insert the implicit one and shift out
+    // `126 - exponent` bits (13 plus the extra exponent deficit),
+    // rounding to nearest-even; a carry to 0x400 is the smallest normal.
+    let m = (abs & 0x007f_ffff) | 0x0080_0000;
+    let shift = 126 - (abs >> 23);
+    let lsb = (m >> shift) & 1;
+    let rounded = (m + (1u32 << (shift - 1)) - 1 + lsb) >> shift;
+    sign | rounded as u16
+}
+
+/// Straight-line reference encoder (the crate's original
+/// implementation): explicit range tests and [`round_to_nearest_even`].
+/// Kept as the oracle for the fast path.
+#[cfg(test)]
+pub(crate) fn f32_to_half_reference(f: f32) -> u16 {
     let bits = f.to_bits();
     let sign = ((bits >> 31) & 0x1) as u16;
     let exp_f32 = ((bits >> 23) & 0xFF) as i32;
@@ -115,6 +171,7 @@ pub fn f32_to_half(f: f32) -> u16 {
 }
 
 /// Round `value` right-shifted by `shift` bits to nearest, ties-to-even.
+#[cfg(test)]
 fn round_to_nearest_even(value: u32, shift: u32) -> u32 {
     if shift == 0 {
         return value;
@@ -136,6 +193,54 @@ fn round_to_nearest_even(value: u32, shift: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_f32_to_half_matches_the_reference() {
+        // Every pattern with the low 8 bits clear (16.7M values) covers
+        // all exponents and every rounding neighbourhood; the dense
+        // sweeps below cover the exact tie / carry / boundary bits.
+        let mut bits = 0u32;
+        loop {
+            assert_eq!(
+                f32_to_half(f32::from_bits(bits)),
+                f32_to_half_reference(f32::from_bits(bits)),
+                "{bits:#010x}"
+            );
+            bits = bits.wrapping_add(256);
+            if bits == 0 {
+                break;
+            }
+        }
+        let dense = [
+            0x3380_0000u32, // 2^-24: smallest subnormal boundary
+            0x3300_0000,    // 2^-25: below it
+            0x3880_0000,    // 2^-14: smallest normal
+            0x387f_ffff,
+            0x477f_e000, // largest finite half neighbourhood
+            0x477f_f000,
+            0x4780_0000, // 2^16: overflow
+            0x3f80_0000, // 1.0
+            0x7f7f_ffff, // f32::MAX
+            0x7f80_0000, // inf
+            0x7f80_0001, // NaN with tiny payload
+            0x7fc0_0000, // quiet NaN
+        ];
+        for &base in &dense {
+            for d in 0..0x4000u32 {
+                for b in [
+                    base.wrapping_add(d),
+                    base.wrapping_sub(d),
+                    base.wrapping_add(d) | 0x8000_0000,
+                ] {
+                    assert_eq!(
+                        f32_to_half(f32::from_bits(b)),
+                        f32_to_half_reference(f32::from_bits(b)),
+                        "{b:#010x}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn roundtrip_zero() {

@@ -125,7 +125,7 @@ encode throughput across every compression scheme for HALF and FLOAT,
 scanline and tiled — see [`BENCHMARKS.md`](BENCHMARKS.md) for the
 current numbers (scanline HALF NONE decode 2.5 GiB/s, FLOAT NONE
 19.8 GiB/s, ZIP 0.78–0.82 GiB/s, PXR24 1.0–2.6 GiB/s, PIZ 0.31–0.37
-GiB/s and DWAA/DWAB 0.22–0.46 GiB/s after the round-457 optimisation
+GiB/s and DWAA/DWAB 0.38–0.83 GiB/s after the round-457 optimisation
 pass, on Apple Silicon).
 
 ## Fuzzing

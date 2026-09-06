@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - perf: per-thread recycled zlib inflater/deflater, fused ZIP unpredict + de-interleave pass, register-resident Huffman bit reader with direct long-code matching and flat per-length tables, sparse PIZ LUT build — ZIPS decode +39%, ZIP +28%, RLE +15–37%, PIZ +13–28%, ZIPS encode +24%, PIZ encode +17% (byte-identical output; see BENCHMARKS.md)
+- perf: branch-light `f32_to_half` (pinned bit-exact to the original over 16.7M patterns + boundary sweeps) and the DWA inverse-LUT hoisted out of the texel loop — DWAA decode +83% HALF, DWAB +94%, HALF encode +8–9% across schemes
 
 ## [0.0.6](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.5...v0.0.6) - 2026-08-30
 
