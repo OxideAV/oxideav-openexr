@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ColorInfo` derives H.273 primaries code points from the `chromaticities` attribute (BT.709 1, BT.470 M 4, BT.470 B/G 5, BT.601-525 6, film 8, BT.2020 9, XYZ 10, P3 DCI 11, P3 D65 12, EBU 3213 22; else 2 with the raw chromaticities on `ExrImage::chromaticities()`), linear transfer 8, matrix 0, full range; a part without the attribute reports BT.709 (the format's documented default)
 - The scanline writer honours the `dataWindow` origin in chunk coordinates (`y_min + i × blockHeight`; unchanged for windows at the origin); the tiled ONE_LEVEL / MIPMAP / RIPMAP and multi-part writers can carry extra non-structural header attributes
 - `Cargo.toml` excludes `/tests` and `/fuzz` from the published package
+- zlib (ZIP / ZIPS / PXR24 chunks, deep ZIPS blocks) now goes through `compcol` (the workspace compression crate, zlib feature only) instead of `flate2`; the per-thread reused encoder / bounded decoder are kept. compcol's deflate emits different but valid bytes (a 64×48 RGBA float sample: ZIP 47 962 → 47 997 bytes, PXR24 27 678 → 27 676, ZIPS identical) — no test pinned the compressed bytes, every pin is on decoded pixels and still holds, and files written before this change decode identically. Deep ZIPS blocks are now inflated through the same size-bounded path as flat chunks
 
 ### Deprecated
 

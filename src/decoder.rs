@@ -2713,15 +2713,15 @@ pub(crate) fn find_chunk_count(attrs: &[Attribute]) -> Option<usize> {
 }
 
 /// Public-`crate` wrapper around [`zlib_inflate`] so sibling modules
-/// (e.g. the mixed multi-part reader) can reuse the same `flate2`-backed
+/// (e.g. the mixed multi-part reader) can reuse the same bounded
 /// decompressor without duplicating the inflate plumbing.
 pub(crate) fn zlib_inflate_pub(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     zlib_inflate(data, expected_size)
 }
 
 /// zlib-decompress `data` into a buffer that must inflate to exactly
-/// `expected_size` bytes. We use `flate2`'s `ZlibDecoder` (pure-Rust
-/// `miniz_oxide` backend per Cargo.toml).
+/// `expected_size` bytes, through `compcol`'s streaming zlib decoder
+/// (the workspace's compression crate, pure Rust).
 ///
 /// `expected_size` is frequently an attacker-controlled length read
 /// straight off the wire (DWA header counts, deep block sizes), so it
@@ -2733,8 +2733,8 @@ pub(crate) fn zlib_inflate_pub(data: &[u8], expected_size: usize) -> Result<Vec<
 /// the exact size every caller requires — so a stream that would keep
 /// producing output (a decompression bomb, or a size that simply does
 /// not match) is rejected instead of read to completion.
-fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
-    use flate2::{Decompress, FlushDecompress, Status};
+pub(crate) fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
+    use compcol::{Decoder as _, Status};
     use std::cell::RefCell;
 
     /// Upper bound on the eagerly reserved capacity. The buffer still
@@ -2744,41 +2744,48 @@ fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     const RESERVE_CAP: usize = 1 << 20;
 
     // One inflater per thread, reset per call: a ZIPS file inflates one
-    // scanline per chunk, and building a fresh decompressor state (plus
-    // the reader's 32 KiB buffer) per chunk cost more than the inflate
-    // itself (round-457 profile).
+    // scanline per chunk, and building a fresh decompressor state per
+    // chunk cost more than the inflate itself (round-457 profile).
     thread_local! {
-        static INFLATER: RefCell<Decompress> = RefCell::new(Decompress::new(true));
+        static INFLATER: RefCell<compcol::zlib::Decoder> =
+            RefCell::new(<compcol::zlib::Zlib as compcol::Algorithm>::decoder());
     }
+    let map_err = |e: compcol::Error| ExrError::invalid(format!("zlib inflate failed: {e}"));
 
     // Produce at most one byte past the exact size the caller needs:
     // every caller rejects a length mismatch anyway, and this ceiling
     // bounds the work (and the buffer) to `expected_size` even for a
     // stream that would otherwise inflate without end.
     let limit = expected_size.saturating_add(1);
-    let mut out: Vec<u8> = Vec::with_capacity(limit.min(RESERVE_CAP));
+    let mut out: Vec<u8> = vec![0u8; limit.min(RESERVE_CAP)];
+    let mut filled = 0usize;
     INFLATER.with(|inflater| -> Result<()> {
         let mut d = inflater.borrow_mut();
-        d.reset(true);
-        let mut consumed = 0usize;
-        loop {
-            if out.len() == out.capacity() {
-                if out.len() >= limit {
+        d.reset();
+        let mut input = data;
+        let mut ended = false;
+        while !ended {
+            if filled == out.len() {
+                if filled >= limit {
                     break;
                 }
-                out.reserve((limit - out.len()).min(RESERVE_CAP.max(out.len())));
+                let grow = (limit - filled).min(RESERVE_CAP.max(filled));
+                out.resize(filled + grow, 0);
             }
-            let (in_before, out_before) = (d.total_in(), d.total_out());
-            let status = d
-                .decompress_vec(&data[consumed..], &mut out, FlushDecompress::None)
-                .map_err(|e| ExrError::invalid(format!("zlib inflate failed: {e}")))?;
-            consumed += (d.total_in() - in_before) as usize;
+            let (p, status) = if input.is_empty() {
+                d.finish(&mut out[filled..]).map_err(map_err)?
+            } else {
+                d.decode(input, &mut out[filled..]).map_err(map_err)?
+            };
+            let progressed = p.consumed != 0 || p.written != 0;
+            input = &input[p.consumed..];
+            filled += p.written;
             match status {
-                Status::StreamEnd => break,
-                Status::Ok | Status::BufError => {
-                    let progressed = d.total_in() != in_before || d.total_out() != out_before;
-                    if !progressed && out.len() < out.capacity() {
-                        // No input consumed, no output produced, room to
+                Status::StreamEnd => ended = true,
+                Status::OutputFull => {}
+                Status::InputEmpty => {
+                    if input.is_empty() && !progressed {
+                        // No input left, nothing produced, room to
                         // spare: the stream is truncated.
                         return Err(ExrError::invalid(
                             "zlib inflate failed: stream truncated".to_string(),
@@ -2789,11 +2796,12 @@ fn zlib_inflate(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
         }
         Ok(())
     })?;
-    if out.len() >= limit {
+    if filled >= limit {
         return Err(ExrError::invalid(format!(
             "zlib inflate produced more than the expected {expected_size} bytes"
         )));
     }
+    out.truncate(filled);
     Ok(out)
 }
 
@@ -2819,13 +2827,7 @@ mod tests {
         // multi-gigabyte expected size (as a hostile DWA/deep chunk
         // header can). The reservation must stay bounded and the call
         // must return an ordinary error, never OOM.
-        let compressed = {
-            use flate2::write::ZlibEncoder;
-            use std::io::Write;
-            let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-            e.write_all(b"abc").unwrap();
-            e.finish().unwrap()
-        };
+        let compressed = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(b"abc").unwrap();
         // Correct size still works.
         let out = zlib_inflate(&compressed, 3).unwrap();
         assert_eq!(out, b"abc");
@@ -2838,11 +2840,8 @@ mod tests {
 
     #[test]
     fn zlib_inflate_rejects_output_past_expected() {
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-        e.write_all(&vec![0u8; 4096]).unwrap();
-        let compressed = e.finish().unwrap();
+        let compressed =
+            compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(&vec![0u8; 4096]).unwrap();
         // Declaring fewer bytes than the stream yields must error at the
         // ceiling rather than allocate the full output.
         assert!(zlib_inflate(&compressed, 16).is_err());

@@ -875,41 +875,53 @@ fn zlib_deflate(data: &[u8]) -> Result<Vec<u8>> {
 /// Public-in-crate alias of [`zlib_deflate`] for use by sibling encoder
 /// modules (tile_encoder, multipart_encoder).
 pub(crate) fn zlib_deflate_pub(data: &[u8]) -> Result<Vec<u8>> {
-    use flate2::write::ZlibEncoder;
-    use flate2::Compression as FlateLevel;
+    use compcol::{Encoder as _, Status};
     use std::cell::RefCell;
-    use std::io::Write;
+
+    /// Scratch buffer each encoder call drains into.
+    const OUT_CHUNK: usize = 64 * 1024;
 
     // One streaming encoder per thread, reset per chunk: a ZIPS file
     // deflates one scanline per chunk, and rebuilding the compressor
     // state (hash chains, window) every time dominated the per-chunk
-    // cost (round-457 profile). `reset` restores the fresh-stream state,
-    // so the emitted bytes are exactly what a new encoder at the default
-    // level produces (pinned by `reused_deflater_matches_a_fresh_encoder`).
+    // cost (round-457 profile). `reset` restores the fresh-stream state
+    // with the configuration kept, so the emitted bytes are exactly what
+    // a new encoder at the default level produces (pinned by
+    // `reused_deflater_matches_a_fresh_encoder`).
     thread_local! {
-        static DEFLATER: RefCell<Option<ZlibEncoder<Vec<u8>>>> = const { RefCell::new(None) };
+        static DEFLATER: RefCell<(compcol::zlib::Encoder, Vec<u8>)> =
+            RefCell::new((<compcol::zlib::Zlib as compcol::Algorithm>::encoder(), vec![0u8; OUT_CHUNK]));
     }
+    let map_err = |e: compcol::Error| ExrError::invalid(format!("zlib deflate failed: {e}"));
     DEFLATER.with(|slot| {
-        let mut enc = slot
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(|| ZlibEncoder::new(Vec::new(), FlateLevel::default()));
-        let result = enc
-            .write_all(data)
-            .map_err(|e| ExrError::invalid(format!("zlib deflate failed: {e}")))
-            .and_then(|()| {
-                enc.try_finish()
-                    .map_err(|e| ExrError::invalid(format!("zlib finish failed: {e}")))
-            });
-        // Swap the finished output out and leave a fresh stream behind
-        // for the next chunk (a failed stream is dropped, not reused).
-        match enc.reset(Vec::with_capacity(data.len() / 2 + 64)) {
-            Ok(out) => {
-                *slot.borrow_mut() = Some(enc);
-                result.map(|()| out)
+        let mut guard = slot.borrow_mut();
+        let (enc, buf) = &mut *guard;
+        enc.reset();
+        let mut out = Vec::with_capacity(data.len() / 2 + 64);
+        let mut input = data;
+        while !input.is_empty() {
+            let (p, status) = enc.encode(input, buf).map_err(map_err)?;
+            out.extend_from_slice(&buf[..p.written]);
+            input = &input[p.consumed..];
+            match status {
+                Status::OutputFull => continue,
+                Status::InputEmpty => break,
+                Status::StreamEnd => break,
             }
-            Err(e) => Err(ExrError::invalid(format!("zlib reset failed: {e}"))),
         }
+        loop {
+            let (p, status) = enc.finish(buf).map_err(map_err)?;
+            out.extend_from_slice(&buf[..p.written]);
+            if status == Status::StreamEnd {
+                break;
+            }
+            if p.written == 0 {
+                return Err(ExrError::invalid(
+                    "zlib finish failed: encoder made no progress".to_string(),
+                ));
+            }
+        }
+        Ok(out)
     })
 }
 
@@ -919,12 +931,8 @@ mod tests {
 
     #[test]
     fn reused_deflater_matches_a_fresh_encoder() {
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
         let fresh = |data: &[u8]| -> Vec<u8> {
-            let mut e = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-            e.write_all(data).unwrap();
-            e.finish().unwrap()
+            compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(data).unwrap()
         };
         let mut inputs: Vec<Vec<u8>> = vec![
             Vec::new(),

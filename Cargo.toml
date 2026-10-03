@@ -25,10 +25,11 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # writers, deep readers) and never references `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
 
-# zlib reader/writer for ZIP_COMPRESSION (compression == 3, 16
-# scanlines per block). Pure-Rust `miniz_oxide` backend matches the
-# `oxideav-pdf` flate2 setup so workspace builds don't pull native zlib.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# zlib for ZIP / ZIPS / PXR24 chunks and deep ZIPS blocks. `compcol`
+# (Karpelès Lab's compression collection, the workspace-wide choice) with
+# only its zlib codec enabled — a black-box dependency used through its
+# public streaming `Encoder` / `Decoder` contract.
+compcol = { version = "0.6", default-features = false, features = ["zlib"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

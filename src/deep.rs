@@ -216,15 +216,8 @@ pub(crate) fn decompress_buffer(
         return Ok(payload.to_vec());
     }
     let inflated = match compression {
-        Compression::Zips => {
-            use flate2::read::ZlibDecoder;
-            use std::io::Read;
-            let mut out = Vec::with_capacity(unpacked_size);
-            let mut dec = ZlibDecoder::new(payload);
-            dec.read_to_end(&mut out)
-                .map_err(|e| ExrError::invalid(format!("deep zlib inflate failed: {e}")))?;
-            out
-        }
+        Compression::Zips => crate::decoder::zlib_inflate(payload, unpacked_size)
+            .map_err(|e| ExrError::invalid(format!("deep {e}")))?,
         Compression::Rle => rle_decompress(payload, unpacked_size)?,
         _ => unreachable!("filtered above"),
     };
