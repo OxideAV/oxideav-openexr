@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Cargo.toml` excludes `/tests` and `/fuzz` from the published package
 - zlib (ZIP / ZIPS / PXR24 chunks, deep ZIPS blocks) now goes through `compcol` (the workspace compression crate, zlib feature only) instead of `flate2`; the per-thread reused encoder / bounded decoder are kept. compcol's deflate emits different but valid bytes (a 64×48 RGBA float sample: ZIP 47 962 → 47 997 bytes, PXR24 27 678 → 27 676, ZIPS identical) — no test pinned the compressed bytes, every pin is on decoded pixels and still holds, and files written before this change decode identically. Deep ZIPS blocks are now inflated through the same size-bounded path as flat chunks
 
+- fuzz: new `contract_api` target drives `probe` / `info` / `decode` / `decode_with` (limits, strict, part / layer) / `decode_rgb8` / `decode_rgba8` / `decode_all` raw and over writer-built scanline / luma-chroma / tiled multi-level / multi-part bases across every compression scheme (first session: 729k runs, 1 117-file corpus folded, no findings); the `ci-standalone` job now also runs clippy with `--no-default-features`
+- README reordered to the contract (Standalone use, Framework use, Supported layouts, Options, Metadata and colour, Limits, format specifics)
+
 ### Deprecated
 
 - `encode_exr_scanline_rgba_float`, `encode_exr_scanline_rgba_float_with`, `encode_exr_scanline_rgba_float_with_line_order`, `encode_exr_tiled_rgba_float_with`, `encode_exr_tiled_rgba_float_with_line_order`, `encode_exr_tiled_rgba_float_mipmap_box_filter`, `encode_exr_tiled_rgba_float_ripmap_box_filter`, `encode_exr_multipart_rgba_float_with` → `encode` / `encode_all` with `EncodeOptions` (one release as wrappers)

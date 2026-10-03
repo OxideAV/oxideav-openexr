@@ -30,8 +30,8 @@
 //!
 //! An OpenEXR part is an arbitrarily named channel set. The contract
 //! image is the part's *colour view* — `R G B (A)`, `Y (A)` or the
-//! luminance/chroma triple `Y RY BY (A)` reconstructed to RGB (see
-//! [`view`](crate::ExrImage) docs on [`ExrImage`]); HALF channels widen
+//! luminance/chroma triple `Y RY BY (A)` reconstructed to RGB (the
+//! mapping order is documented on [`ExrImage`]); HALF channels widen
 //! to `f32` exactly, FLOAT channels copy bit-for-bit, UINT channels
 //! convert (exact below 2^24), and nothing is clamped or tone-mapped on
 //! decode. A channel set without such a view, and deep data, are

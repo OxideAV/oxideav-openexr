@@ -83,3 +83,16 @@ name = "decode_chunk"
 path = "fuzz_targets/decode_chunk.rs"
 test = false
 doc = false
+
+# `contract_api` drives the image-crate API contract root — `probe`,
+# `info`, `decode` / `decode_with` (limits, strict, part / layer
+# selection), `decode_rgb8` / `decode_rgba8`, `decode_all` — in raw and
+# overlay modes (writer-built scanline / luma-chroma / tiled multi-level /
+# multi-part bases across every compression scheme), so the header-only
+# planning, pre-allocation limit checks and the view mapping are reached
+# directly.
+[[bin]]
+name = "contract_api"
+path = "fuzz_targets/contract_api.rs"
+test = false
+doc = false
