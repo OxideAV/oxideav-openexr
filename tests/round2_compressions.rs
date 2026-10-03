@@ -3,6 +3,10 @@
 //! synthetic data, re-parses it, and checks every sample matches
 //! bit-exactly (FLOAT) or within an LSB (HALF).
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use oxideav_openexr::{
     encode_exr_scanline, encode_exr_scanline_rgba_float_with, header::encode_header,
     header::VersionField, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
@@ -23,7 +27,7 @@ fn make_sample_image(w: u32, h: u32) -> Vec<f32> {
     s
 }
 
-fn assert_planes_match_rgba(img: &oxideav_openexr::ExrImage, source_rgba: &[f32]) {
+fn assert_planes_match_rgba(img: &oxideav_openexr::ExrPart, source_rgba: &[f32]) {
     let w = img.width() as usize;
     let h = img.height() as usize;
     let a = &img.planes[0].samples;

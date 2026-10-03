@@ -5,6 +5,10 @@
 //! The test is auto-skipped (with a printed reason) when `exrmaketiled`
 //! is missing — fine on stripped CI.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{encode_exr_scanline_rgba_float_with, parse_exr, Compression};

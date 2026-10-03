@@ -63,7 +63,7 @@ fn gray_channel() -> Vec<Channel> {
 
 /// Assert every part shares one displayWindow equal to the bounding box
 /// of the largest part, and that data windows stay per-part.
-fn assert_shared_display(images: &[oxideav_openexr::ExrImage], expect: Box2i) {
+fn assert_shared_display(images: &[oxideav_openexr::ExrPart], expect: Box2i) {
     let mut saw_smaller_data_window = false;
     for img in images {
         assert_eq!(

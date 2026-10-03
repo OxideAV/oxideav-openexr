@@ -12,6 +12,10 @@
 //!
 //! The external-tool tests auto-skip when `exrmetrics` is missing.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{
@@ -74,7 +78,7 @@ fn reference_convert(input_bytes: &[u8], z: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn assert_images_bit_exact(a: &oxideav_openexr::ExrImage, b: &oxideav_openexr::ExrImage) {
+fn assert_images_bit_exact(a: &oxideav_openexr::ExrPart, b: &oxideav_openexr::ExrPart) {
     assert_eq!(a.channels.len(), b.channels.len());
     for (ca, cb) in a.channels.iter().zip(b.channels.iter()) {
         assert_eq!(ca.name, cb.name);

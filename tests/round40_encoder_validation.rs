@@ -8,6 +8,10 @@
 //! Auto-skips with a printed reason when the required binary is
 //! missing (CI without the OpenEXR tools installed).
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{
@@ -52,7 +56,7 @@ fn make_gradient(w: u32, h: u32) -> Vec<f32> {
         .collect()
 }
 
-fn check_pixels_match_rgba(img: &oxideav_openexr::ExrImage, source: &[f32]) {
+fn check_pixels_match_rgba(img: &oxideav_openexr::ExrPart, source: &[f32]) {
     let w = img.width() as usize;
     let h = img.height() as usize;
     let a = &img.planes[0].samples;

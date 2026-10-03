@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, RuntimeContext, VideoFrame};
-use oxideav_openexr::{luminance_weights_of, parse_exr, ExrImage};
+use oxideav_openexr::{luminance_weights_of, parse_exr, ExrPart};
 
 fn tool_available(name: &str) -> bool {
     Command::new(name)
@@ -58,7 +58,7 @@ fn encode(ctx: &RuntimeContext, vf: VideoFrame, w: u32, h: u32, opts: &[(&str, &
     enc.receive_packet().unwrap().data
 }
 
-fn plane<'a>(img: &'a ExrImage, name: &str) -> &'a [f32] {
+fn plane<'a>(img: &'a ExrPart, name: &str) -> &'a [f32] {
     let idx = img.channels.iter().position(|c| c.name == name).unwrap();
     &img.planes[idx].samples
 }

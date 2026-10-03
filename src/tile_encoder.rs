@@ -156,6 +156,9 @@ fn rgba_float_tiled_attributes(
 ///
 /// Companion to [`crate::encode_exr_scanline_rgba_float_with`].
 /// Round-trips bit-exactly through [`crate::parse_exr`].
+#[deprecated(
+    note = "use oxideav_openexr::encode / encode_all with EncodeOptions (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_tiled_rgba_float_with(
     width: u32,
     height: u32,
@@ -257,6 +260,9 @@ pub fn encode_exr_tiled_rgba_float_with(
 /// `lineOrder`. See [`encode_exr_tiled_with_line_order`] for the
 /// storage-order semantics (all three orders are valid for tiled
 /// files, including RANDOM_Y).
+#[deprecated(
+    note = "use oxideav_openexr::encode / encode_all with EncodeOptions (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_tiled_rgba_float_with_line_order(
     width: u32,
     height: u32,
@@ -363,6 +369,33 @@ pub fn encode_exr_tiled_with_line_order(
     tile_y: u32,
     line_order: LineOrder,
 ) -> Result<Vec<u8>> {
+    encode_exr_tiled_with_attributes(
+        width,
+        height,
+        channels,
+        planes,
+        compression,
+        tile_x,
+        tile_y,
+        line_order,
+        &[],
+    )
+}
+
+/// [`encode_exr_tiled_with_line_order`] with extra non-structural header
+/// attributes spliced in ([`crate::encoder::merge_extra_attributes`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_exr_tiled_with_attributes(
+    width: u32,
+    height: u32,
+    channels: &[Channel],
+    planes: &[&[f32]],
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
+    extra: &[Attribute],
+) -> Result<Vec<u8>> {
     if channels.len() != planes.len() {
         return Err(ExrError::invalid(format!(
             "channels.len()={} != planes.len()={}",
@@ -435,6 +468,7 @@ pub fn encode_exr_tiled_with_line_order(
     if let Some(lo) = attrs.iter_mut().find(|a| a.name == "lineOrder") {
         lo.value = AttributeValue::LineOrder(line_order);
     }
+    crate::encoder::merge_extra_attributes(&mut attrs, extra);
     let attrs = attrs;
 
     // Set the version-field single_tile bit (0x200) and format version 2.
@@ -689,6 +723,7 @@ pub(crate) fn compress_tile_payload_reorg(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::parse_exr;
@@ -706,7 +741,7 @@ mod tests {
         s
     }
 
-    fn assert_planes_match_rgba(img: &crate::ExrImage, source_rgba: &[f32]) {
+    fn assert_planes_match_rgba(img: &crate::ExrPart, source_rgba: &[f32]) {
         let w = img.width() as usize;
         let h = img.height() as usize;
         let a = &img.planes[0].samples;

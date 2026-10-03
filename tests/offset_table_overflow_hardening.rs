@@ -16,6 +16,10 @@
 //! `Err` without unwinding. Each test would panic (test failure) against
 //! the pre-hardening decoder.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use oxideav_openexr::{
     encode_exr_scanline_rgba_float_with, encode_exr_tiled_rgba_float_mipmap_box_filter,
     encode_exr_tiled_rgba_float_with, parse_exr, parse_exr_tiled_multilevel, parse_header,

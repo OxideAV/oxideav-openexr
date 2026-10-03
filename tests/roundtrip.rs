@@ -6,6 +6,10 @@
 //! loss — the only conversion is `f32 -> 4 LE bytes -> f32` and
 //! optionally a zlib round-trip.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use oxideav_openexr::{
     encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with, parse_exr, Compression,
     PixelType,
@@ -99,7 +103,7 @@ fn rejects_truncated_offset_table() {
     assert!(parse_exr(truncated).is_err());
 }
 
-fn assert_planes_match(img: &oxideav_openexr::ExrImage, source_rgba: &[f32]) {
+fn assert_planes_match(img: &oxideav_openexr::ExrPart, source_rgba: &[f32]) {
     let w = img.width() as usize;
     let h = img.height() as usize;
     // Channels are alphabetical: A=0, B=1, G=2, R=3.

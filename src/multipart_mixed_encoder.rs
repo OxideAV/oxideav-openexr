@@ -66,10 +66,10 @@ use crate::deep::{
 };
 use crate::error::{ExrError, Result};
 use crate::header::{encode_attribute_value, parse_multipart_headers, VersionField};
-use crate::image::{ExrImage, ExrPlane};
 use crate::mipmap_encoder::{
     mipmap_level_count_round_down, ripmap_level_counts_round_down, MipmapLevel,
 };
+use crate::part::{ExrPart, ExrPlane};
 use crate::tiled::tiledesc_from_attribute;
 use crate::types::{
     Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
@@ -262,12 +262,12 @@ impl MultipartMixedPart<'_> {
 
 /// One image surfaced by [`parse_exr_multipart_mixed`]. Variants mirror
 /// the per-part `type` attribute; flat variants wrap a fully-decoded
-/// [`ExrImage`], deep variants wrap the same part payloads the
+/// [`ExrPart`], deep variants wrap the same part payloads the
 /// homogeneous deep multi-part readers return.
 #[derive(Debug, Clone)]
 pub enum MultipartMixedImage {
-    Scanline(ExrImage),
-    Tiled(ExrImage),
+    Scanline(ExrPart),
+    Tiled(ExrPart),
     /// Multi-level MIPMAP flat tiled part; carries every decoded
     /// pyramid level (`level_mode == 1`).
     TiledMipmap(MultilevelTiledPart),
@@ -286,7 +286,7 @@ pub enum MultipartMixedImage {
 
 impl MultipartMixedImage {
     /// Borrow the underlying decoded flat image (`None` for deep parts).
-    pub fn image(&self) -> Option<&ExrImage> {
+    pub fn image(&self) -> Option<&ExrPart> {
         match self {
             Self::Scanline(img) | Self::Tiled(img) => Some(img),
             _ => None,
@@ -294,7 +294,7 @@ impl MultipartMixedImage {
     }
     /// Consume and return the underlying decoded flat image (`None` for
     /// deep parts).
-    pub fn into_image(self) -> Option<ExrImage> {
+    pub fn into_image(self) -> Option<ExrPart> {
         match self {
             Self::Scanline(img) | Self::Tiled(img) => Some(img),
             _ => None,
@@ -3645,14 +3645,14 @@ fn assemble_deep_tiled_level(
     channel_samples
 }
 
-/// Wrap decoded flat planes into an [`ExrImage`].
+/// Wrap decoded flat planes into an [`ExrPart`].
 fn make_exr_image(
     req: RequiredAttrs,
     sorted_channels: Vec<Channel>,
     planes: Vec<ExrPlane>,
     attributes: Vec<Attribute>,
-) -> ExrImage {
-    ExrImage {
+) -> ExrPart {
+    ExrPart {
         data_window: req.data_window,
         display_window: req.display_window,
         line_order: req.line_order,

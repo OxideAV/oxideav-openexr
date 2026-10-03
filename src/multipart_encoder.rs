@@ -52,6 +52,17 @@ pub struct MultipartScanlinePart<'a> {
 /// Round-trips bit-exactly through
 /// [`crate::parse_exr_multipart`].
 pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> {
+    encode_exr_multipart_with_attributes(parts, &[])
+}
+
+/// [`encode_exr_multipart`] with per-part extra non-structural header
+/// attributes (`extras[i]` for part `i`; a shorter slice leaves the
+/// remaining parts at the writer's defaults). See
+/// [`crate::encoder::merge_extra_attributes`].
+pub(crate) fn encode_exr_multipart_with_attributes(
+    parts: &[MultipartScanlinePart],
+    extras: &[Vec<Attribute>],
+) -> Result<Vec<u8>> {
     if parts.is_empty() {
         return Err(ExrError::invalid(
             "encode_exr_multipart: at least one part required".to_string(),
@@ -144,12 +155,15 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
     let mut header_byte_blocks: Vec<Vec<u8>> = Vec::with_capacity(parts.len());
     let mut chunk_counts: Vec<u32> = Vec::with_capacity(parts.len());
 
-    for p in parts {
+    for (i, p) in parts.iter().enumerate() {
         let block_h = p.compression.scanlines_per_block();
         let cc = p.height.div_ceil(block_h);
         chunk_counts.push(cc);
 
-        let attrs = build_scanline_part_attrs(p, cc, display_window);
+        let mut attrs = build_scanline_part_attrs(p, cc, display_window);
+        if let Some(extra) = extras.get(i) {
+            crate::encoder::merge_extra_attributes(&mut attrs, extra);
+        }
         header_byte_blocks.push(encode_part_header_attributes(&attrs));
     }
 
@@ -321,6 +335,9 @@ pub fn encode_exr_multipart(parts: &[MultipartScanlinePart]) -> Result<Vec<u8>> 
 /// Convenience entry point: encode a single-part RGBA float multipart
 /// file. (Useful as a smoke test that our multipart writer interoperates
 /// with the multipart reader at trivial part counts.)
+#[deprecated(
+    note = "use oxideav_openexr::encode / encode_all with EncodeOptions (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_multipart_rgba_float_with(
     parts: &[(String, u32, u32, &[f32], Compression)],
 ) -> Result<Vec<u8>> {
@@ -528,6 +545,7 @@ fn compress_block(raw: Vec<u8>, compression: Compression) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::parse_exr_multipart;

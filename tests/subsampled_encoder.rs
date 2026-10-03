@@ -15,7 +15,7 @@ use std::process::Command;
 
 use oxideav_openexr::{
     encode_exr_scanline, header::VersionField, parse_exr, Attribute, AttributeValue, Box2i,
-    Channel, Compression, ExrImage, LineOrder, PixelType,
+    Channel, Compression, ExrPart, LineOrder, PixelType,
 };
 
 fn exrmetrics_available() -> bool {
@@ -153,7 +153,7 @@ fn encode_yuv420(
 }
 
 fn assert_yuv420_matches(
-    img: &ExrImage,
+    img: &ExrPart,
     w: u32,
     h: u32,
     y_src: &[f32],

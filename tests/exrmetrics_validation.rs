@@ -9,6 +9,10 @@
 //! the self-roundtrip stays green but the bytes are not actually
 //! spec-compliant. Auto-skips when `exrmetrics` is missing.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{encode_exr_scanline_rgba_float_with, parse_exr, Compression};

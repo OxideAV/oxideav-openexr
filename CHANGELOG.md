@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Image-crate API contract (`IMAGE_CRATE_API`).** The crate root now speaks the contract vocabulary: `probe`, `info -> ImageInfo`, `decode` / `decode_with(&DecodeOptions) -> ExrImage`, `decode_rgb8` / `decode_rgba8`, `decode_all` / `decode_all_with -> Vec<Frame>` (one per part), `decode_from`, `encode(&ExrImage, &EncodeOptions)`, `encode_rgb8` / `encode_rgba8`, `encode_to`, `encode_all(&[Frame], ..)`; types `ExrImage { width, height, format, planes, color, metadata, data_window, display_window, attributes }`, `Plane`, `ColorInfo` / `ColorRange`, `Metadata`, `RgbImage` / `RgbaImage`, `ImageInfo`, `Frame`, `ExrPixelFormat` (= `PixelFormat`: `GrayF32Le` / `RgbF32Le` / `RgbaF32Le`), `DecodeOptions` (limits enforced before allocation, `strict`, `part` / `part_name` / `layer`), `EncodeOptions` (pixel type, compression, colour layout, chroma sampling, layer, tile size, levels, line order, window overrides, `input_gamma`), `ExrError` (= `Error`; new `LimitExceeded` and `Io(std::io::Error)` variants, `#[non_exhaustive]`, no longer `Clone` / `PartialEq`)
+- **`ExrImage` changed meaning.** The pre-contract `ExrImage` (every channel as a named `f32` plane) is now `ExrPart`; `parse_exr` and the multi-part readers return it unchanged otherwise. The contract `ExrImage` is the part's colour view — `R G B (A)`, `Y (A)` or `Y RY BY (A)` reconstructed to RGB — as one packed little-endian `f32` plane (HALF widened exactly, FLOAT bit-for-bit, UINT converted; no clamp, no tone mapping); `to_rgb8` / `to_rgba8` clamp to `[0, 1]` × 255
+- The registry `Decoder` / `Encoder` are thin adapters over `decode_with` / `encode` (one implementation); the decoder frame now carries the colour-signal side-channel (OpenEXR defines its colour semantics: linear light, `chromaticities` or the BT.709 default), and the encoder additionally accepts `Rgb24` / `Rgba` frames by the raw-path rule (`b / 255`, `input_gamma` option); `make_decoder` / `make_encoder` are public, `register_registries` added; the frame bridge is `From<ExrImage> for VideoFrame`, `ExrImage::from_video_frame`, `TryFrom<(&VideoFrame, &CodecParameters)>`
+- `ColorInfo` derives H.273 primaries code points from the `chromaticities` attribute (BT.709 1, BT.470 M 4, BT.470 B/G 5, BT.601-525 6, film 8, BT.2020 9, XYZ 10, P3 DCI 11, P3 D65 12, EBU 3213 22; else 2 with the raw chromaticities on `ExrImage::chromaticities()`), linear transfer 8, matrix 0, full range; a part without the attribute reports BT.709 (the format's documented default)
+- The scanline writer honours the `dataWindow` origin in chunk coordinates (`y_min + i × blockHeight`; unchanged for windows at the origin); the tiled ONE_LEVEL / MIPMAP / RIPMAP and multi-part writers can carry extra non-structural header attributes
+- `Cargo.toml` excludes `/tests` and `/fuzz` from the published package
+
+### Deprecated
+
+- `encode_exr_scanline_rgba_float`, `encode_exr_scanline_rgba_float_with`, `encode_exr_scanline_rgba_float_with_line_order`, `encode_exr_tiled_rgba_float_with`, `encode_exr_tiled_rgba_float_with_line_order`, `encode_exr_tiled_rgba_float_mipmap_box_filter`, `encode_exr_tiled_rgba_float_ripmap_box_filter`, `encode_exr_multipart_rgba_float_with` → `encode` / `encode_all` with `EncodeOptions` (one release as wrappers)
+- `registry::ExrDecoderOptions` → `DecodeOptions`, `registry::ExrEncoderOptions` → `EncodeOptions` (type aliases); `ColourLayout` / `LevelMode` now live at the crate root
+
 ### Added
 
 - luminance/chroma colour reconstruction: new `luma_chroma` module (chromaticities-derived luminance weights, `Y RY BY` ↔ RGB, bilinear chroma reconstruction + tent reduction); the registry decoder now maps `Y` + `RY` + `BY` (+ `A`) parts to `RgbF32Le` / `RgbaF32Le`, validated against a reference EXR tool as an opaque process

@@ -31,13 +31,13 @@
 //!
 //! Tiled multi-level files (MIPMAP_LEVELS / RIPMAP_LEVELS) are now
 //! supported in read mode: the full-resolution level (lvlx=0, lvly=0)
-//! is decoded into `ExrImage`; higher-resolution levels are skipped.
+//! is decoded into `ExrPart`; higher-resolution levels are skipped.
 //! Level-dimension formulas (ROUND_DOWN / ROUND_UP) follow the
 //! OpenEXR spec §2.2.
 
 use crate::error::{ExrError, Result};
 use crate::header::{parse_header, parse_multipart_headers};
-use crate::image::{ExrImage, ExrPlane};
+use crate::part::{ExrPart, ExrPlane};
 use crate::rle::rle_decompress;
 use crate::tiled::tiledesc_from_attribute;
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
@@ -628,7 +628,7 @@ pub(crate) fn scatter_b44_block_into_planes(
 ///
 /// For multi-part files use [`parse_exr_multipart`] instead; this
 /// function returns an error if the multi-part bit is set.
-pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
+pub fn parse_exr(bytes: &[u8]) -> Result<ExrPart> {
     let header = parse_header(bytes)?;
     // parse_header already rejects multipart; also reject here explicitly
     // so callers get a clear message pointing at parse_exr_multipart.
@@ -845,7 +845,7 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrImage> {
         )?;
     }
 
-    Ok(ExrImage {
+    Ok(ExrPart {
         data_window: req.data_window,
         display_window: req.display_window,
         line_order: req.line_order,
@@ -1137,14 +1137,14 @@ fn scatter_b44_tile_into_planes(
 ///
 /// Supports ONE_LEVEL, MIPMAP_LEVELS, and RIPMAP_LEVELS. For multi-level
 /// files, only the full-resolution level (lvlx=0, lvly=0) is decoded into
-/// the returned `ExrImage`; higher-resolution reduction levels are skipped
+/// the returned `ExrPart`; higher-resolution reduction levels are skipped
 /// after being read (so the offset table is consumed correctly).
 fn parse_tiled(
     bytes: &[u8],
     header: &crate::header::ParsedHeader,
     req: &RequiredAttrs,
     sorted_channels: &[Channel],
-) -> Result<ExrImage> {
+) -> Result<ExrPart> {
     let tdesc_attr = header
         .attributes
         .iter()
@@ -1286,7 +1286,7 @@ fn parse_tiled(
         )?;
     }
 
-    Ok(ExrImage {
+    Ok(ExrPart {
         data_window: req.data_window,
         display_window: req.display_window,
         line_order: req.line_order,
@@ -1364,7 +1364,7 @@ fn compute_total_tiles(
 /// files the two axes are independent (see [`MultilevelTiledImage`] for
 /// the per-axis level count).
 ///
-/// Sample layout matches [`ExrImage::planes`]: row-major, alphabetical
+/// Sample layout matches [`ExrPart::planes`]: row-major, alphabetical
 /// channel order, length `width * height` per channel.
 #[derive(Debug, Clone)]
 pub struct TiledLevel {
@@ -1682,7 +1682,7 @@ fn alloc_planes(channels: &[Channel], width: u32, height: u32) -> Vec<ExrPlane> 
         .collect()
 }
 
-/// Parse a multi-part EXR file and return one `ExrImage` per part.
+/// Parse a multi-part EXR file and return one `ExrPart` per part.
 ///
 /// Multi-part files are identified by version-field bit 12 being set.
 /// The binary layout is:
@@ -1703,7 +1703,7 @@ fn alloc_planes(channels: &[Channel], width: u32, height: u32) -> Vec<ExrPlane> 
 /// zero-padded tables correctly.
 ///
 /// Only `scanlineimage` part type is supported in this round.
-pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
+pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrPart>> {
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -1962,11 +1962,11 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
     }
 
     // Assemble output images, consuming the planes_list in order.
-    let mut images: Vec<ExrImage> = Vec::with_capacity(parts.len());
+    let mut images: Vec<ExrPart> = Vec::with_capacity(parts.len());
     let mut planes_iter = planes_list.into_iter();
     for (part_idx, part) in parts.iter().enumerate() {
         let req = &part_reqs[part_idx];
-        images.push(ExrImage {
+        images.push(ExrPart {
             data_window: req.data_window,
             display_window: req.display_window,
             line_order: req.line_order,
@@ -2013,7 +2013,7 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrImage>> {
 /// decode correctly.
 ///
 /// Companion to [`crate::encode_exr_multipart_tiled`].
-pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
+pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrPart>> {
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -2256,8 +2256,8 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
         scan_pos = pl_end;
     }
 
-    // Assemble per-part ExrImage outputs.
-    let mut images: Vec<ExrImage> = Vec::with_capacity(parts.len());
+    // Assemble per-part ExrPart outputs.
+    let mut images: Vec<ExrPart> = Vec::with_capacity(parts.len());
     for (part_idx, part) in parts.iter().enumerate() {
         let PartState {
             req,
@@ -2266,7 +2266,7 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrImage>> {
             ..
         } = state.remove(0);
         let _ = part_idx;
-        images.push(ExrImage {
+        images.push(ExrPart {
             data_window: req.data_window,
             display_window: req.display_window,
             line_order: req.line_order,

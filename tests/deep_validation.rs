@@ -20,6 +20,10 @@
 //! Both `exrheader` and `exrmetrics` auto-skip when the binary is
 //! missing.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{

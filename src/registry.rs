@@ -1,134 +1,64 @@
 //! `oxideav-core` integration layer for `oxideav-openexr`.
 //!
 //! Gated behind the default-on `registry` feature so image-library
-//! consumers can depend on `oxideav-openexr` with `default-features = false`
-//! and skip the `oxideav-core` dependency entirely.
+//! consumers can depend on `oxideav-openexr` with `default-features =
+//! false` and skip the `oxideav-core` dependency entirely.
+//!
+//! The module is a thin adapter over the standalone layer: the framework
+//! [`Decoder`] calls [`crate::decode_with`] and the [`Encoder`] calls
+//! [`crate::encode`] (one implementation). It exposes:
+//!
+//! * [`register`] — the unified `RuntimeContext` entry point
+//!   `oxideav_meta::register_all` calls (via the `register!` macro);
+//!   [`register_codecs`] / [`register_containers`] /
+//!   [`register_registries`] for the individual registries;
+//!   [`make_decoder`] / [`make_encoder`] — the factories.
+//! * The frame bridge: `From<ExrImage> for VideoFrame` (one packed float
+//!   plane plus the colour-signal side-channel — OpenEXR defines its
+//!   colour semantics, linear light with the `chromaticities` attribute
+//!   or BT.709 by default, so the signal is always stamped) and
+//!   [`ExrImage::from_video_frame`] / `TryFrom<(&VideoFrame,
+//!   &CodecParameters)>`, with the [`ExrPixelFormat`] ↔ `PixelFormat`
+//!   and [`ColorInfo`] ↔ `ColorSignal` mappings.
+//! * `From<ExrError> for oxideav_core::Error` and the
+//!   `CodecOptionsStruct` schemas for [`DecodeOptions`] (`part`, `layer`,
+//!   `part_name`) and [`EncodeOptions`] (`pixel_type`, `compression`,
+//!   `colour`, `chroma_sampling`, `layer`, `tile_size`, `levels`,
+//!   `line_order`, `input_gamma`).
 //!
 //! # Pixel formats
 //!
-//! The framework shims speak the scene-referred 32-bit float family
-//! (`oxideav-core` 0.1.35+): [`PixelFormat::RgbaF32Le`],
-//! [`PixelFormat::RgbF32Le`] and [`PixelFormat::GrayF32Le`]. Samples are
-//! IEEE 754 binary32 little-endian words carrying linear light exactly
-//! as stored in the file — HALF channels are widened (exact), FLOAT
-//! channels are copied bit-for-bit, UINT channels are converted to
-//! `f32` (exact up to 2^24). There is **no tone-mapping and no clamp**:
-//! values above 1.0 and below 0.0 survive the round trip.
-//!
-//! # Decoder channel mapping
-//!
-//! An OpenEXR channel list is an arbitrarily-named set (the staged
-//! format description only fixes `R` / `G` / `B` / `A` as the
-//! conventional colour names). The decoder maps the part's channels to
-//! a frame with these rules, applied in order:
-//!
-//! 1. `R`, `G`, `B` and `A` all present → `RgbaF32Le` (packed R, G, B,
-//!    A per pixel).
-//! 2. `R`, `G`, `B` present, no `A` → `RgbF32Le`. A missing alpha is
-//!    *not* synthesised; the frame format says so instead.
-//! 3. `Y`, `RY` and `BY` present (no `R`/`G`/`B`) → luminance/chroma:
-//!    RGB is reconstructed with the image's luminance weights (its
-//!    `chromaticities` attribute, else BT.709) and the chroma planes are
-//!    interpolated up from their declared sampling — see
-//!    [`crate::luma_chroma`]. The frame is `RgbF32Le`, or `RgbaF32Le`
-//!    when an `A` channel accompanies the triple.
-//! 4. `Y` present (no `R`/`G`/`B`, no chroma) → `GrayF32Le` from the
-//!    `Y` channel. If an `A` channel accompanies `Y` the frame is
-//!    `RgbaF32Le` with `Y` replicated into R, G and B, so the alpha is
-//!    not dropped.
-//! 5. Anything else — a partial colour triple, a lone `RY` or `BY`,
-//!    depth-only (`Z`) or AOV-only parts — is `Error::Unsupported`
-//!    naming the channel list. Extra channels alongside a recognised
-//!    set (`Z`, motion vectors, ids …) are ignored; they are still
-//!    reachable through the standalone [`crate::parse_exr`] API.
-//!
-//! Every directly-mapped channel (`R G B A Y`) must be at 1×1
-//! sampling; only the `RY` / `BY` chroma planes may be sub-sampled.
-//!
-//! # Layers
-//!
-//! Channel names of the form `<layer>.<base>` (`diffuse.R`, `right.R`,
-//! `beauty.spec.Y`, …) group into layers — see [`crate::layers`]. The
-//! `layer` decoder option (default `""`, the base layer of unprefixed
-//! names) selects which layer the rules above are applied to; a
-//! multi-view file's default view (the first `multiView` entry) may be
-//! named too, since its channels are the unprefixed ones. An unknown
-//! layer name is `Error::InvalidData` listing the layers the part
-//! actually has, with their colour shape. Only one layer decodes per
-//! packet: a frame carries a single pixel format fixed at the stream
-//! level, so the framework has no construct for emitting every layer
-//! of one image as separate frames — enumerate them with
-//! [`crate::enumerate_layers`] / [`crate::ExrImage::layers`] and decode
-//! each with its own `layer` option instead. The encoder's `layer`
-//! option (default `""`) prefixes every channel it writes with
-//! `<layer>.`.
-//!
-//! # Parts
-//!
-//! Single-part flat files (scanline or tiled) decode directly. In a
-//! multi-part file the `part` decoder option (default `0`) selects the
-//! part to emit — or `part_name` selects it by its `name` attribute
-//! (the way multi-part stereo files label their `left` / `right`
-//! parts), overriding `part` when set; flat scanline / tiled parts decode as above and a
-//! multi-level (MIPMAP / RIPMAP) tiled part contributes its level
-//! `(0, 0)` full-resolution image. Deep parts (single-part deep files,
-//! or a deep part selected in a multi-part file) carry a variable
-//! number of samples per pixel and have no `VideoFrame` mapping — the
-//! decoder returns `Error::Unsupported`; use [`crate::parse_exr_deep_scanline`]
-//! and friends from the standalone API instead.
-//!
-//! # Encoder
-//!
-//! The encoder accepts `RgbaF32Le` / `RgbF32Le` / `GrayF32Le` frames
-//! and writes a single-part scanline file with channels `A B G R` /
-//! `B G R` / `Y` respectively. The `pixel_type` option selects the
-//! channel type — `float` (default, lossless) or `half` (binary16 with
-//! round-to-nearest-even) — and `compression` picks any of the crate's
-//! scanline codecs (`none`, `rle`, `zips`, `zip` (default), `piz`,
-//! `pxr24`, `b44`, `b44a`, `dwaa`, `dwab`).
-//!
-//! `tile_size=N` (default `0` = scanline) writes a tiled file with
-//! `N × N` tiles; `levels` then chooses `one` (default), `mipmap` or
-//! `ripmap`, the reduced levels being generated by 2×2 / separable box
-//! filtering of the frame (ROUND_DOWN). `line_order` selects
-//! `increasing_y` (default), `decreasing_y` or (tiled only) `random_y`
-//! chunk storage. Deep parts and multi-part files stay out of reach:
-//! a frame carries exactly one sample per pixel and one image per
-//! packet.
-//!
-//! `colour=luma_chroma` writes RGB(A) frames as `Y` + `RY` + `BY`
-//! (+ `A`) instead, with the chroma planes reduced by `chroma_sampling`
-//! (default `2`, i.e. 2×2 — the frame's width and height must be
-//! multiples of it; `1` keeps full-resolution chroma and round-trips
-//! exactly). Luminance uses the BT.709 weights and no `chromaticities`
-//! attribute is written (the frame model carries no primaries), so
-//! decoders reconstruct with the same weights. Gray frames write `Y`
-//! under either layout.
+//! The decoder emits the view's native layout — [`PixelFormat::RgbaF32Le`],
+//! [`PixelFormat::RgbF32Le`] or [`PixelFormat::GrayF32Le`] — exactly as
+//! [`crate::decode`] does (channel mapping, layers and parts: see
+//! [`crate::ExrImage`]). There is **no tone-mapping and no clamp**. The
+//! encoder accepts the same three formats natively and `Rgb24` / `Rgba`
+//! through the raw-path rule (`b / 255`, `input_gamma` to linearise).
+//! Deep parts and multi-part output have no frame mapping (one sample
+//! per pixel, one image per packet); use [`crate::decode_all`] /
+//! [`crate::encode_all`] and the depth API.
 
 use oxideav_core::{
     parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    CodecRegistry, ContainerRegistry, Decoder, Encoder, Frame, OptionField, OptionKind,
-    OptionValue, Packet, PixelFormat, RuntimeContext, TimeBase, VideoFrame, VideoPlane,
+    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Decoder, Encoder, Frame,
+    MatrixCoefficients, OptionField, OptionKind, OptionValue, Packet, PixelFormat, RuntimeContext,
+    TimeBase, TransferCharacteristics, VideoFrame, VideoPlane,
 };
 
-use crate::decoder::parse_exr;
-use crate::encoder::encode_exr_scanline;
 use crate::error::ExrError;
-use crate::header::{parse_header, parse_multipart_headers, VersionField};
-use crate::image::ExrPlane;
-use crate::layers::{enumerate_layers, find_layer};
-use crate::luma_chroma::{
-    luma_chroma_to_rgb, luminance_weights, luminance_weights_of, rgb_to_luma_chroma, ChromaPlane,
-    RgbPlanes, BT709_CHROMATICITIES,
-};
-use crate::mipmap_encoder::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap_with_line_order,
-    encode_exr_tiled_ripmap_with_line_order,
-};
-use crate::multipart_mixed_encoder::{parse_exr_multipart_mixed, MultipartMixedImage};
-use crate::tile_encoder::encode_exr_tiled_with_line_order;
-use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
+use crate::image::{ColorInfo, ColorRange, ExrImage, ExrPixelFormat};
+pub use crate::options::{ColourLayout, LevelMode};
+use crate::options::{DecodeOptions, EncodeOptions};
+use crate::types::{Compression, LineOrder, PixelType};
 use crate::CODEC_ID_STR;
+
+/// The pre-contract name of [`DecodeOptions`].
+#[deprecated(note = "use oxideav_openexr::DecodeOptions (IMAGE_CRATE_API)")]
+pub type ExrDecoderOptions = DecodeOptions;
+
+/// The pre-contract name of [`EncodeOptions`].
+#[deprecated(note = "use oxideav_openexr::EncodeOptions (IMAGE_CRATE_API)")]
+pub type ExrEncoderOptions = EncodeOptions;
 
 /// Convert an [`ExrError`] into the framework-shared
 /// `oxideav_core::Error` so trait impls can use `?` on errors returned
@@ -138,11 +68,13 @@ impl From<ExrError> for oxideav_core::Error {
         match e {
             ExrError::InvalidData(s) => oxideav_core::Error::InvalidData(s),
             ExrError::Unsupported(s) => oxideav_core::Error::Unsupported(s),
+            ExrError::LimitExceeded(s) => oxideav_core::Error::ResourceExhausted(s),
+            ExrError::Io(e) => oxideav_core::Error::Io(e),
         }
     }
 }
 
-/// Pixel formats the decoder emits and the encoder accepts, in
+/// Pixel formats the decoder emits and the encoder accepts natively, in
 /// preference order.
 const FRAME_FORMATS: [PixelFormat; 3] = [
     PixelFormat::RgbaF32Le,
@@ -150,70 +82,258 @@ const FRAME_FORMATS: [PixelFormat; 3] = [
     PixelFormat::GrayF32Le,
 ];
 
+/// 8-bit formats the encoder additionally accepts (raw-path rule).
+const RAW_FORMATS: [PixelFormat; 2] = [PixelFormat::Rgb24, PixelFormat::Rgba];
+
+// ---- pixel formats --------------------------------------------------------
+
+/// The 1:1 name mapping from [`ExrPixelFormat`] to the framework enum.
+pub fn to_core_pixel_format(pf: ExrPixelFormat) -> PixelFormat {
+    match pf {
+        ExrPixelFormat::GrayF32Le => PixelFormat::GrayF32Le,
+        ExrPixelFormat::RgbF32Le => PixelFormat::RgbF32Le,
+        ExrPixelFormat::RgbaF32Le => PixelFormat::RgbaF32Le,
+    }
+}
+
+/// The inverse of [`to_core_pixel_format`]; [`ExrError::Unsupported`]
+/// for a layout OpenEXR views do not use.
+pub fn from_core_pixel_format(pf: PixelFormat) -> Result<ExrPixelFormat, ExrError> {
+    match pf {
+        PixelFormat::GrayF32Le => Ok(ExrPixelFormat::GrayF32Le),
+        PixelFormat::RgbF32Le => Ok(ExrPixelFormat::RgbF32Le),
+        PixelFormat::RgbaF32Le => Ok(ExrPixelFormat::RgbaF32Le),
+        other => Err(ExrError::unsupported(format!(
+            "OpenEXR: pixel format {other:?} is not an OpenEXR view layout (RgbaF32Le / \
+             RgbF32Le / GrayF32Le)"
+        ))),
+    }
+}
+
+impl From<ExrPixelFormat> for PixelFormat {
+    fn from(pf: ExrPixelFormat) -> Self {
+        to_core_pixel_format(pf)
+    }
+}
+
+impl TryFrom<PixelFormat> for ExrPixelFormat {
+    type Error = ExrError;
+    fn try_from(pf: PixelFormat) -> Result<Self, ExrError> {
+        from_core_pixel_format(pf)
+    }
+}
+
+// ---- colour signalling ----------------------------------------------------
+
+/// [`ColorInfo`] as the framework's [`ColorSignal`] (code points map
+/// 1:1).
+pub fn to_color_signal(c: &ColorInfo) -> ColorSignal {
+    let range = match c.range {
+        ColorRange::Unspecified => oxideav_core::ColorRange::Unspecified,
+        ColorRange::Limited => oxideav_core::ColorRange::Limited,
+        ColorRange::Full => oxideav_core::ColorRange::Full,
+    };
+    ColorSignal::new(
+        range,
+        ColorPrimaries(c.primaries),
+        TransferCharacteristics(c.transfer),
+        MatrixCoefficients(c.matrix),
+    )
+}
+
+/// The inverse of [`to_color_signal`].
+pub fn from_color_signal(s: &ColorSignal) -> ColorInfo {
+    let range = match s.range {
+        oxideav_core::ColorRange::Limited => ColorRange::Limited,
+        oxideav_core::ColorRange::Full => ColorRange::Full,
+        _ => ColorRange::Unspecified,
+    };
+    ColorInfo::new(range, s.primaries.0, s.transfer.0, s.matrix.0)
+}
+
+// ---- frame bridge ---------------------------------------------------------
+
+/// [`ExrImage`] → `VideoFrame`, moving the plane out of the image: one
+/// packed float plane plus the colour-signal side-channel.
+pub(crate) fn image_into_video_frame(mut image: ExrImage, pts: Option<i64>) -> VideoFrame {
+    let stride = image.stride();
+    let data = if image.planes.is_empty() {
+        Vec::new()
+    } else {
+        std::mem::take(&mut image.planes[0].data)
+    };
+    let mut frame = VideoFrame {
+        pts,
+        planes: vec![VideoPlane { stride, data }],
+    };
+    frame.set_color_signal(to_color_signal(&image.color));
+    frame
+}
+
+impl From<ExrImage> for VideoFrame {
+    /// The pixel plane (`pts` `None`) plus the colour-signal
+    /// side-channel.
+    fn from(image: ExrImage) -> Self {
+        image_into_video_frame(image, None)
+    }
+}
+
+impl From<&ExrImage> for VideoFrame {
+    fn from(image: &ExrImage) -> Self {
+        image_into_video_frame(image.clone(), None)
+    }
+}
+
+impl ExrImage {
+    /// Rebuild an image from a framework frame and the stream parameters
+    /// that describe it: `width`, `height` and `pixel_format` are
+    /// required. `RgbaF32Le` / `RgbF32Le` / `GrayF32Le` frames become
+    /// the plane as is (geometry validated by [`ExrImage::packed`]);
+    /// `Rgb24` / `Rgba` frames convert by the raw-path rule (`b / 255`,
+    /// see [`ExrImage::from_rgb8`]); any other layout is
+    /// [`ExrError::Unsupported`]. The frame's colour-signal side-channel,
+    /// refined over `params.color_signal`, becomes `color` when it
+    /// specifies anything, and a primaries code point this crate knows
+    /// the chromaticities of is also written as the `chromaticities`
+    /// attribute so the encoder emits it.
+    pub fn from_video_frame(
+        frame: &VideoFrame,
+        params: &CodecParameters,
+    ) -> Result<Self, ExrError> {
+        Self::from_video_frame_with_gamma(frame, params, None)
+    }
+
+    /// [`Self::from_video_frame`] with the raw-path linearisation
+    /// exponent for `Rgb24` / `Rgba` frames.
+    pub(crate) fn from_video_frame_with_gamma(
+        frame: &VideoFrame,
+        params: &CodecParameters,
+        input_gamma: Option<f32>,
+    ) -> Result<Self, ExrError> {
+        let width = params
+            .width
+            .ok_or_else(|| ExrError::invalid("OpenEXR: width missing in CodecParameters"))?;
+        let height = params
+            .height
+            .ok_or_else(|| ExrError::invalid("OpenEXR: height missing in CodecParameters"))?;
+        let format = params
+            .pixel_format
+            .ok_or_else(|| ExrError::invalid("OpenEXR: pixel_format missing in CodecParameters"))?;
+        let plane = frame
+            .image_planes()
+            .first()
+            .ok_or_else(|| ExrError::invalid("OpenEXR: frame has no planes"))?;
+        let mut img = match format {
+            PixelFormat::RgbaF32Le | PixelFormat::RgbF32Le | PixelFormat::GrayF32Le => {
+                ExrImage::packed(
+                    width,
+                    height,
+                    from_core_pixel_format(format)?,
+                    plane.stride,
+                    plane.data.clone(),
+                )?
+            }
+            PixelFormat::Rgb24 | PixelFormat::Rgba => {
+                let (bpp, target) = if format == PixelFormat::Rgb24 {
+                    (3, ExrPixelFormat::RgbF32Le)
+                } else {
+                    (4, ExrPixelFormat::RgbaF32Le)
+                };
+                let row = width as usize * bpp;
+                if plane.stride < row {
+                    return Err(ExrError::invalid("OpenEXR: frame stride below row size"));
+                }
+                let mut tight = Vec::with_capacity(row * height as usize);
+                for y in 0..height as usize {
+                    let start = y * plane.stride;
+                    let src = plane
+                        .data
+                        .get(start..start + row)
+                        .ok_or_else(|| ExrError::invalid("OpenEXR: frame plane too short"))?;
+                    tight.extend_from_slice(src);
+                }
+                ExrImage::from_8bit(width, height, &tight, target, input_gamma)?
+            }
+            other => {
+                return Err(ExrError::unsupported(format!(
+                    "OpenEXR: pixel format {other:?} not supported (RgbaF32Le / RgbF32Le / \
+                     GrayF32Le / Rgb24 / Rgba)"
+                )))
+            }
+        };
+        let sig = frame
+            .color_signal()
+            .unwrap_or_default()
+            .or(params.color_signal);
+        if !sig.is_unspecified() {
+            let color = from_color_signal(&sig);
+            img = match crate::image::ColorInfo::chromaticities_for(color.primaries) {
+                Some(c) if color.primaries != ColorInfo::PRIMARIES_BT709 => {
+                    img.with_chromaticities(c)
+                }
+                _ => img,
+            };
+            img.color = color;
+        }
+        Ok(img)
+    }
+}
+
+impl TryFrom<(&VideoFrame, &CodecParameters)> for ExrImage {
+    type Error = ExrError;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> Result<Self, ExrError> {
+        ExrImage::from_video_frame(frame, params)
+    }
+}
+
+// ---- registration ---------------------------------------------------------
+
 /// Register the OpenEXR codec into the supplied [`CodecRegistry`].
 pub fn register_codecs(reg: &mut CodecRegistry) {
     let cid = CodecId::new(CODEC_ID_STR);
+    let mut formats = FRAME_FORMATS.to_vec();
+    formats.extend(RAW_FORMATS);
     let caps = CodecCapabilities::video("openexr_sw")
         .with_intra_only(true)
         .with_lossless(true)
         .with_max_size(65535, 65535)
-        .with_pixel_formats(FRAME_FORMATS.to_vec());
+        .with_pixel_formats(formats);
     reg.register(
         CodecInfo::new(cid)
             .capabilities(caps)
             .decoder(make_decoder)
-            .decoder_options::<ExrDecoderOptions>()
+            .decoder_options::<DecodeOptions>()
             .encoder(make_encoder)
-            .encoder_options::<ExrEncoderOptions>(),
+            .encoder_options::<EncodeOptions>(),
     );
 }
 
-/// OpenEXR is its own container (single image per file). Demuxer/muxer
-/// registration is a round-2 followup — for now we only register the
-/// `.exr` extension so cli-convert + the central [`ContainerRegistry`]
-/// resolver can route inputs/outputs to the OpenEXR codec by filename.
-///
-/// The container name matches [`CODEC_ID_STR`] (`"openexr"`) so the
-/// extension lookup lines up with the codec id; this mirrors the
-/// `oxideav-pict` pattern (single-image format where the container is
-/// effectively the codec itself).
+/// OpenEXR is its own container (one image file per packet); only the
+/// `.exr` extension is registered so cli-convert and the central
+/// [`ContainerRegistry`] resolver route inputs / outputs to the codec.
 pub fn register_containers(reg: &mut ContainerRegistry) {
     reg.register_extension("exr", CODEC_ID_STR);
 }
 
+/// Register codecs and containers into two separate registries.
+pub fn register_registries(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
+    register_codecs(codecs);
+    register_containers(containers);
+}
+
 /// Unified entry point: install every codec and container provided by
-/// `oxideav-openexr` into a [`RuntimeContext`].
-///
-/// Also wired into [`oxideav_meta::register_all`] via the
-/// [`oxideav_core::register!`] macro below.
+/// `oxideav-openexr` into a [`RuntimeContext`]. Also wired into
+/// `oxideav_meta::register_all` via the [`oxideav_core::register!`]
+/// macro below.
 pub fn register(ctx: &mut RuntimeContext) {
-    register_codecs(&mut ctx.codecs);
-    register_containers(&mut ctx.containers);
+    register_registries(&mut ctx.codecs, &mut ctx.containers);
 }
 
 oxideav_core::register!("openexr", register);
 
-// ---------------------------------------------------------------------------
-// Options
-// ---------------------------------------------------------------------------
+// ---- options schemas ------------------------------------------------------
 
-/// Decoder tuning knobs (see the module docs, *Layers* and *Parts*).
-#[derive(Debug, Clone, Default)]
-pub struct ExrDecoderOptions {
-    /// Zero-based part index to emit from a multi-part file. Ignored
-    /// (must be 0) for single-part files.
-    pub part: u32,
-    /// Layer to decode: a channel-name prefix (`diffuse`, `right`,
-    /// `beauty.spec`), the default view's name, or `""` for the base
-    /// layer of unprefixed channels.
-    pub layer: String,
-    /// Part to decode by its `name` attribute (multi-part files); when
-    /// non-empty it overrides `part`. Unknown names error listing the
-    /// file's part names.
-    pub part_name: String,
-}
-
-impl CodecOptionsStruct for ExrDecoderOptions {
+impl CodecOptionsStruct for DecodeOptions {
     const SCHEMA: &'static [OptionField] = &[
         OptionField {
             name: "part",
@@ -247,67 +367,6 @@ impl CodecOptionsStruct for ExrDecoderOptions {
     }
 }
 
-/// Colour channel layout the encoder writes (see the module docs,
-/// *Encoder*).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColourLayout {
-    /// `R`, `G`, `B` (+ `A`) channels; gray frames write `Y`.
-    Rgb,
-    /// `Y`, `RY`, `BY` (+ `A`) luminance/chroma channels with the
-    /// chroma sub-sampled by `chroma_sampling`; gray frames write `Y`.
-    LumaChroma,
-}
-
-/// Encoder tuning knobs (see the module docs, *Encoder*).
-#[derive(Debug, Clone)]
-pub struct ExrEncoderOptions {
-    /// Channel pixel type written to the file.
-    pub pixel_type: PixelType,
-    /// Scanline compression scheme.
-    pub compression: Compression,
-    /// Colour channel layout.
-    pub colour: ColourLayout,
-    /// `RY` / `BY` sampling factor (both axes) for
-    /// [`ColourLayout::LumaChroma`]; `1` keeps the chroma at full
-    /// resolution. Ignored for [`ColourLayout::Rgb`].
-    pub chroma_sampling: u32,
-    /// Layer prefix for every written channel (`diffuse` → `diffuse.R`
-    /// …); empty writes unprefixed names.
-    pub layer: String,
-    /// Tile edge in pixels; `0` writes a scanline file.
-    pub tile_size: u32,
-    /// Level mode for tiled files.
-    pub levels: LevelMode,
-    /// Chunk storage order.
-    pub line_order: LineOrder,
-}
-
-/// Level mode of a tiled file written by the encoder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LevelMode {
-    /// ONE_LEVEL.
-    One,
-    /// MIPMAP_LEVELS, box-filtered from the frame.
-    Mipmap,
-    /// RIPMAP_LEVELS, separably box-filtered from the frame.
-    Ripmap,
-}
-
-impl Default for ExrEncoderOptions {
-    fn default() -> Self {
-        Self {
-            pixel_type: PixelType::Float,
-            compression: Compression::Zip,
-            colour: ColourLayout::Rgb,
-            chroma_sampling: 2,
-            layer: String::new(),
-            tile_size: 0,
-            levels: LevelMode::One,
-            line_order: LineOrder::IncreasingY,
-        }
-    }
-}
-
 const PIXEL_TYPE_NAMES: [&str; 2] = ["float", "half"];
 const COLOUR_NAMES: [&str; 2] = ["rgb", "luma_chroma"];
 const LEVEL_NAMES: [&str; 3] = ["one", "mipmap", "ripmap"];
@@ -332,7 +391,7 @@ fn compression_from_name(name: &str) -> Option<Compression> {
     })
 }
 
-impl CodecOptionsStruct for ExrEncoderOptions {
+impl CodecOptionsStruct for EncodeOptions {
     const SCHEMA: &'static [OptionField] = &[
         OptionField {
             name: "pixel_type",
@@ -385,6 +444,13 @@ impl CodecOptionsStruct for ExrEncoderOptions {
             kind: OptionKind::Enum(&LINE_ORDER_NAMES),
             default: OptionValue::String(String::new()),
             help: "chunk storage order: increasing_y, decreasing_y, or random_y (tiled only)",
+        },
+        OptionField {
+            name: "input_gamma",
+            kind: OptionKind::F32,
+            default: OptionValue::F32(0.0),
+            help: "linearisation exponent for Rgb24 / Rgba input frames ((b / 255) ^ gamma); 0 \
+                   = bytes are linear",
         },
     ];
     fn apply(&mut self, key: &str, value: &OptionValue) -> oxideav_core::Result<()> {
@@ -463,18 +529,26 @@ impl CodecOptionsStruct for ExrEncoderOptions {
                     ))
                 })?;
             }
+            "input_gamma" => {
+                let g = value.as_f32()?;
+                self.input_gamma = if g > 0.0 && g.is_finite() {
+                    Some(g)
+                } else {
+                    None
+                };
+            }
             _ => unreachable!("guarded by SCHEMA"),
         }
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Decoder
-// ---------------------------------------------------------------------------
+// ---- Decoder --------------------------------------------------------------
 
-fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
-    let opts: ExrDecoderOptions = parse_options(&params.options)?;
+/// Build the framework decoder (one packet = one OpenEXR file; options:
+/// `part`, `part_name`, `layer`).
+pub fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
+    let opts: DecodeOptions = parse_options(&params.options)?;
     Ok(Box::new(ExrDecoder {
         codec_id: CodecId::new(CODEC_ID_STR),
         opts,
@@ -485,7 +559,7 @@ fn make_decoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decode
 
 struct ExrDecoder {
     codec_id: CodecId,
-    opts: ExrDecoderOptions,
+    opts: DecodeOptions,
     pending: Option<VideoFrame>,
     eof: bool,
 }
@@ -495,14 +569,8 @@ impl Decoder for ExrDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let part = if self.opts.part_name.is_empty() {
-            self.opts.part
-        } else {
-            part_index_by_name(&packet.data, &self.opts.part_name)?
-        };
-        let flat = decode_flat_part(&packet.data, part)?;
-        let (_format, frame) = flat_to_video_frame(&flat, &self.opts.layer)?;
-        self.pending = Some(frame);
+        let img = crate::decode_with(&packet.data, &self.opts)?;
+        self.pending = Some(image_into_video_frame(img, packet.pts));
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
@@ -523,283 +591,17 @@ impl Decoder for ExrDecoder {
     }
 }
 
-/// One decoded flat (non-deep) image at full resolution, normalised
-/// across the single-part / multi-part / multi-level readers.
-struct FlatPixels {
-    width: u32,
-    height: u32,
-    channels: Vec<Channel>,
-    planes: Vec<ExrPlane>,
-    /// The part's header attributes (chromaticities, multiView, …).
-    attributes: Vec<Attribute>,
-}
+// ---- Encoder --------------------------------------------------------------
 
-/// Resolve a part `name` attribute to its index from the file's
-/// headers alone (no pixel decode). Single-part files may carry a
-/// `name` too; otherwise the request is an error listing what exists.
-fn part_index_by_name(bytes: &[u8], name: &str) -> oxideav_core::Result<u32> {
-    if bytes.len() < 8 {
-        return Err(oxideav_core::Error::invalid(
-            "OpenEXR: packet shorter than the magic + version field",
-        ));
-    }
-    let version = VersionField::from_u32(u32::from_le_bytes(bytes[4..8].try_into().unwrap()));
-    let headers = if version.multipart {
-        parse_multipart_headers(bytes)?
-    } else {
-        vec![parse_header(bytes)?]
-    };
-    let part_name = |attrs: &[Attribute]| -> Option<String> {
-        attrs.iter().find_map(|a| match (&a.name[..], &a.value) {
-            ("name", AttributeValue::String(n)) => Some(n.clone()),
-            _ => None,
-        })
-    };
-    let names: Vec<Option<String>> = headers.iter().map(|h| part_name(&h.attributes)).collect();
-    if let Some(idx) = names.iter().position(|n| n.as_deref() == Some(name)) {
-        return Ok(idx as u32);
-    }
-    let listed: Vec<String> = names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| match n {
-            Some(n) => format!("{i}: {n:?}"),
-            None => format!("{i}: (unnamed)"),
-        })
-        .collect();
-    Err(oxideav_core::Error::invalid(format!(
-        "OpenEXR decoder: no part named {name:?}; the file has [{}]",
-        listed.join(", ")
-    )))
-}
-
-/// Decode part `part` of `bytes` as a flat image.
-fn decode_flat_part(bytes: &[u8], part: u32) -> oxideav_core::Result<FlatPixels> {
-    if bytes.len() < 8 {
-        return Err(oxideav_core::Error::invalid(
-            "OpenEXR: packet shorter than the magic + version field",
-        ));
-    }
-    let version = VersionField::from_u32(u32::from_le_bytes(bytes[4..8].try_into().unwrap()));
-    if !version.multipart {
-        if part != 0 {
-            return Err(oxideav_core::Error::invalid(format!(
-                "OpenEXR decoder: part {part} requested from a single-part file"
-            )));
-        }
-        if version.non_image {
-            return Err(oxideav_core::Error::Unsupported(
-                "OpenEXR decoder: deep image (variable samples per pixel) has no VideoFrame \
-                 mapping; use the standalone parse_exr_deep_* API"
-                    .to_string(),
-            ));
-        }
-        let img = parse_exr(bytes)?;
-        return Ok(FlatPixels {
-            width: img.width(),
-            height: img.height(),
-            channels: img.channels,
-            planes: img.planes,
-            attributes: img.attributes,
-        });
-    }
-    let mut parts = parse_exr_multipart_mixed(bytes)?;
-    let count = parts.len();
-    let idx = part as usize;
-    if idx >= count {
-        return Err(oxideav_core::Error::invalid(format!(
-            "OpenEXR decoder: part {part} requested but the file has {count} part(s)"
-        )));
-    }
-    match parts.swap_remove(idx) {
-        MultipartMixedImage::Scanline(img) | MultipartMixedImage::Tiled(img) => Ok(FlatPixels {
-            width: img.width(),
-            height: img.height(),
-            channels: img.channels,
-            planes: img.planes,
-            attributes: img.attributes,
-        }),
-        MultipartMixedImage::TiledMipmap(p) | MultipartMixedImage::TiledRipmap(p) => {
-            let level = p
-                .levels
-                .into_iter()
-                .find(|l| l.level_x == 0 && l.level_y == 0)
-                .ok_or_else(|| {
-                    oxideav_core::Error::invalid(format!(
-                        "OpenEXR decoder: multi-level part {part} has no level (0, 0)"
-                    ))
-                })?;
-            Ok(FlatPixels {
-                width: level.width,
-                height: level.height,
-                channels: p.channels,
-                planes: level.planes,
-                attributes: p.attributes,
-            })
-        }
-        MultipartMixedImage::DeepScanline(_)
-        | MultipartMixedImage::DeepTiled(_)
-        | MultipartMixedImage::DeepTiledMipmap(_)
-        | MultipartMixedImage::DeepTiledRipmap(_) => {
-            Err(oxideav_core::Error::Unsupported(format!(
-                "OpenEXR decoder: part {part} is a deep part (variable samples per pixel) with no \
-             VideoFrame mapping; use the standalone parse_exr_deep_* API"
-            )))
-        }
-    }
-}
-
-/// Map a flat image's channel set to a frame (module docs, *Decoder
-/// channel mapping*). Returns the chosen pixel format alongside the
-/// packed frame.
-fn flat_to_video_frame(
-    img: &FlatPixels,
-    layer: &str,
-) -> oxideav_core::Result<(PixelFormat, VideoFrame)> {
-    let layers = enumerate_layers(&img.channels, &img.attributes);
-    let Some(sel) = find_layer(&layers, layer) else {
-        let available: Vec<String> = layers
-            .iter()
-            .map(|l| {
-                let name = if l.name.is_empty() {
-                    "\"\""
-                } else {
-                    l.name.as_str()
-                };
-                match &l.view {
-                    Some(v) => format!("{name} ({:?}, view {v})", l.kind),
-                    None => format!("{name} ({:?})", l.kind),
-                }
-            })
-            .collect();
-        return Err(oxideav_core::Error::invalid(format!(
-            "OpenEXR decoder: no layer '{layer}'; the part has [{}]",
-            available.join(", ")
-        )));
-    };
-    let find = |base: &str| {
-        let name = sel.channel_name(base);
-        img.planes.iter().position(|p| p.name == name)
-    };
-    let (r, g, b, a, y) = (find("R"), find("G"), find("B"), find("A"), find("Y"));
-    let (ry, by) = (find("RY"), find("BY"));
-    let w = img.width;
-    let h = img.height;
-    let pixels = (w as usize) * (h as usize);
-
-    // Every directly-mapped channel must be full-resolution and sized
-    // for the data window.
-    let full_res = |idx: usize| -> oxideav_core::Result<&[f32]> {
-        let ch = &img.channels[idx];
-        if ch.x_sampling != 1 || ch.y_sampling != 1 {
-            return Err(oxideav_core::Error::Unsupported(format!(
-                "OpenEXR decoder: colour channel '{}' is sub-sampled ({}x{}); frame formats are \
-                 full-resolution",
-                ch.name, ch.x_sampling, ch.y_sampling
-            )));
-        }
-        let samples = &img.planes[idx].samples;
-        if samples.len() != pixels {
-            return Err(oxideav_core::Error::invalid(format!(
-                "OpenEXR decoder: channel '{}' holds {} samples for {w}x{h}",
-                ch.name,
-                samples.len()
-            )));
-        }
-        Ok(samples.as_slice())
-    };
-    // A chroma channel keeps whatever sampling the file declares; the
-    // conversion reconstructs full resolution.
-    let chroma = |idx: usize| -> oxideav_core::Result<ChromaPlane<'_>> {
-        let ch = &img.channels[idx];
-        if ch.x_sampling <= 0 || ch.y_sampling <= 0 {
-            return Err(oxideav_core::Error::invalid(format!(
-                "OpenEXR decoder: chroma channel '{}' declares sampling {}x{}",
-                ch.name, ch.x_sampling, ch.y_sampling
-            )));
-        }
-        Ok(ChromaPlane {
-            samples: &img.planes[idx].samples,
-            x_sampling: ch.x_sampling as u32,
-            y_sampling: ch.y_sampling as u32,
-        })
-    };
-
-    let converted: Option<RgbPlanes>;
-    let (format, sources): (PixelFormat, Vec<&[f32]>) = match (r, g, b, a, y, ry, by) {
-        (Some(r), Some(g), Some(b), Some(a), ..) => (
-            PixelFormat::RgbaF32Le,
-            vec![full_res(r)?, full_res(g)?, full_res(b)?, full_res(a)?],
-        ),
-        (Some(r), Some(g), Some(b), None, ..) => (
-            PixelFormat::RgbF32Le,
-            vec![full_res(r)?, full_res(g)?, full_res(b)?],
-        ),
-        (None, None, None, a, Some(y), Some(ry), Some(by)) => {
-            // Luminance/chroma: reconstruct RGB with the image's own
-            // luminance weights (chromaticities attribute, else BT.709).
-            let weights = luminance_weights_of(&img.attributes);
-            let rgb = luma_chroma_to_rgb(w, h, full_res(y)?, chroma(ry)?, chroma(by)?, weights)?;
-            converted = Some(rgb);
-            let rgb = converted.as_ref().unwrap();
-            match a {
-                Some(a) => (
-                    PixelFormat::RgbaF32Le,
-                    vec![&rgb.r, &rgb.g, &rgb.b, full_res(a)?],
-                ),
-                None => (PixelFormat::RgbF32Le, vec![&rgb.r, &rgb.g, &rgb.b]),
-            }
-        }
-        (None, None, None, Some(a), Some(y), None, None) => {
-            let y = full_res(y)?;
-            (PixelFormat::RgbaF32Le, vec![y, y, y, full_res(a)?])
-        }
-        (None, None, None, None, Some(y), None, None) => {
-            (PixelFormat::GrayF32Le, vec![full_res(y)?])
-        }
-        _ => {
-            let names: Vec<&str> = sel
-                .channels
-                .iter()
-                .map(|&i| img.channels[i].name.as_str())
-                .collect();
-            return Err(oxideav_core::Error::Unsupported(format!(
-                "OpenEXR decoder: layer '{}' channel set [{}] has no RGB(A) / Y / Y RY BY frame \
-                 mapping",
-                sel.name,
-                names.join(", ")
-            )));
-        }
-    };
-
-    let stride = format.plane_row_bytes(0, w).ok_or_else(|| {
-        oxideav_core::Error::invalid(format!("OpenEXR decoder: {w}x{h} frame size overflows"))
-    })?;
-    let mut data = Vec::with_capacity(stride * h as usize);
-    for px in 0..pixels {
-        for src in &sources {
-            data.extend_from_slice(&src[px].to_le_bytes());
-        }
-    }
-    Ok((
-        format,
-        VideoFrame {
-            pts: None,
-            planes: vec![VideoPlane { stride, data }],
-        },
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Encoder
-// ---------------------------------------------------------------------------
-
-fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
-    let opts: ExrEncoderOptions = parse_options(&params.options)?;
+/// Build the framework encoder (`width`, `height`, `pixel_format`
+/// required; options per the [`EncodeOptions`] schema).
+pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
+    let opts: EncodeOptions = parse_options(&params.options)?;
     let mut out_params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
     out_params.width = params.width;
     out_params.height = params.height;
     out_params.pixel_format = params.pixel_format;
+    out_params.color_signal = params.color_signal;
     Ok(Box::new(ExrEncoder {
         codec_id: CodecId::new(CODEC_ID_STR),
         out_params,
@@ -812,29 +614,9 @@ fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encode
 struct ExrEncoder {
     codec_id: CodecId,
     out_params: CodecParameters,
-    opts: ExrEncoderOptions,
+    opts: EncodeOptions,
     pending: Option<Vec<u8>>,
     eof: bool,
-}
-
-/// Packed component count per accepted frame format (`None` for
-/// formats the encoder does not take).
-trait InterleavedComponents {
-    fn plane_count_interleaved(self) -> usize;
-}
-impl InterleavedComponents for PixelFormat {
-    fn plane_count_interleaved(self) -> usize {
-        match self {
-            PixelFormat::RgbaF32Le => 4,
-            PixelFormat::RgbF32Le => 3,
-            PixelFormat::GrayF32Le => 1,
-            _ => 0,
-        }
-    }
-}
-
-fn accepted_format(format: PixelFormat) -> bool {
-    FRAME_FORMATS.contains(&format)
 }
 
 impl Encoder for ExrEncoder {
@@ -856,205 +638,15 @@ impl Encoder for ExrEncoder {
         let format = self.out_params.pixel_format.ok_or_else(|| {
             oxideav_core::Error::invalid("OpenEXR encoder: pixel_format missing in CodecParameters")
         })?;
-        if !accepted_format(format) {
+        if !FRAME_FORMATS.contains(&format) && !RAW_FORMATS.contains(&format) {
             return Err(oxideav_core::Error::invalid(format!(
                 "OpenEXR encoder: unsupported pixel format {format:?} (RgbaF32Le / RgbF32Le / \
-                 GrayF32Le only)"
+                 GrayF32Le / Rgb24 / Rgba)"
             )));
         }
-        let width = self.out_params.width.ok_or_else(|| {
-            oxideav_core::Error::invalid("OpenEXR encoder: width missing in CodecParameters")
-        })?;
-        let height = self.out_params.height.ok_or_else(|| {
-            oxideav_core::Error::invalid("OpenEXR encoder: height missing in CodecParameters")
-        })?;
-        if width == 0 || height == 0 {
-            return Err(oxideav_core::Error::invalid(format!(
-                "OpenEXR encoder: {width}x{height} frame (both dimensions must be > 0)"
-            )));
-        }
-        let plane = vf
-            .planes
-            .first()
-            .ok_or_else(|| oxideav_core::Error::invalid("OpenEXR encoder: empty frame plane"))?;
-        let row_bytes = format.plane_row_bytes(0, width).ok_or_else(|| {
-            oxideav_core::Error::invalid(format!("OpenEXR encoder: {width}x{height} overflows"))
-        })?;
-        if plane.stride < row_bytes {
-            return Err(oxideav_core::Error::invalid(format!(
-                "OpenEXR encoder: {format:?} stride {} too small for width {width} (need \
-                 {row_bytes})",
-                plane.stride
-            )));
-        }
-        let last_row_end = (height as usize - 1)
-            .checked_mul(plane.stride)
-            .and_then(|o| o.checked_add(row_bytes))
-            .filter(|&end| end <= plane.data.len())
-            .ok_or_else(|| {
-                oxideav_core::Error::invalid(format!(
-                    "OpenEXR encoder: plane data {} bytes too short for {height} rows of stride {}",
-                    plane.data.len(),
-                    plane.stride
-                ))
-            })?;
-        debug_assert!(last_row_end <= plane.data.len());
-
-        // De-interleave the packed frame into one f32 plane per
-        // component (R, G, B, A / R, G, B / Y).
-        let components = format.plane_count_interleaved();
-        let pixels = (width as usize) * (height as usize);
-        let mut comps: Vec<Vec<f32>> = (0..components)
-            .map(|_| Vec::with_capacity(pixels))
-            .collect();
-        for y in 0..height as usize {
-            let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
-            for px in 0..width as usize {
-                let base = px * components * 4;
-                for (c, dst) in comps.iter_mut().enumerate() {
-                    let off = base + c * 4;
-                    dst.push(f32::from_le_bytes(row[off..off + 4].try_into().unwrap()));
-                }
-            }
-        }
-
-        let mk = |name: &str, sampling: u32| Channel {
-            name: if self.opts.layer.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}.{name}", self.opts.layer)
-            },
-            pixel_type: self.opts.pixel_type,
-            p_linear: false,
-            x_sampling: sampling as i32,
-            y_sampling: sampling as i32,
-        };
-        // (channel, plane) pairs in the alphabetical order the file
-        // layout requires.
-        let (channels, planes): (Vec<Channel>, Vec<Vec<f32>>) = match (self.opts.colour, format) {
-            (ColourLayout::LumaChroma, PixelFormat::RgbaF32Le | PixelFormat::RgbF32Le) => {
-                let s = self.opts.chroma_sampling;
-                if width % s != 0 || height % s != 0 {
-                    return Err(oxideav_core::Error::invalid(format!(
-                        "OpenEXR encoder: {width}x{height} frame is not a multiple of \
-                             chroma_sampling={s} (conforming readers require sub-sampled \
-                             extents divisible by the sampling factor; use chroma_sampling=1)"
-                    )));
-                }
-                let weights = luminance_weights(&BT709_CHROMATICITIES);
-                let yc = rgb_to_luma_chroma(
-                    width,
-                    height,
-                    [&comps[0], &comps[1], &comps[2]],
-                    weights,
-                    (s, s),
-                )?;
-                let mut chs = Vec::with_capacity(4);
-                let mut pls = Vec::with_capacity(4);
-                if let Some(a) = comps.get(3) {
-                    chs.push(mk("A", 1));
-                    pls.push(a.clone());
-                }
-                chs.extend([mk("BY", s), mk("RY", s), mk("Y", 1)]);
-                pls.extend([yc.by, yc.ry, yc.y]);
-                (chs, pls)
-            }
-            (_, PixelFormat::RgbaF32Le) => {
-                let mut it = comps.into_iter();
-                let (r, g, b, a) = (
-                    it.next().unwrap(),
-                    it.next().unwrap(),
-                    it.next().unwrap(),
-                    it.next().unwrap(),
-                );
-                (
-                    vec![mk("A", 1), mk("B", 1), mk("G", 1), mk("R", 1)],
-                    vec![a, b, g, r],
-                )
-            }
-            (_, PixelFormat::RgbF32Le) => {
-                let mut it = comps.into_iter();
-                let (r, g, b) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
-                (vec![mk("B", 1), mk("G", 1), mk("R", 1)], vec![b, g, r])
-            }
-            (_, PixelFormat::GrayF32Le) => (vec![mk("Y", 1)], comps),
-            _ => unreachable!("guarded by channel_layout"),
-        };
-
-        let compression = self.opts.compression;
-        let line_order = self.opts.line_order;
-        let tile = self.opts.tile_size;
-        if tile == 0 && self.opts.levels != LevelMode::One {
-            return Err(oxideav_core::Error::invalid(format!(
-                "OpenEXR encoder: levels={:?} needs a tiled file (tile_size > 0)",
-                self.opts.levels
-            )));
-        }
-        if tile == 0 && line_order == LineOrder::RandomY {
-            return Err(oxideav_core::Error::invalid(
-                "OpenEXR encoder: line_order=random_y is only valid for tiled files",
-            ));
-        }
-        if tile > 0
-            && channels
-                .iter()
-                .any(|c| c.x_sampling != 1 || c.y_sampling != 1)
-        {
-            return Err(oxideav_core::Error::invalid(
-                "OpenEXR encoder: tiled files need full-resolution channels; use \
-                 chroma_sampling=1 with colour=luma_chroma",
-            ));
-        }
-        let plane_refs: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
-        let bytes = match (tile, self.opts.levels) {
-            (0, _) => {
-                let mut attributes = scanline_attributes(width, height, &channels, compression);
-                if let Some(lo) = attributes.iter_mut().find(|a| a.name == "lineOrder") {
-                    lo.value = AttributeValue::LineOrder(line_order);
-                }
-                encode_exr_scanline(
-                    width,
-                    height,
-                    &channels,
-                    &plane_refs,
-                    compression,
-                    attributes,
-                )?
-            }
-            (t, LevelMode::One) => encode_exr_tiled_with_line_order(
-                width,
-                height,
-                &channels,
-                &plane_refs,
-                compression,
-                t,
-                t,
-                line_order,
-            )?,
-            (t, LevelMode::Mipmap) => {
-                let pyramid = build_box_filter_pyramid(width, height, &planes);
-                encode_exr_tiled_mipmap_with_line_order(
-                    &channels,
-                    &pyramid,
-                    compression,
-                    t,
-                    t,
-                    line_order,
-                )?
-            }
-            (t, LevelMode::Ripmap) => {
-                let pyramid = build_box_filter_ripmap(width, height, &planes);
-                encode_exr_tiled_ripmap_with_line_order(
-                    &channels,
-                    &pyramid,
-                    compression,
-                    t,
-                    t,
-                    line_order,
-                )?
-            }
-        };
-        self.pending = Some(bytes);
+        let img =
+            ExrImage::from_video_frame_with_gamma(vf, &self.out_params, self.opts.input_gamma)?;
+        self.pending = Some(crate::encode(&img, &self.opts)?);
         Ok(())
     }
     fn receive_packet(&mut self) -> oxideav_core::Result<Packet> {
@@ -1079,62 +671,22 @@ impl Encoder for ExrEncoder {
     }
 }
 
-/// The required header attribute set for a single-part scanline image
-/// covering `[0, width) × [0, height)`.
-fn scanline_attributes(
-    width: u32,
-    height: u32,
-    channels: &[Channel],
-    compression: Compression,
-) -> Vec<Attribute> {
-    let win = Box2i {
-        x_min: 0,
-        y_min: 0,
-        x_max: (width - 1) as i32,
-        y_max: (height - 1) as i32,
-    };
-    vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(channels.to_vec()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(compression),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::encode_exr_scanline_rgba_float;
+    use crate::encoder::{
+        encode_exr_scanline, required_scanline_attributes as scanline_attributes,
+    };
     use crate::half::{f32_to_half, half_to_f32};
     use crate::parse_exr;
+    use crate::types::{Attribute, AttributeValue, Channel};
+
+    /// RGBA float scanline file through the contract encoder (the
+    /// pre-contract `encode_exr_scanline_rgba_float` shape).
+    fn encode_exr_scanline_rgba_float(w: u32, h: u32, samples: &[f32]) -> crate::Result<Vec<u8>> {
+        let img = ExrImage::from_f32(w, h, ExrPixelFormat::RgbaF32Le, samples)?;
+        crate::encode(&img, &EncodeOptions::default())
+    }
 
     fn decode_frame(bytes: Vec<u8>, part: Option<u32>) -> oxideav_core::Result<VideoFrame> {
         let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
@@ -1230,8 +782,11 @@ mod tests {
         let impls = reg.implementations(&CodecId::new(CODEC_ID_STR));
         assert_eq!(impls.len(), 1, "openexr registered once");
         let caps = &impls[0].caps;
-        assert_eq!(caps.accepted_pixel_formats, FRAME_FORMATS.to_vec());
-        assert!(caps.accepted_pixel_formats.iter().all(|f| f.is_float()));
+        assert_eq!(&caps.accepted_pixel_formats[..3], &FRAME_FORMATS[..]);
+        assert!(caps.accepted_pixel_formats[..3]
+            .iter()
+            .all(|f| f.is_float()));
+        assert_eq!(&caps.accepted_pixel_formats[3..], &RAW_FORMATS[..]);
     }
 
     #[test]
@@ -1605,7 +1160,8 @@ mod tests {
         assert_eq!(layers[0].name, "beauty.spec");
         assert_eq!(layers[0].kind, crate::layers::LayerKind::Rgba);
         // The base layer is empty now, so a default decode fails
-        // loudly and the prefixed decode round-trips.
+        // loudly (no default colour view = Unsupported) and the
+        // prefixed decode round-trips.
         let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
         params.options.insert("layer", "beauty.spec");
         let mut dec = make_decoder(&params).unwrap();
@@ -1617,7 +1173,7 @@ mod tests {
         }
         assert!(matches!(
             decode_frame(bytes, None).unwrap_err(),
-            oxideav_core::Error::InvalidData(_)
+            oxideav_core::Error::Unsupported(_)
         ));
         // Luma/chroma under a layer prefix.
         let src = packed_frame(w, h, 3, |_, c| [0.5f32, 0.25, 0.125][c]);

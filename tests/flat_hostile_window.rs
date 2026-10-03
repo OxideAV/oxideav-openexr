@@ -9,6 +9,10 @@
 //! (ONE_LEVEL / MIPMAP / RIPMAP) and homogeneous multi-part readers
 //! with the same contract already enforced on the deep and mixed
 //! paths.
+
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
 #![allow(clippy::type_complexity)]
 
 use oxideav_openexr::{

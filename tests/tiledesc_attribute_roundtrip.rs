@@ -56,6 +56,10 @@
 //!    exit and that the `tiles` attribute appears in the emitted text.
 //!    Auto-skipped when `exrheader` is missing from `$PATH`.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{

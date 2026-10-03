@@ -17,6 +17,10 @@
 //! every test auto-skips with a printed reason when the tool is absent,
 //! so CI hosts without an OpenEXR install stay green.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{

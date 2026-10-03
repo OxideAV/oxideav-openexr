@@ -89,7 +89,7 @@ pub struct DeepExrImage {
     /// sum of `samples_per_pixel` (every channel carries one value per
     /// sample). UINT channels store the u32 value reinterpreted as f32
     /// (matching the flat-EXR `Uint` convention in
-    /// [`crate::image::ExrPlane`]).
+    /// [`crate::part::ExrPlane`]).
     pub channel_samples: Vec<Vec<f32>>,
     pub attributes: Vec<Attribute>,
 }
@@ -917,7 +917,7 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
 
 /// Same as [`parse_header`] but tolerates the deep / non-image version
 /// bit (which [`parse_header`] rejects).
-fn parse_header_allow_deep(bytes: &[u8]) -> Result<crate::header::ParsedHeader> {
+pub(crate) fn parse_header_allow_deep(bytes: &[u8]) -> Result<crate::header::ParsedHeader> {
     // Quick check first: if the non_image bit isn't set, just delegate
     // (avoids duplicating header walker code).
     if bytes.len() >= 8 {

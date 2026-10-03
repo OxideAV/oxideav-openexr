@@ -19,6 +19,10 @@
 //!
 //! All tests auto-skip when the reference binaries are absent.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{

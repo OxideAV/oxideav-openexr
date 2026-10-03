@@ -8,7 +8,7 @@ use crate::decoder::{
     scatter_block_into_planes, subsampled_dim, Pxr24RowSpec,
 };
 use crate::error::{ExrError, Result};
-use crate::image::ExrPlane;
+use crate::part::ExrPlane;
 use crate::piz::ChunkShape;
 use crate::types::{Channel, Compression};
 

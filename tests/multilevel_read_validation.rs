@@ -22,6 +22,10 @@
 //! `tests/ripmap_encoder_validation.rs`; this file pins the new READ
 //! path against that same encoder output.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use oxideav_openexr::{
     encode_exr_scanline_rgba_float_with, encode_exr_tiled_mipmap, encode_exr_tiled_rgba_float_with,
     encode_exr_tiled_ripmap, mipmap_level_count, mipmap_level_dim, parse_exr,

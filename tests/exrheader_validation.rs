@@ -7,6 +7,10 @@
 //! out. The test checks it exits zero and emits text that mentions
 //! our four channels.
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{encode_exr_scanline_rgba_float_with, Compression};

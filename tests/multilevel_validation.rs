@@ -13,6 +13,10 @@
 //! Both test suites auto-skip if the required reference binaries are
 //! missing (`exrmaketiled`, `exrmultipart`).
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{
@@ -62,7 +66,7 @@ fn make_gradient_exr(w: u32, h: u32) -> Vec<u8> {
 
 /// Check that the decoded mipmap's level-0 pixels match the reference.
 /// Reference is decoded from `ref_bytes` (the original uncompressed file).
-fn check_level0_matches_ref(decoded: &oxideav_openexr::ExrImage, ref_bytes: &[u8]) {
+fn check_level0_matches_ref(decoded: &oxideav_openexr::ExrPart, ref_bytes: &[u8]) {
     let ref_img = parse_exr(ref_bytes).expect("failed to parse reference file");
     assert_eq!(decoded.width(), ref_img.width(), "width mismatch");
     assert_eq!(decoded.height(), ref_img.height(), "height mismatch");

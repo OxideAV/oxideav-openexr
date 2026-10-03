@@ -24,6 +24,10 @@
 //!    PXR24 and confirm it still round-trips (the encoder must store the
 //!    reorganised stream uncompressed when deflate doesn't shrink it).
 
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 use std::process::Command;
 
 use oxideav_openexr::{encode_exr_scanline_rgba_float_with, parse_exr, Compression};
@@ -85,7 +89,7 @@ fn ramp_samples(w: u32, h: u32) -> Vec<f32> {
 
 /// Assert each plane sample of `img` equals the spec 24-bit reduction of
 /// the corresponding original RGBA sample.
-fn assert_planes_reduced(img: &oxideav_openexr::ExrImage, samples: &[f32], w: u32, h: u32) {
+fn assert_planes_reduced(img: &oxideav_openexr::ExrPart, samples: &[f32], w: u32, h: u32) {
     let wu = w as usize;
     for (ci, name) in ["R", "G", "B", "A"].iter().enumerate() {
         let plane = img

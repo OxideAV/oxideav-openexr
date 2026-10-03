@@ -27,7 +27,7 @@ use std::process::Command;
 
 use oxideav_openexr::{
     encode_exr_scanline, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
-    ExrImage, LineOrder, PixelType,
+    ExrPart, LineOrder, PixelType,
 };
 
 fn exrmetrics_available() -> bool {
@@ -238,7 +238,7 @@ fn encode_luma_chroma(
     encode_exr_scanline(w, h, &channels, &planes, compression, attrs).unwrap()
 }
 
-fn plane<'a>(img: &'a ExrImage, name: &str) -> &'a [f32] {
+fn plane<'a>(img: &'a ExrPart, name: &str) -> &'a [f32] {
     &img.planes
         .iter()
         .find(|p| p.name == name)
@@ -246,7 +246,7 @@ fn plane<'a>(img: &'a ExrImage, name: &str) -> &'a [f32] {
         .samples
 }
 
-fn assert_planes_bitmatch(a: &ExrImage, b: &ExrImage, w: u32, h: u32, ctx: &str) {
+fn assert_planes_bitmatch(a: &ExrPart, b: &ExrPart, w: u32, h: u32, ctx: &str) {
     for name in ["BY", "RY", "Y"] {
         let pa = plane(a, name);
         let pb = plane(b, name);

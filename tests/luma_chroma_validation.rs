@@ -36,7 +36,7 @@ use std::process::Command;
 use oxideav_openexr::{
     encode_exr_scanline, luma_chroma_to_rgb, luminance_weights, luminance_weights_of, parse_exr,
     rgb_to_luma_chroma, Attribute, AttributeValue, Box2i, Channel, ChromaPlane, Compression,
-    ExrImage, LineOrder, PixelType, BT709_CHROMATICITIES,
+    ExrPart, LineOrder, PixelType, BT709_CHROMATICITIES,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -126,7 +126,7 @@ fn attrs(w: u32, h: u32, chs: &[Channel]) -> Vec<Attribute> {
     ]
 }
 
-fn plane<'a>(img: &'a ExrImage, name: &str) -> &'a [f32] {
+fn plane<'a>(img: &'a ExrPart, name: &str) -> &'a [f32] {
     let idx = img
         .channels
         .iter()
@@ -168,7 +168,7 @@ fn write_pair(dir: &Path, w: u32, h: u32, r: &[f32], g: &[f32], b: &[f32]) -> (P
     (rgb_path, yc_path)
 }
 
-fn read(path: &Path) -> ExrImage {
+fn read(path: &Path) -> ExrPart {
     parse_exr(&std::fs::read(path).unwrap()).unwrap()
 }
 

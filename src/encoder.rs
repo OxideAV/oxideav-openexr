@@ -67,6 +67,59 @@ fn pxr24_f32_to_code24(bits: u32) -> u32 {
     }
 }
 
+/// The eight required header attributes of a single-part scanline image
+/// covering `[0, width) × [0, height)` with the given channel list and
+/// compression (INCREASING_Y, aspect 1, screen window (0, 0) / 1). A
+/// starting point for callers of [`encode_exr_scanline`] who add their
+/// own attributes.
+pub fn required_scanline_attributes(
+    width: u32,
+    height: u32,
+    channels: &[Channel],
+    compression: Compression,
+) -> Vec<Attribute> {
+    let win = Box2i {
+        x_min: 0,
+        y_min: 0,
+        x_max: (width.max(1) - 1) as i32,
+        y_max: (height.max(1) - 1) as i32,
+    };
+    vec![
+        Attribute {
+            name: "channels".to_string(),
+            value: AttributeValue::Channels(channels.to_vec()),
+        },
+        Attribute {
+            name: "compression".to_string(),
+            value: AttributeValue::Compression(compression),
+        },
+        Attribute {
+            name: "dataWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "displayWindow".to_string(),
+            value: AttributeValue::Box2i(win),
+        },
+        Attribute {
+            name: "lineOrder".to_string(),
+            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
+        },
+        Attribute {
+            name: "pixelAspectRatio".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+        Attribute {
+            name: "screenWindowCenter".to_string(),
+            value: AttributeValue::V2f(0.0, 0.0),
+        },
+        Attribute {
+            name: "screenWindowWidth".to_string(),
+            value: AttributeValue::Float(1.0),
+        },
+    ]
+}
+
 /// Build the standard 4-channel RGBA float header attribute set.
 fn rgba_float_attributes(width: u32, height: u32, compression: Compression) -> Vec<Attribute> {
     // chlist must be alphabetical: A, B, G, R.
@@ -412,8 +465,18 @@ pub(crate) fn dwa_level_from_attributes(attributes: &[Attribute]) -> f32 {
 /// returned bytes round-trips back to the input pixels (modulo the
 /// HALF<->FLOAT precision ladder if you ever change the channel
 /// declarations to HALF).
+#[deprecated(
+    note = "use oxideav_openexr::encode(&ExrImage::from_f32(w, h, RgbaF32Le, s)?, \
+                     &EncodeOptions::default()) (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_scanline_rgba_float(width: u32, height: u32, samples: &[f32]) -> Result<Vec<u8>> {
-    encode_exr_scanline_rgba_float_with(width, height, samples, Compression::Zip)
+    encode_rgba_float_impl(
+        width,
+        height,
+        samples,
+        Compression::Zip,
+        LineOrder::IncreasingY,
+    )
 }
 
 /// Same as [`encode_exr_scanline_rgba_float_with`] but with an explicit
@@ -428,6 +491,9 @@ pub fn encode_exr_scanline_rgba_float(width: u32, height: u32, samples: &[f32]) 
 /// of the chunks, never the offset-table keying. `RandomY` is rejected:
 /// a scanline image header carrying RANDOM_Y is invalid (the reference
 /// readers refuse to open such files).
+#[deprecated(
+    note = "use oxideav_openexr::encode with EncodeOptions::with_line_order (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_scanline_rgba_float_with_line_order(
     width: u32,
     height: u32,
@@ -440,6 +506,9 @@ pub fn encode_exr_scanline_rgba_float_with_line_order(
 
 /// Same as [`encode_exr_scanline_rgba_float`] but with an explicit
 /// compression mode (round 1 supports NO_COMPRESSION + ZIP).
+#[deprecated(
+    note = "use oxideav_openexr::encode with EncodeOptions::with_compression (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_scanline_rgba_float_with(
     width: u32,
     height: u32,
@@ -595,6 +664,16 @@ pub fn encode_exr_scanline(
     let block_h = compression.scanlines_per_block();
     let num_blocks = height.div_ceil(block_h) as usize;
     let dwa_level = dwa_level_from_attributes(&attributes);
+    // Chunk coordinates are absolute: block `i` starts at scanline
+    // `dataWindow.y_min + i * blockHeight` (0 when the caller's window
+    // sits at the origin, the historical layout).
+    let y_min = attributes
+        .iter()
+        .find_map(|a| match (&a.name[..], &a.value) {
+            ("dataWindow", AttributeValue::Box2i(b)) => Some(b.y_min),
+            _ => None,
+        })
+        .unwrap_or(0);
 
     // Emit the header.
     let header_bytes = encode_header(VersionField::from_u32(2), &attributes);
@@ -762,13 +841,31 @@ pub fn encode_exr_scanline(
     }
     for &bi in &storage_order {
         let p = &block_payloads[bi];
-        let y = bi as u32 * block_h;
-        out.extend_from_slice(&(y as i32).to_le_bytes());
+        let y = y_min.wrapping_add((bi as u32 * block_h) as i32);
+        out.extend_from_slice(&y.to_le_bytes());
         out.extend_from_slice(&(p.len() as i32).to_le_bytes());
         out.extend_from_slice(p);
     }
 
     Ok(out)
+}
+
+/// Splice caller-supplied non-structural attributes into a writer's
+/// attribute list: an attribute whose name is already present replaces
+/// the writer's value in place (`pixelAspectRatio`, `screenWindowCenter`,
+/// `screenWindowWidth`), any other name is appended in order, and the
+/// structural names the writer owns ([`crate::image::STRUCTURAL_ATTRIBUTES`])
+/// are skipped.
+pub(crate) fn merge_extra_attributes(attrs: &mut Vec<Attribute>, extra: &[Attribute]) {
+    for e in extra {
+        if crate::image::STRUCTURAL_ATTRIBUTES.contains(&e.name.as_str()) {
+            continue;
+        }
+        match attrs.iter_mut().find(|a| a.name == e.name) {
+            Some(slot) => slot.value = e.value.clone(),
+            None => attrs.push(e.clone()),
+        }
+    }
 }
 
 fn zlib_deflate(data: &[u8]) -> Result<Vec<u8>> {

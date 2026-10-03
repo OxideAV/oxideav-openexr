@@ -1,3 +1,7 @@
+// The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
+// for one release; this file exercises them on purpose.
+#![allow(deprecated)]
+
 #![no_main]
 
 //! Coverage-guided fuzz harness for the single-part FLAT decode entry

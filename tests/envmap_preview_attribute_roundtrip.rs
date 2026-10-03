@@ -230,7 +230,7 @@ fn encode_with(extra: Vec<Attribute>) -> Vec<u8> {
     encode_exr_scanline(w, h, &chs, &planes, Compression::None, attrs).unwrap()
 }
 
-fn find<'a>(img: &'a oxideav_openexr::ExrImage, name: &str) -> &'a AttributeValue {
+fn find<'a>(img: &'a oxideav_openexr::ExrPart, name: &str) -> &'a AttributeValue {
     &img.attributes
         .iter()
         .find(|a| a.name == name)

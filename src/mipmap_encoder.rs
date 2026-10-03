@@ -59,6 +59,9 @@ pub fn mipmap_level_count_round_down(width: u32, height: u32) -> u32 {
 ///
 /// `samples` is `width * height * 4` long, in `R, G, B, A` pixel order.
 /// Uses ROUND_DOWN rounding (the OpenEXR default).
+#[deprecated(
+    note = "use oxideav_openexr::encode / encode_all with EncodeOptions (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_tiled_rgba_float_mipmap_box_filter(
     width: u32,
     height: u32,
@@ -227,6 +230,28 @@ pub fn encode_exr_tiled_mipmap_with_line_order(
     tile_y: u32,
     line_order: LineOrder,
 ) -> Result<Vec<u8>> {
+    encode_exr_tiled_mipmap_with_attributes(
+        channels,
+        pyramid,
+        compression,
+        tile_x,
+        tile_y,
+        line_order,
+        &[],
+    )
+}
+
+/// [`encode_exr_tiled_mipmap_with_line_order`] with extra non-structural
+/// header attributes spliced in.
+pub(crate) fn encode_exr_tiled_mipmap_with_attributes(
+    channels: &[Channel],
+    pyramid: &[MipmapLevel],
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
+    extra: &[Attribute],
+) -> Result<Vec<u8>> {
     if pyramid.is_empty() {
         return Err(ExrError::invalid(
             "mipmap pyramid must have at least one level".to_string(),
@@ -329,6 +354,7 @@ pub fn encode_exr_tiled_mipmap_with_line_order(
     if let Some(lo) = attrs.iter_mut().find(|a| a.name == "lineOrder") {
         lo.value = AttributeValue::LineOrder(line_order);
     }
+    crate::encoder::merge_extra_attributes(&mut attrs, extra);
 
     let version = VersionField::from_u32(2 | 0x200);
     let header_bytes = encode_header(version, &attrs);
@@ -792,6 +818,9 @@ pub fn build_box_filter_ripmap(
 ///
 /// `samples` is `width * height * 4` long in `R, G, B, A` pixel order.
 /// Uses ROUND_DOWN rounding (the OpenEXR default).
+#[deprecated(
+    note = "use oxideav_openexr::encode / encode_all with EncodeOptions (IMAGE_CRATE_API)"
+)]
 pub fn encode_exr_tiled_rgba_float_ripmap_box_filter(
     width: u32,
     height: u32,
@@ -896,6 +925,28 @@ pub fn encode_exr_tiled_ripmap_with_line_order(
     tile_x: u32,
     tile_y: u32,
     line_order: LineOrder,
+) -> Result<Vec<u8>> {
+    encode_exr_tiled_ripmap_with_attributes(
+        channels,
+        pyramid,
+        compression,
+        tile_x,
+        tile_y,
+        line_order,
+        &[],
+    )
+}
+
+/// [`encode_exr_tiled_ripmap_with_line_order`] with extra non-structural
+/// header attributes spliced in.
+pub(crate) fn encode_exr_tiled_ripmap_with_attributes(
+    channels: &[Channel],
+    pyramid: &RipmapPyramid,
+    compression: Compression,
+    tile_x: u32,
+    tile_y: u32,
+    line_order: LineOrder,
+    extra: &[Attribute],
 ) -> Result<Vec<u8>> {
     if pyramid.grid.is_empty() || pyramid.grid[0].is_empty() {
         return Err(ExrError::invalid(
@@ -1010,6 +1061,7 @@ pub fn encode_exr_tiled_ripmap_with_line_order(
     if let Some(lo) = attrs.iter_mut().find(|a| a.name == "lineOrder") {
         lo.value = AttributeValue::LineOrder(line_order);
     }
+    crate::encoder::merge_extra_attributes(&mut attrs, extra);
 
     let version = VersionField::from_u32(2 | 0x200);
     let header_bytes = encode_header(version, &attrs);
@@ -1167,6 +1219,7 @@ fn build_tiled_ripmap_attributes(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::parse_exr;
@@ -1184,7 +1237,7 @@ mod tests {
         s
     }
 
-    fn assert_planes_match_rgba(img: &crate::ExrImage, source_rgba: &[f32]) {
+    fn assert_planes_match_rgba(img: &crate::ExrPart, source_rgba: &[f32]) {
         let w = img.width() as usize;
         let h = img.height() as usize;
         let a = &img.planes[0].samples;
