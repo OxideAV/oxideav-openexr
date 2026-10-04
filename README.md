@@ -43,6 +43,7 @@ if oxideav_openexr::probe(&bytes) {
     // 8-bit in: bytes are linear / 255 unless `with_input_gamma(2.2)`.
     let _ = oxideav_openexr::encode_rgba8(w, h, &rgba8, &opts)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Root vocabulary: `probe`, `info -> ImageInfo`, `decode -> ExrImage`,
