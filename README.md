@@ -133,11 +133,15 @@ Result<ExrImage, ExrError>` (also `TryFrom<(&VideoFrame,
 
 ### The `openexr` container
 
-The demuxer (`container::open_demuxer`) declares one video stream whose
-parameters carry the first viewable part's `width` / `height`, its
-native `pixel_format` (what `info().format` reports) and its colour
-signal (linear light; primaries from `chromaticities`, BT.709 when the
-file has none). It never touches pixels:
+The demuxer (`container::open_demuxer`) declares **one video stream per
+distinct (width, height, native layout, colour signal)** among the
+viewable parts, in first-appearance order — a single-part file has one
+stream; a stereo `left` / `right` pair shares one; a `RgbaF32Le` beauty
+next to a `GrayF32Le` depth gives two — so every stream's parameters
+(`width` / `height`, the `pixel_format` `info().format` reports for that
+part, its colour signal: linear light, primaries from `chromaticities`,
+BT.709 when absent) describe every packet on it. Packets carry their
+stream index. The demuxer never touches pixels:
 
 - a **single-part file** is one packet holding the whole file;
 - a **multi-part file** yields one packet per part that has a colour
@@ -154,8 +158,10 @@ file has none). It never touches pixels:
   part's `comments` / `owner` / `capDate` attributes and, for
   multi-part files, `parts` and `part_name:<index>`.
 
-The muxer (`container::open_muxer`) takes the encoder's packets: one
-packet is written verbatim; several are combined into a multi-part file
+The muxer (`container::open_muxer`) accepts one or more video streams
+and takes the encoder's packets: one packet in total is written
+verbatim; several (on any streams, in arrival order) are combined into a
+multi-part file
 (the inverse repack — `name`, `type`, `chunkCount` added, part names
 taken from the packets or `part<i>`, duplicates suffixed `.<i>`; every
 part receives the shared `displayWindow`, the union of the packets'

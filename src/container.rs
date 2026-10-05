@@ -18,20 +18,26 @@
 //!   parts and parts whose channel set has no view are skipped exactly
 //!   like `decode_all` (the lenient default); a file with no viewable
 //!   part at all is `Unsupported`.
-//! * The stream declares the **first emitted part's** geometry and native
-//!   layout (`RgbaF32Le` / `RgbF32Le` / `GrayF32Le`, as [`crate::info`]
-//!   reports for the first part) and its colour signal (OpenEXR defines
-//!   its colour semantics: linear light, `chromaticities` or the BT.709
-//!   default — see [`crate::ColorInfo`]).
+//! * **Streams**: one video stream per distinct (width, height, native
+//!   layout, colour signal) among the emitted parts, in first-appearance
+//!   order; parts that share all four (a stereo `left` / `right` pair) share
+//!   a stream, parts that differ (a `RgbaF32Le` beauty next to a
+//!   `GrayF32Le` depth) each get their own, so every stream's `params`
+//!   describe every packet on it. The layout is `RgbaF32Le` / `RgbF32Le`
+//!   / `GrayF32Le` as [`crate::info`] reports for that part; the colour
+//!   signal is the part's (OpenEXR defines its colour semantics: linear
+//!   light, `chromaticities` or the BT.709 default — see
+//!   [`crate::ColorInfo`]). A single-part file has one stream.
 //! * **Timing**: OpenEXR parts are not timed. Packets carry `pts` = the
 //!   zero-based part index in the file (gaps where parts were skipped,
 //!   matching `Frame::index`) in a `1/1` time base and no `duration`.
-//! * **Muxer**: one packet → the file is written verbatim; several
-//!   packets → a multi-part file combining the single-part packets with
-//!   the inverse repack (`name` / `type` / `chunkCount` attributes added,
-//!   part-number prefixes inserted, one offset table per part). Only flat
-//!   (scanline / tiled) single-part packets combine — what the registry
-//!   encoder emits.
+//! * **Muxer**: accepts one or more video streams. One packet in total →
+//!   the file is written verbatim; several packets (on any streams) → a
+//!   multi-part file combining the single-part packets in arrival order
+//!   with the inverse repack (`name` / `type` / `chunkCount` attributes
+//!   added, part-number prefixes inserted, one offset table per part).
+//!   Only flat (scanline / tiled) single-part packets combine — what the
+//!   registry encoder emits.
 //!
 //! Gated behind the `registry` feature: every type here comes from
 //! `oxideav-core`.
@@ -211,19 +217,21 @@ impl PartShape {
 // Demuxer
 // ---------------------------------------------------------------------------
 
-/// One emitted part: its file index and the single-part file bytes.
+/// One emitted part: its file index, its view's geometry / layout /
+/// colour, and the single-part file bytes.
 struct PartPacket {
     index: u32,
     name: Option<String>,
+    width: u32,
+    height: u32,
+    format: crate::PixelFormat,
+    color: ColorInfo,
     bytes: Vec<u8>,
 }
 
 /// What the demuxer learned from the file.
 struct Demuxed {
-    width: u32,
-    height: u32,
-    format: crate::PixelFormat,
-    color: ColorInfo,
+    /// Attributes of the first emitted part (metadata source).
     primary_attributes: Vec<Attribute>,
     part_count: u32,
     parts: Vec<PartPacket>,
@@ -269,15 +277,15 @@ fn demux_single_part(bytes: &[u8], version: VersionField) -> crate::Result<Demux
         )));
     }
     Ok(Demuxed {
-        width,
-        height,
-        format: plan.format(),
-        color: ColorInfo::from_attributes(&header.attributes),
         primary_attributes: header.attributes.clone(),
         part_count: 1,
         parts: vec![PartPacket {
             index: 0,
             name: string_attribute(&header.attributes, "name"),
+            width,
+            height,
+            format: plan.format(),
+            color: ColorInfo::from_attributes(&header.attributes),
             bytes: bytes.to_vec(),
         }],
     })
@@ -442,8 +450,8 @@ fn demux_multipart(bytes: &[u8], version: VersionField) -> crate::Result<Demuxed
     let layout = multipart_layout(bytes, &headers)?;
     let chunks = walk_chunks(bytes, &layout)?;
 
-    let mut parts = Vec::new();
-    let mut primary: Option<(u32, u32, crate::PixelFormat, ColorInfo, Vec<Attribute>)> = None;
+    let mut parts: Vec<PartPacket> = Vec::new();
+    let mut primary_attributes: Option<Vec<Attribute>> = None;
     let mut skipped: Vec<String> = Vec::new();
     for (i, header) in headers.iter().enumerate() {
         let shape = layout.shapes[i];
@@ -468,32 +476,26 @@ fn demux_multipart(bytes: &[u8], version: VersionField) -> crate::Result<Demuxed
         }
         let order = table_order(bytes, &layout, i, &chunks[i]);
         let single = repack_single_part(bytes, version, header, shape, &chunks[i], &order);
-        if primary.is_none() {
-            primary = Some((
-                width,
-                height,
-                plan.format(),
-                ColorInfo::from_attributes(&header.attributes),
-                header.attributes.clone(),
-            ));
+        if primary_attributes.is_none() {
+            primary_attributes = Some(header.attributes.clone());
         }
         parts.push(PartPacket {
             index: i as u32,
             name: string_attribute(&header.attributes, "name"),
+            width,
+            height,
+            format: plan.format(),
+            color: ColorInfo::from_attributes(&header.attributes),
             bytes: single,
         });
     }
-    let Some((width, height, format, color, primary_attributes)) = primary else {
+    let Some(primary_attributes) = primary_attributes else {
         return Err(ExrError::unsupported(format!(
             "OpenEXR container: no part has a colour view ({})",
             skipped.join("; ")
         )));
     };
     Ok(Demuxed {
-        width,
-        height,
-        format,
-        color,
         primary_attributes,
         part_count: headers.len() as u32,
         parts,
@@ -513,18 +515,39 @@ pub fn open_demuxer(
     drop(buf);
 
     let time_base = TimeBase::new(1, 1);
-    let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
-    params.width = Some(demuxed.width);
-    params.height = Some(demuxed.height);
-    params.pixel_format = Some(to_core_pixel_format(demuxed.format));
-    params.color_signal = to_color_signal(&demuxed.color);
-    let stream = StreamInfo {
-        index: 0,
-        time_base,
-        duration: None,
-        start_time: demuxed.parts.first().map(|p| p.index as i64),
-        params,
-    };
+    // One stream per distinct (geometry, layout, colour) among the parts,
+    // first-appearance order; `stream_of[k]` is part k's stream index.
+    let mut streams: Vec<StreamInfo> = Vec::new();
+    let mut stream_of = Vec::with_capacity(demuxed.parts.len());
+    for p in &demuxed.parts {
+        let pixel_format = to_core_pixel_format(p.format);
+        let color_signal = to_color_signal(&p.color);
+        let found = streams.iter().position(|s| {
+            s.params.width == Some(p.width)
+                && s.params.height == Some(p.height)
+                && s.params.pixel_format == Some(pixel_format)
+                && s.params.color_signal == color_signal
+        });
+        let idx = match found {
+            Some(i) => i,
+            None => {
+                let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+                params.width = Some(p.width);
+                params.height = Some(p.height);
+                params.pixel_format = Some(pixel_format);
+                params.color_signal = color_signal;
+                streams.push(StreamInfo {
+                    index: streams.len() as u32,
+                    time_base,
+                    duration: None,
+                    start_time: Some(p.index as i64),
+                    params,
+                });
+                streams.len() - 1
+            }
+        };
+        stream_of.push(idx as u32);
+    }
 
     let mut metadata: Vec<(String, String)> = Vec::new();
     for (attr, key) in [
@@ -548,8 +571,9 @@ pub fn open_demuxer(
     let packets = demuxed
         .parts
         .into_iter()
-        .map(|p| {
-            let mut pkt = Packet::new(0, time_base, p.bytes);
+        .zip(stream_of)
+        .map(|(p, stream_index)| {
+            let mut pkt = Packet::new(stream_index, time_base, p.bytes);
             pkt.pts = Some(p.index as i64);
             pkt.dts = Some(p.index as i64);
             pkt.flags.keyframe = true;
@@ -558,7 +582,7 @@ pub fn open_demuxer(
         .collect();
 
     Ok(Box::new(ExrDemuxer {
-        streams: vec![stream],
+        streams,
         packets,
         metadata,
     }))
@@ -589,24 +613,34 @@ impl Demuxer for ExrDemuxer {
 // Muxer
 // ---------------------------------------------------------------------------
 
-/// Open an OpenEXR muxer over `output` for exactly one video stream.
+/// Open an OpenEXR muxer over `output` for one or more video streams
+/// (every packet, whatever its stream, becomes one part; several packets
+/// in total make a multi-part file).
 pub fn open_muxer(output: Box<dyn WriteSeek>, streams: &[StreamInfo]) -> Result<Box<dyn Muxer>> {
-    if streams.len() != 1 {
+    if streams.is_empty() {
         return Err(Error::invalid(
-            "OpenEXR muxer: expected exactly one video stream",
+            "OpenEXR muxer: expected at least one video stream",
         ));
     }
-    if streams[0].params.media_type != MediaType::Video {
-        return Err(Error::invalid("OpenEXR muxer: stream must be video"));
+    if let Some(s) = streams
+        .iter()
+        .find(|s| s.params.media_type != MediaType::Video)
+    {
+        return Err(Error::invalid(format!(
+            "OpenEXR muxer: stream {} must be video",
+            s.index
+        )));
     }
     Ok(Box::new(ExrMuxer {
         output,
+        stream_count: streams.len() as u32,
         packets: Vec::new(),
     }))
 }
 
 struct ExrMuxer {
     output: Box<dyn WriteSeek>,
+    stream_count: u32,
     packets: Vec<Vec<u8>>,
 }
 
@@ -618,6 +652,12 @@ impl Muxer for ExrMuxer {
         Ok(())
     }
     fn write_packet(&mut self, packet: &Packet) -> Result<()> {
+        if packet.stream_index >= self.stream_count {
+            return Err(Error::invalid(format!(
+                "OpenEXR muxer: packet on stream {} but the muxer has {} stream(s)",
+                packet.stream_index, self.stream_count
+            )));
+        }
         if packet.data.is_empty() {
             return Err(Error::invalid("OpenEXR muxer: empty packet"));
         }
@@ -938,6 +978,11 @@ mod tests {
         let demuxed = demux_file(&multi).unwrap();
         assert_eq!(demuxed.part_count, 2);
         assert_eq!(demuxed.parts.len(), 2);
+        assert_eq!(
+            (demuxed.parts[0].format, demuxed.parts[1].format),
+            (ExrPixelFormat::RgbF32Le, ExrPixelFormat::GrayF32Le)
+        );
+        assert_eq!((demuxed.parts[1].width, demuxed.parts[1].height), (4, 6));
         assert_eq!(demuxed.parts[0].name.as_deref(), Some("part0"));
         assert_eq!(demuxed.parts[1].name.as_deref(), Some("part1"));
         for (orig, part) in [a, b].iter().zip(&demuxed.parts) {

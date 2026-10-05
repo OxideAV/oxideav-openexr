@@ -81,9 +81,13 @@ fn image(w: u32, h: u32, format: ExrPixelFormat, salt: f32) -> ExrImage {
     ExrImage::from_f32(w, h, format, &samples).unwrap()
 }
 
+/// What one registry pass produced: the stream table, the packets in
+/// file order, and the frame each packet decoded to (same order).
+type Demuxed = (Vec<StreamInfo>, Vec<Packet>, Vec<VideoFrame>);
+
 /// Open `bytes` through the registry and pump every packet through the
-/// registry decoder.
-fn demux_decode(ctx: &RuntimeContext, bytes: &[u8]) -> (StreamInfo, Vec<Packet>, Vec<VideoFrame>) {
+/// decoder of its own stream.
+fn demux_decode(ctx: &RuntimeContext, bytes: &[u8]) -> Demuxed {
     let name = ctx
         .containers
         .probe_input(&mut Cursor::new(bytes), None)
@@ -94,24 +98,47 @@ fn demux_decode(ctx: &RuntimeContext, bytes: &[u8]) -> (StreamInfo, Vec<Packet>,
         .open_demuxer(&name, Box::new(Cursor::new(bytes.to_vec())), &ctx.codecs)
         .expect("open_demuxer");
     assert_eq!(demuxer.format_name(), CONTAINER);
-    assert_eq!(demuxer.streams().len(), 1, "exactly one video stream");
-    let stream = demuxer.streams()[0].clone();
-    assert_eq!(stream.params.codec_id, CodecId::new(CODEC_ID_STR));
-    assert_eq!(stream.time_base, TimeBase::new(1, 1));
-    let mut dec = ctx
-        .codecs
-        .first_decoder(&stream.params)
-        .expect("first_decoder");
+    let streams = demuxer.streams().to_vec();
+    assert!(!streams.is_empty(), "at least one video stream");
+    let mut decoders = Vec::new();
+    for (i, stream) in streams.iter().enumerate() {
+        assert_eq!(stream.index as usize, i);
+        assert_eq!(stream.params.codec_id, CodecId::new(CODEC_ID_STR));
+        assert_eq!(stream.time_base, TimeBase::new(1, 1));
+        assert!(stream.params.pixel_format.is_some());
+        decoders.push(
+            ctx.codecs
+                .first_decoder(&stream.params)
+                .expect("first_decoder"),
+        );
+    }
     let mut packets = Vec::new();
     let mut frames = Vec::new();
     loop {
         match demuxer.next_packet() {
             Ok(pkt) => {
                 assert!(pkt.flags.keyframe);
-                assert_eq!(pkt.stream_index, 0);
+                let s = pkt.stream_index as usize;
+                assert!(s < streams.len(), "packet on an undeclared stream");
+                let dec = &mut decoders[s];
                 dec.send_packet(&pkt).expect("send_packet");
                 match dec.receive_frame().expect("receive_frame") {
-                    CoreFrame::Video(v) => frames.push(v),
+                    CoreFrame::Video(v) => {
+                        // The frame's plane is exactly what its own
+                        // stream's parameters describe.
+                        let p = &streams[s].params;
+                        let fmt = p.pixel_format.unwrap();
+                        let (w, h) = (p.width.unwrap(), p.height.unwrap());
+                        let (pw, ph) = fmt.plane_dimensions(0, w, h).unwrap();
+                        let row = fmt.plane_row_bytes(0, pw).unwrap();
+                        assert_eq!(v.planes[0].stride, row, "stride vs stream {s}");
+                        assert_eq!(
+                            v.planes[0].data.len(),
+                            row * ph as usize,
+                            "plane size vs stream {s} ({fmt:?} {w}×{h})"
+                        );
+                        frames.push(v)
+                    }
                     _ => panic!("expected a video frame"),
                 }
                 packets.push(pkt);
@@ -121,7 +148,7 @@ fn demux_decode(ctx: &RuntimeContext, bytes: &[u8]) -> (StreamInfo, Vec<Packet>,
         }
     }
     assert!(matches!(demuxer.next_packet(), Err(Error::Eof)));
-    (stream, packets, frames)
+    (streams, packets, frames)
 }
 
 /// Encode `frames` through the registry encoder and the muxer.
@@ -246,8 +273,10 @@ fn single_part_demux_matches_layer1_across_layouts_and_compressions() {
                     let bytes = oxideav_openexr::encode(&image(37, 19, fmt, 0.0), &opts).unwrap();
                     let info = oxideav_openexr::info(&bytes).unwrap();
                     let l1 = oxideav_openexr::decode(&bytes).unwrap();
-                    let (stream, packets, frames) = demux_decode(&ctx, &bytes);
+                    let (streams, packets, frames) = demux_decode(&ctx, &bytes);
                     let label = format!("{fmt:?}/{c:?}/{pixel_type:?}/tile{tile}");
+                    assert_eq!(streams.len(), 1, "{label}");
+                    let stream = &streams[0];
                     assert_eq!(stream.params.width, Some(info.width), "{label}");
                     assert_eq!(stream.params.height, Some(info.height), "{label}");
                     assert_eq!(stream.params.pixel_format, Some(core_fmt), "{label}");
@@ -289,7 +318,8 @@ fn single_part_luma_chroma_and_colour_signal() {
     let info = oxideav_openexr::info(&bytes).unwrap();
     assert_eq!(info.color.primaries, 9, "chromaticities written and read");
     let l1 = oxideav_openexr::decode(&bytes).unwrap();
-    let (stream, _packets, frames) = demux_decode(&ctx, &bytes);
+    let (streams, _packets, frames) = demux_decode(&ctx, &bytes);
+    let stream = &streams[0];
     assert_eq!(stream.params.pixel_format, Some(PixelFormat::RgbaF32Le));
     let sig = stream.params.color_signal;
     assert_eq!(
@@ -306,9 +336,9 @@ fn single_part_luma_chroma_and_colour_signal() {
         &EncodeOptions::default(),
     )
     .unwrap();
-    let (stream, ..) = demux_decode(&ctx, &plain);
+    let (streams, ..) = demux_decode(&ctx, &plain);
     assert_eq!(
-        stream.params.color_signal,
+        streams[0].params.color_signal,
         oxideav_openexr::registry::to_color_signal(&oxideav_openexr::ColorInfo::exr_default())
     );
 }
@@ -341,10 +371,32 @@ fn multipart_demux_one_packet_per_part_matches_decode_all() {
         let info = oxideav_openexr::info(&bytes).unwrap();
         assert_eq!(info.frames, 3);
         let l1 = oxideav_openexr::decode_all(&bytes).unwrap();
-        let (stream, packets, frames) = demux_decode(&ctx, &bytes);
-        assert_eq!(stream.params.width, Some(info.width));
-        assert_eq!(stream.params.height, Some(info.height));
-        assert_eq!(stream.params.pixel_format, Some(PixelFormat::RgbaF32Le));
+        let (streams, packets, frames) = demux_decode(&ctx, &bytes);
+        // Three parts of three distinct (geometry, layout): three streams,
+        // each describing its own part.
+        assert_eq!(streams.len(), 3, "{c:?}");
+        assert_eq!(streams[0].params.width, Some(info.width));
+        assert_eq!(streams[0].params.height, Some(info.height));
+        for (k, (fmt, (w, h))) in [
+            (PixelFormat::RgbaF32Le, (12, 9)),
+            (PixelFormat::RgbF32Le, (7, 5)),
+            (PixelFormat::GrayF32Le, (9, 9)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                streams[k].params.pixel_format,
+                Some(fmt),
+                "{c:?} stream {k}"
+            );
+            assert_eq!(
+                (streams[k].params.width, streams[k].params.height),
+                (Some(w), Some(h)),
+                "{c:?} stream {k}"
+            );
+            assert_eq!(packets[k].stream_index, k as u32);
+        }
         assert_eq!(packets.len(), 3, "{c:?}");
         assert_eq!(frames.len(), 3, "{c:?}");
         for (i, (pkt, vf)) in packets.iter().zip(&frames).enumerate() {
@@ -476,9 +528,15 @@ fn multipart_demux_skips_deep_and_viewless_parts_like_decode_all() {
     let l1 = oxideav_openexr::decode_all(&bytes).unwrap();
     assert_eq!(l1.len(), 2);
     assert_eq!((l1[0].index, l1[1].index), (0, 2));
-    let (stream, packets, frames) = demux_decode(&ctx, &bytes);
-    assert_eq!(stream.params.pixel_format, Some(PixelFormat::RgbaF32Le));
+    let (streams, packets, frames) = demux_decode(&ctx, &bytes);
+    assert_eq!(
+        streams.len(),
+        1,
+        "both viewable parts are 8×6 RgbaF32Le: one shared stream"
+    );
+    assert_eq!(streams[0].params.pixel_format, Some(PixelFormat::RgbaF32Le));
     assert_eq!(packets.len(), 2, "aov-only and deep parts are skipped");
+    assert!(packets.iter().all(|p| p.stream_index == 0));
     assert_eq!(packets[0].pts, Some(0));
     assert_eq!(packets[1].pts, Some(2), "pts keeps the file part index");
     assert_eq!(frames[0].planes[0].data, l1[0].image.planes[0].data);
@@ -616,12 +674,13 @@ fn mux_keeps_part_names_from_the_packets_and_disambiguates_duplicates() {
     let multi = oxideav_openexr::encode_all(&frames, &EncodeOptions::default()).unwrap();
     // Demux the multi-part file into single-part packets, then mux them
     // again: names survive, a repeated name gets a suffix.
-    let (stream, packets, _) = demux_decode(&ctx, &multi);
+    let (streams, packets, _) = demux_decode(&ctx, &multi);
+    assert_eq!(streams.len(), 3);
     let sink = SharedSink::default();
     {
         let mut muxer = ctx
             .containers
-            .open_muxer(CONTAINER, Box::new(sink.clone()), &[stream])
+            .open_muxer(CONTAINER, Box::new(sink.clone()), &streams)
             .unwrap();
         muxer.write_header().unwrap();
         for pkt in &packets {
@@ -654,10 +713,27 @@ fn mux_rejects_bad_streams_and_packets() {
     };
     let sink = || Box::new(Cursor::new(Vec::<u8>::new()));
     assert!(ctx.containers.open_muxer(CONTAINER, sink(), &[]).is_err());
-    assert!(ctx
+    // Several video streams are fine (one per part layout) …
+    let second = StreamInfo {
+        index: 1,
+        ..video.clone()
+    };
+    let mut two = ctx
         .containers
-        .open_muxer(CONTAINER, sink(), &[video.clone(), video.clone()])
+        .open_muxer(CONTAINER, sink(), &[video.clone(), second])
+        .unwrap();
+    // … but a packet must name a declared stream.
+    let pict = oxideav_openexr::encode(
+        &image(2, 2, ExrPixelFormat::GrayF32Le, 0.0),
+        &EncodeOptions::default(),
+    )
+    .unwrap();
+    assert!(two
+        .write_packet(&Packet::new(2, TimeBase::new(1, 1), pict.clone()))
         .is_err());
+    two.write_packet(&Packet::new(1, TimeBase::new(1, 1), pict))
+        .unwrap();
+    two.write_trailer().unwrap();
     let audio = StreamInfo {
         params: CodecParameters::audio(CodecId::new("pcm")),
         ..video.clone()
@@ -784,6 +860,102 @@ fn hostile_inputs_never_panic() {
         let at = p + needle.len() + 4;
         huge[at..at + 4].copy_from_slice(&i32::MAX.to_le_bytes());
         assert!(open(&huge).is_err());
+    }
+}
+
+// ---- per-layout streams ---------------------------------------------------
+
+/// The coordinator's pin: RgbF32Le + GrayF32Le + RgbaF32Le parts of the
+/// same 2×2 geometry → three streams, each frame sized by its own
+/// stream's `plane_dimensions`, planes byte-exact vs `decode_all`, and
+/// the several-streams muxer inverse round-trips.
+#[test]
+fn multipart_parts_of_different_layouts_get_their_own_streams() {
+    let ctx = ctx();
+    let frames = vec![
+        Frame::new(image(2, 2, ExrPixelFormat::RgbF32Le, 0.0), 0).with_name(Some("rgb".into())),
+        Frame::new(image(2, 2, ExrPixelFormat::GrayF32Le, 1.0), 1).with_name(Some("depth".into())),
+        Frame::new(image(2, 2, ExrPixelFormat::RgbaF32Le, 2.0), 2).with_name(Some("rgba".into())),
+        // A second grey part: shares the depth stream.
+        Frame::new(image(2, 2, ExrPixelFormat::GrayF32Le, 3.0), 3).with_name(Some("mask".into())),
+    ];
+    let bytes = oxideav_openexr::encode_all(&frames, &EncodeOptions::default()).unwrap();
+    let l1 = oxideav_openexr::decode_all(&bytes).unwrap();
+    let (streams, packets, out) = demux_decode(&ctx, &bytes);
+    assert_eq!(streams.len(), 3, "three distinct layouts");
+    let layouts: Vec<PixelFormat> = streams
+        .iter()
+        .map(|s| s.params.pixel_format.unwrap())
+        .collect();
+    assert_eq!(
+        layouts,
+        [
+            PixelFormat::RgbF32Le,
+            PixelFormat::GrayF32Le,
+            PixelFormat::RgbaF32Le
+        ],
+        "first-appearance order"
+    );
+    assert_eq!(
+        packets.iter().map(|p| p.stream_index).collect::<Vec<_>>(),
+        [0, 1, 2, 1],
+        "the second grey part rides the grey stream"
+    );
+    assert_eq!(
+        packets.iter().map(|p| p.pts).collect::<Vec<_>>(),
+        [Some(0), Some(1), Some(2), Some(3)],
+        "pts stays the file part index"
+    );
+    for (k, vf) in out.iter().enumerate() {
+        let s = &streams[packets[k].stream_index as usize].params;
+        let fmt = s.pixel_format.unwrap();
+        let expected = fmt.plane_row_bytes(0, 2).unwrap() * 2;
+        assert_eq!(
+            vf.planes[0].data.len(),
+            expected,
+            "part {k}: {fmt:?} plane bytes"
+        );
+        assert_eq!(
+            vf.planes[0].data, l1[k].image.planes[0].data,
+            "part {k} == decode_all"
+        );
+    }
+    // The grey part is a 16-byte plane with stride 8 — not the 96/24 of an
+    // RgbF32Le mislabel.
+    assert_eq!(
+        (out[1].planes[0].data.len(), out[1].planes[0].stride),
+        (16, 8)
+    );
+
+    // Inverse: several streams back into one multi-part file.
+    let sink = SharedSink::default();
+    {
+        let mut muxer = ctx
+            .containers
+            .open_muxer(CONTAINER, Box::new(sink.clone()), &streams)
+            .unwrap();
+        muxer.write_header().unwrap();
+        for p in &packets {
+            muxer.write_packet(p).unwrap();
+        }
+        muxer.write_trailer().unwrap();
+    }
+    let muxed = sink.bytes();
+    let back = oxideav_openexr::decode_all(&muxed).unwrap();
+    assert_eq!(back.len(), 4);
+    for (f, orig) in back.iter().zip(&frames) {
+        assert_eq!(f.image.planes, orig.image.planes);
+        assert_eq!(f.image.format, orig.image.format);
+        assert_eq!(f.name, orig.name);
+    }
+    let (streams2, packets2, out2) = demux_decode(&ctx, &muxed);
+    assert_eq!(streams2.len(), 3);
+    assert_eq!(
+        packets2.iter().map(|p| p.stream_index).collect::<Vec<_>>(),
+        [0, 1, 2, 1]
+    );
+    for (vf, orig) in out2.iter().zip(&frames) {
+        assert_eq!(vf.planes[0].data, orig.image.planes[0].data);
     }
 }
 
