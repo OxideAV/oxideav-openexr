@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.6...v0.0.7) - 2026-10-05
+
+### Added
+
+- image-crate API contract — probe/info/decode/encode root vocabulary, ExrImage colour view, DecodeOptions/EncodeOptions, registry as thin adapter
+- registry decoder part_name option — select a multi-part part by its name attribute
+- registry encoder part-shape options — tiled ONE_LEVEL / MIPMAP / RIPMAP + line orders
+- layered / multi-view channel names — typed layer enumeration + registry layer option
+- registry encoder colour=luma_chroma — RGB(A) frames written as Y RY BY (+A) with sub-sampled chroma
+- luminance/chroma (Y RY BY) colour reconstruction on the framework decode path
+
+### Fixed
+
+- f32_to_half rounds (2^-25, 2^-24) up to the smallest subnormal half
+
+### Other
+
+- one stream per distinct part layout (gateway follow-up)
+- lockfile + seed corpus for the demux target
+- the openexr demuxer + muxer behind register_containers (Layer 2)
+- README examples use the current registry API
+- fuzz + ci + docs: contract_api fuzz target, standalone clippy job, README in the contract's section order
+- zlib through compcol (zlib feature only) instead of flate2
+- branch-light f32_to_half + hoisted DWA inverse LUT — DWA decode +69..94%
+- fold the round-457 parse_flat session corpus growth
+- decode_chunk target — compressed-chunk decoders in isolation (PIZ / DWA / B44 / PXR24 / ZIP / RLE)
+- recycled zlib states, fused ZIP unpredict pass, register-resident Huffman reader with direct long-code matching
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
 ### Added
 
 - **The `openexr` container** (`container` module, `registry` feature): `register` / `register_containers` now install a probe (magic → 100, `.exr` hint → 25), a demuxer and a muxer besides the `.exr` extension, so the framework (`oxideav_image::open`, the CLI) can open and write `.exr` files through the registry. The demuxer declares one video stream per distinct (geometry, native layout, colour signal) among the viewable parts, in first-appearance order — `RgbaF32Le` / `RgbF32Le` / `GrayF32Le` as `info` reports for that part, so a grey part next to an RGB one is never mislabelled; packets carry their stream index and the muxer accepts several video streams; a single-part file is one packet, a multi-part file one packet per viewable part in file order — each a valid single-part file repacked byte for byte (header, recomputed offset table, chunks minus the part-number prefix; payloads untouched), deep / viewless parts skipped like `decode_all`; `pts` = part index in a `1/1` time base, no `duration` (parts are not timed); `metadata()` carries `comment` / `owner` / `date` and the part names. The muxer writes one packet verbatim and combines several single-part packets into a multi-part file (inverse repack; `name` / `type` / `chunkCount` derived, the shared `displayWindow` = union of the packets' windows as `encode_all` does — the reference reader refuses parts that disagree on it). Pinned: registry planes == Layer 1 planes across 3 layouts × 10 compressions × FLOAT / HALF × scanline / tiled (120 cases), multi-part files (incl. mixed scanline / tiled / MIPMAP / AOV-only / deep), `demux(mux(frames)) == frames`, hostile inputs, and an independent reader (`exrinfo`, opaque process) opening the combined file and every repacked packet; new `demux` fuzz target (60 s / 339 k runs clean)
