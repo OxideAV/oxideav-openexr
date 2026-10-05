@@ -1307,7 +1307,7 @@ fn parse_tiled(
 ///   `ceil(lw/tw) * ceil(lh/th)`.
 /// * RIPMAP (mode=2): sum over (lvlx, lvly) pairs (all combinations of
 ///   x-levels and y-levels) of `ceil(lw/tw) * ceil(lh/th)`.
-fn compute_total_tiles(
+pub(crate) fn compute_total_tiles(
     level_mode: u8,
     width: u32,
     height: u32,

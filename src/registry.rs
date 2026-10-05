@@ -308,11 +308,12 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     );
 }
 
-/// OpenEXR is its own container (one image file per packet); only the
-/// `.exr` extension is registered so cli-convert and the central
-/// [`ContainerRegistry`] resolver route inputs / outputs to the codec.
+/// Register the `openexr` container ([`crate::container`]): the magic
+/// probe, the demuxer (one packet per viewable part, each a single-part
+/// file), the muxer (one packet → that file; several → a multi-part
+/// file) and the `.exr` extension.
 pub fn register_containers(reg: &mut ContainerRegistry) {
-    reg.register_extension("exr", CODEC_ID_STR);
+    crate::container::register(reg);
 }
 
 /// Register codecs and containers into two separate registries.

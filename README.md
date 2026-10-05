@@ -109,10 +109,13 @@ oxideav-openexr = "0.0"    # default `registry` feature: pulls oxideav-core
 ```
 
 `oxideav_openexr::register(&mut RuntimeContext)` installs the `openexr`
-codec (decoder + encoder, `openexr_sw`) and the `.exr` extension hint;
-`register_codecs` / `register_containers` / `register_registries` take
-the individual registries, `make_decoder` / `make_encoder` are the
-factories. `oxideav_meta::register_all` calls `register` for you.
+codec (decoder + encoder, `openexr_sw`) **and the `openexr` container**
+(probe, demuxer, muxer, `.exr` extension); `register_codecs` /
+`register_containers` / `register_registries` take the individual
+registries, `make_decoder` / `make_encoder` are the factories.
+`oxideav_meta::register_all` calls `register` for you, so
+`oxideav_image::open(&ctx, "scene.exr")` resolves probe → demuxer →
+decoder through the registry.
 
 The framework `Decoder` and `Encoder` are thin adapters over
 `decode_with` / `encode` (one implementation). The decoder emits the
@@ -123,11 +126,47 @@ natively and `Rgb24` / `Rgba` by the raw-path rule (`b / 255`,
 `input_gamma` to linearise); its options schema is `pixel_type`,
 `compression`, `colour`, `chroma_sampling`, `layer`, `tile_size`,
 `levels`, `line_order`, `input_gamma`. One packet is one single-part
-file; multi-part and deep files have no frame mapping (use
-`decode_all` / `encode_all` and the depth API). The frame bridge is
-`From<ExrImage> for VideoFrame` and `ExrImage::from_video_frame(&VideoFrame,
-&CodecParameters) -> Result<ExrImage, ExrError>` (also
-`TryFrom<(&VideoFrame, &CodecParameters)>`).
+file. The frame bridge is `From<ExrImage> for VideoFrame` and
+`ExrImage::from_video_frame(&VideoFrame, &CodecParameters) ->
+Result<ExrImage, ExrError>` (also `TryFrom<(&VideoFrame,
+&CodecParameters)>`).
+
+### The `openexr` container
+
+The demuxer (`container::open_demuxer`) declares one video stream whose
+parameters carry the first viewable part's `width` / `height`, its
+native `pixel_format` (what `info().format` reports) and its colour
+signal (linear light; primaries from `chromaticities`, BT.709 when the
+file has none). It never touches pixels:
+
+- a **single-part file** is one packet holding the whole file;
+- a **multi-part file** yields one packet per part that has a colour
+  view, in file order, each a valid single-part file repacked byte for
+  byte from the part's header and chunks (multi-part bit cleared, tiled
+  bit set for `tiledimage` parts, offset table recomputed, part-number
+  prefixes stripped; compressed payloads untouched). Deep parts and
+  parts without a view are skipped exactly as `decode_all` skips them;
+  a file with no viewable part is `Unsupported`;
+- `pts` = the part's zero-based index in the file (gaps where parts were
+  skipped, matching `Frame::index`) in a `1/1` time base. **OpenEXR
+  parts are not timed**: packets carry no `duration`;
+- `metadata()` carries `comment` / `owner` / `date` from the first
+  part's `comments` / `owner` / `capDate` attributes and, for
+  multi-part files, `parts` and `part_name:<index>`.
+
+The muxer (`container::open_muxer`) takes the encoder's packets: one
+packet is written verbatim; several are combined into a multi-part file
+(the inverse repack — `name`, `type`, `chunkCount` added, part names
+taken from the packets or `part<i>`, duplicates suffixed `.<i>`; every
+part receives the shared `displayWindow`, the union of the packets'
+windows, the rule `encode_all` applies, because a multi-part file
+carries one display window for all its parts). Only flat scanline /
+tiled single-part packets combine (what the encoder emits); a deep
+packet is `Unsupported`. `decode_all` and `parse_exr_multipart*` read
+the result, the registry round trip `demux(mux(frames)) == frames` is
+pinned for every layout, and an independent reader (`exrinfo`, run as
+an opaque process when installed) opens both the combined file and
+every repacked packet.
 
 ## Supported layouts
 

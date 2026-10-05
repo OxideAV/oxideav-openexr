@@ -70,6 +70,8 @@ pub mod b44;
 mod api;
 #[doc(hidden)]
 pub mod chunk_api;
+#[cfg(feature = "registry")]
+pub mod container;
 pub mod decoder;
 pub mod deep;
 pub(crate) mod dwa;

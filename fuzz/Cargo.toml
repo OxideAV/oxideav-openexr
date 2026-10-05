@@ -23,12 +23,17 @@ cargo-fuzz = true
 # `Ok(DeepExrImage)` or `Err(ExrError::Invalid | Unsupported)`; panics,
 # debug-mode integer overflows, attacker-claimed-length allocations, and
 # index-out-of-bounds are all bugs.
-[dependencies]
-libfuzzer-sys = "0.4"
-
 [dependencies.oxideav-openexr]
 path = ".."
 default-features = false
+# The `demux` target drives the registry container (demuxer, decoder,
+# muxer), so the framework feature is on; the standalone targets are
+# unaffected (they never touch `oxideav-core`).
+features = ["registry"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxideav-core = "0.1"
 
 # Keep the cargo-fuzz crate out of the umbrella workspace resolve graph:
 # libfuzzer-sys needs nightly and pulls deps that don't belong upstream.
@@ -94,5 +99,17 @@ doc = false
 [[bin]]
 name = "contract_api"
 path = "fuzz_targets/contract_api.rs"
+test = false
+doc = false
+
+# `demux` drives the `openexr` container through the registry: probe,
+# demuxer (single-part pass-through, multi-part byte-level repack of
+# every viewable part into a single-part packet), the registry decoder on
+# each packet, and the muxer's multi-part combine on the demuxed packets
+# plus the raw input. Raw and overlay modes (writer-built scanline /
+# tiled / two-part bases).
+[[bin]]
+name = "demux"
+path = "fuzz_targets/demux.rs"
 test = false
 doc = false
