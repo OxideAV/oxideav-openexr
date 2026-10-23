@@ -1758,7 +1758,7 @@ mod tests {
             .as_chunks::<2>()
             .0
             .iter()
-            .zip(back.chunks_exact(2))
+            .zip(back.as_chunks::<2>().0)
             .enumerate()
         {
             let va = crate::half::half_to_f32(u16::from_le_bytes([a[0], a[1]]));

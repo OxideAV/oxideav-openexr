@@ -371,7 +371,7 @@ fn gather_words(raw: &[u8], shape: &ChunkShape, extents: &[ChannelExtent]) -> Ve
             let dst = bases[ci] + row_of_channel[ci] * row_words;
             for (w, chunk) in words[dst..dst + row_words]
                 .iter_mut()
-                .zip(raw[rp..rp + row_words * 2].chunks_exact(2))
+                .zip(raw[rp..rp + row_words * 2].as_chunks::<2>().0)
             {
                 *w = u16::from_le_bytes([chunk[0], chunk[1]]);
             }
