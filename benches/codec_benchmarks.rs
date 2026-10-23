@@ -12,11 +12,11 @@
 //! CARGO_TARGET_DIR=/tmp/oxideav-openexr-bench cargo bench -p oxideav-openexr
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use oxideav_openexr::{
-    encode_exr_scanline, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
-    LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
+    encode_exr_scanline, parse_exr,
 };
 
 const W: u32 = 256;

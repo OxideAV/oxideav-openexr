@@ -15,8 +15,8 @@
 //! counterpart.
 
 use oxideav_openexr::{
-    encode_exr_multipart_deep_scanline, parse_exr_deep_multipart, parse_exr_multipart_mixed,
-    Channel, Compression, MultipartDeepScanlinePart, PixelType,
+    Channel, Compression, MultipartDeepScanlinePart, PixelType, encode_exr_multipart_deep_scanline,
+    parse_exr_deep_multipart, parse_exr_multipart_mixed,
 };
 
 fn channels() -> Vec<Channel> {

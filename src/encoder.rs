@@ -30,7 +30,7 @@
 
 use crate::decoder::subsampled_dim;
 use crate::error::{ExrError, Result};
-use crate::header::{encode_header, VersionField};
+use crate::header::{VersionField, encode_header};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 
 /// Reduce a binary32 word to its PXR24 24-bit code (observer-spec §1.1):
@@ -237,7 +237,7 @@ pub(crate) fn build_pxr24_block_payload(
         let dst_y = block_y0 + line;
         for ch in channels {
             let ys = ch.y_sampling as u32;
-            if dst_y % ys != 0 {
+            if !dst_y.is_multiple_of(ys) {
                 continue;
             }
             let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
@@ -251,7 +251,7 @@ pub(crate) fn build_pxr24_block_payload(
         let dst_y = block_y0 + line;
         for (ch_idx, ch) in channels.iter().enumerate() {
             let ys = ch.y_sampling as u32;
-            if dst_y % ys != 0 {
+            if !dst_y.is_multiple_of(ys) {
                 continue;
             }
             let xs = ch.x_sampling as u32;
@@ -344,7 +344,7 @@ pub(crate) fn build_b44_block_payload(
         let pw = subsampled_dim(width, xs) as usize;
         // Present chunk rows in source-plane (sub-sampled) coordinates.
         let present_rows: Vec<usize> = (0..lines_in_block as u32)
-            .filter(|&l| (block_y0 + l) % ys == 0)
+            .filter(|&l| (block_y0 + l).is_multiple_of(ys))
             .map(|l| ((block_y0 + l) / ys) as usize)
             .collect();
         let ph = present_rows.len();
@@ -692,7 +692,7 @@ pub fn encode_exr_scanline(
             let y = row0 as usize + line;
             for (ch_idx, ch) in channels.iter().enumerate() {
                 let ys = ch.y_sampling as u32;
-                if (y as u32) % ys != 0 {
+                if !(y as u32).is_multiple_of(ys) {
                     continue;
                 }
                 let xs = ch.x_sampling as u32;

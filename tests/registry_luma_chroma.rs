@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, RuntimeContext, VideoFrame};
-use oxideav_openexr::{luminance_weights_of, parse_exr, ExrPart};
+use oxideav_openexr::{ExrPart, luminance_weights_of, parse_exr};
 
 fn tool_available(name: &str) -> bool {
     Command::new(name)

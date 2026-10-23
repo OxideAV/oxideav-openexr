@@ -10,18 +10,18 @@ use std::io::{Read, Write};
 use crate::decoder::{extract_required, parse_exr};
 use crate::encoder::{encode_exr_scanline, merge_extra_attributes};
 use crate::error::{ExrError, Result};
-use crate::header::{parse_multipart_headers, ParsedHeader, VersionField};
-use crate::image::{string_attribute, ExrImage, Frame, ImageInfo, RgbImage, RgbaImage};
+use crate::header::{ParsedHeader, VersionField, parse_multipart_headers};
+use crate::image::{ExrImage, Frame, ImageInfo, RgbImage, RgbaImage, string_attribute};
 use crate::mipmap_encoder::{
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap_with_attributes,
     encode_exr_tiled_ripmap_with_attributes,
 };
-use crate::multipart_encoder::{encode_exr_multipart_with_attributes, MultipartScanlinePart};
-use crate::multipart_mixed_encoder::{parse_exr_multipart_mixed, MultipartMixedImage};
+use crate::multipart_encoder::{MultipartScanlinePart, encode_exr_multipart_with_attributes};
+use crate::multipart_mixed_encoder::{MultipartMixedImage, parse_exr_multipart_mixed};
 use crate::options::{DecodeOptions, EncodeOptions, LevelMode};
 use crate::tile_encoder::encode_exr_tiled_with_attributes;
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, EXR_MAGIC};
-use crate::view::{flat_to_image, image_to_channels, plan_view, FlatPixels};
+use crate::view::{FlatPixels, flat_to_image, image_to_channels, plan_view};
 
 /// `true` when `bytes` starts with the OpenEXR magic `76 2F 31 01`.
 /// Total, allocation-free, `false` on short input.
@@ -177,13 +177,13 @@ fn check_limits(
         }
         total = total.saturating_add(bytes);
     }
-    if let Some(m) = opts.max_bytes {
-        if total > m {
-            return Err(ExrError::limit(format!(
-                "OpenEXR: decoded planes of all {} parts ({total} bytes) exceed max_bytes {m}",
-                headers.len()
-            )));
-        }
+    if let Some(m) = opts.max_bytes
+        && total > m
+    {
+        return Err(ExrError::limit(format!(
+            "OpenEXR: decoded planes of all {} parts ({total} bytes) exceed max_bytes {m}",
+            headers.len()
+        )));
     }
     Ok(())
 }
@@ -1150,7 +1150,7 @@ mod tests {
     fn padded_plane_is_repacked() {
         let tight = ramp(3, 2, PixelFormat::GrayF32Le);
         let mut padded_data = Vec::new();
-        for row in tight.as_bytes().unwrap().chunks_exact(12) {
+        for row in tight.as_bytes().unwrap().as_chunks::<12>().0 {
             padded_data.extend_from_slice(row);
             padded_data.extend_from_slice(&[0xAA; 4]);
         }

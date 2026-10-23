@@ -19,8 +19,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline, encode_exr_scanline_rgba_float_with, parse_exr, Attribute, AttributeValue,
-    Box2i, Channel, Compression, LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
+    encode_exr_scanline, encode_exr_scanline_rgba_float_with, parse_exr,
 };
 
 fn exrmetrics_available() -> bool {
@@ -304,7 +304,7 @@ fn piz_incompressible_chunk_takes_raw_fallback() {
     }
     let piz_bytes = encode_exr_scanline_rgba_float_with(w, h, &samples, Compression::Piz).unwrap();
     let img = parse_exr(&piz_bytes).unwrap();
-    for (i, chunk) in samples.chunks_exact(4).enumerate() {
+    for (i, chunk) in samples.as_chunks::<4>().0.iter().enumerate() {
         assert_eq!(img.planes[3].samples[i], chunk[0]);
         assert_eq!(img.planes[2].samples[i], chunk[1]);
         assert_eq!(img.planes[1].samples[i], chunk[2]);

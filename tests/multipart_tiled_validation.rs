@@ -12,8 +12,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxideav_openexr::{
-    encode_exr_multipart_tiled, parse_exr, parse_exr_multipart_tiled, Channel, Compression,
-    MultipartTiledPart, PixelType,
+    Channel, Compression, MultipartTiledPart, PixelType, encode_exr_multipart_tiled, parse_exr,
+    parse_exr_multipart_tiled,
 };
 
 fn exrheader_available() -> bool {
@@ -213,33 +213,33 @@ fn exrmultipart_separate_splits_our_multipart_tiled() {
     }
     // If the tool doesn't name parts predictably, fall back to glob-like
     // scan of any *.exr files in the dir except the input.
-    if found_a.is_none() || found_b.is_none() {
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            let mut splits: Vec<String> = Vec::new();
-            for ent in rd.flatten() {
-                let p = ent.path();
-                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                    if name == "in.exr" {
-                        continue;
-                    }
-                    if name.ends_with(".exr") {
-                        splits.push(p.to_string_lossy().into_owned());
-                    }
+    if (found_a.is_none() || found_b.is_none())
+        && let Ok(rd) = std::fs::read_dir(&dir)
+    {
+        let mut splits: Vec<String> = Vec::new();
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                if name == "in.exr" {
+                    continue;
+                }
+                if name.ends_with(".exr") {
+                    splits.push(p.to_string_lossy().into_owned());
                 }
             }
-            splits.sort();
-            if splits.len() == 2 {
-                // Assign by header inspection.
-                for s in &splits {
-                    let header_out = Command::new("exrheader").arg(s).output();
-                    if let Ok(o) = header_out {
-                        let txt = String::from_utf8_lossy(&o.stdout);
-                        if txt.contains("alpha") {
-                            found_a = Some(s.clone());
-                        }
-                        if txt.contains("beta") {
-                            found_b = Some(s.clone());
-                        }
+        }
+        splits.sort();
+        if splits.len() == 2 {
+            // Assign by header inspection.
+            for s in &splits {
+                let header_out = Command::new("exrheader").arg(s).output();
+                if let Ok(o) = header_out {
+                    let txt = String::from_utf8_lossy(&o.stdout);
+                    if txt.contains("alpha") {
+                        found_a = Some(s.clone());
+                    }
+                    if txt.contains("beta") {
+                        found_b = Some(s.clone());
                     }
                 }
             }

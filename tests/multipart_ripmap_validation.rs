@@ -11,9 +11,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxideav_openexr::{
+    Channel, Compression, MultipartRipmapTiledPart, PixelType, RipmapPyramid,
     build_box_filter_ripmap, encode_exr_multipart_tiled_ripmap,
-    parse_exr_multipart_tiled_multilevel, parse_exr_tiled_multilevel, Channel, Compression,
-    MultipartRipmapTiledPart, PixelType, RipmapPyramid,
+    parse_exr_multipart_tiled_multilevel, parse_exr_tiled_multilevel,
 };
 
 fn exrheader_available() -> bool {

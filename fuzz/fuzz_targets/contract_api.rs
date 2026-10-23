@@ -31,9 +31,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_openexr::{
-    decode, decode_all, decode_all_with, decode_rgb8, decode_rgba8, decode_with, encode,
-    encode_all, info, probe, ColourLayout, Compression, DecodeOptions, EncodeOptions, ExrImage,
-    Frame, LevelMode, PixelFormat,
+    ColourLayout, Compression, DecodeOptions, EncodeOptions, ExrImage, Frame, LevelMode,
+    PixelFormat, decode, decode_all, decode_all_with, decode_rgb8, decode_rgba8, decode_with,
+    encode, encode_all, info, probe,
 };
 
 fn ramp(w: u32, h: u32, format: PixelFormat) -> ExrImage {
@@ -71,7 +71,11 @@ fn base_file(sel: u8) -> Option<Vec<u8>> {
     let opts = EncodeOptions::default().with_compression(compression);
     match shape {
         // Scanline, RGB layout, odd one layered.
-        0 => encode(&img, &opts.with_layer(if sel & 0x10 != 0 { "diffuse" } else { "" })).ok(),
+        0 => encode(
+            &img,
+            &opts.with_layer(if sel & 0x10 != 0 { "diffuse" } else { "" }),
+        )
+        .ok(),
         // Luminance/chroma with 2x2 chroma (gray writes Y).
         1 => encode(&img, &opts.with_colour(ColourLayout::LumaChroma)).ok(),
         // Tiled with a level mode.
@@ -145,7 +149,10 @@ fn exercise(bytes: &[u8], sel: u8) {
     let strict = DecodeOptions::default().with_strict(true);
     let _ = decode_with(bytes, &strict);
     let _ = decode_with(bytes, &DecodeOptions::default().with_layer("diffuse"));
-    let _ = decode_with(bytes, &DecodeOptions::default().with_part(u32::from(sel & 1)));
+    let _ = decode_with(
+        bytes,
+        &DecodeOptions::default().with_part(u32::from(sel & 1)),
+    );
     let _ = decode_with(bytes, &DecodeOptions::default().with_part_name("right"));
     let _ = decode_all(bytes);
     let _ = decode_all_with(bytes, &strict);

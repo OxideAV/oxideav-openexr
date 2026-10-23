@@ -32,7 +32,7 @@
 //!      rediscover a valid header from scratch.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_openexr::deep::{encode_exr_deep_scanline, DeepScanlineInput};
+use oxideav_openexr::deep::{DeepScanlineInput, encode_exr_deep_scanline};
 use oxideav_openexr::parse_exr_deep_scanline;
 use oxideav_openexr::types::{Channel, Compression, PixelType};
 

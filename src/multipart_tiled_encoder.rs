@@ -29,9 +29,9 @@
 
 use crate::decoder::{apply_zip_interleave, apply_zip_predictor};
 use crate::error::{ExrError, Result};
-use crate::header::{encode_attribute_value, VersionField};
+use crate::header::{VersionField, encode_attribute_value};
 use crate::types::{
-    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
+    Attribute, AttributeValue, Box2i, Channel, Compression, EXR_MAGIC, LineOrder, PixelType,
 };
 
 /// One flat tiled part for [`encode_exr_multipart_tiled`]. Mirrors the

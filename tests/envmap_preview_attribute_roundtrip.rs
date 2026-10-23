@@ -21,8 +21,8 @@ use std::process::Command;
 
 use oxideav_openexr::header::{encode_attribute_value, parse_attribute_value};
 use oxideav_openexr::{
-    encode_exr_scanline, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression, EnvMap,
-    LineOrder, PixelType, Preview,
+    Attribute, AttributeValue, Box2i, Channel, Compression, EnvMap, LineOrder, PixelType, Preview,
+    encode_exr_scanline, parse_exr,
 };
 
 fn exrheader_available() -> bool {

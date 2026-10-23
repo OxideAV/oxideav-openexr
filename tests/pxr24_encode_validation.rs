@@ -30,7 +30,7 @@
 
 use std::process::Command;
 
-use oxideav_openexr::{encode_exr_scanline_rgba_float_with, parse_exr, Compression};
+use oxideav_openexr::{Compression, encode_exr_scanline_rgba_float_with, parse_exr};
 
 /// Mirror of the PXR24 24-bit float reduction (observer-spec §1.1):
 /// returns the binary32 value a FLOAT sample collapses to after PXR24

@@ -772,10 +772,10 @@ impl ExrImage {
         for px in bytes.chunks_exact(comps) {
             for (c, &b) in px.iter().enumerate() {
                 let mut v = b as f32 / 255.0;
-                if let Some(g) = gamma {
-                    if c < 3 || comps == 1 {
-                        v = v.powf(g);
-                    }
+                if let Some(g) = gamma
+                    && (c < 3 || comps == 1)
+                {
+                    v = v.powf(g);
                 }
                 data.extend_from_slice(&v.to_le_bytes());
             }
@@ -887,7 +887,7 @@ impl ExrImage {
         let w = self.width as usize;
         let mut out = Vec::with_capacity(w * self.height as usize * comps);
         self.for_each_row(|row| {
-            for s in row.chunks_exact(4) {
+            for s in row.as_chunks::<4>().0 {
                 out.push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
             }
         });
@@ -902,7 +902,9 @@ impl ExrImage {
         let bpp = self.bytes_per_pixel();
         let off = y as usize * plane.stride + x as usize * bpp;
         plane.data[off..off + bpp]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|s| f32::from_le_bytes([s[0], s[1], s[2], s[3]]))
             .collect()
     }
@@ -928,7 +930,7 @@ impl ExrImage {
         let mut out: Vec<Vec<f32>> = (0..comps).map(|_| Vec::with_capacity(pixels)).collect();
         self.for_each_row(|row| {
             for px in row.chunks_exact(comps * 4) {
-                for (c, s) in px.chunks_exact(4).enumerate() {
+                for (c, s) in px.as_chunks::<4>().0.iter().enumerate() {
                     out[c].push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
                 }
             }

@@ -24,9 +24,9 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_multipart, encode_exr_scanline, encode_exr_scanline_rgba_float_with,
-    encode_exr_tiled_rgba_float_with, parse_exr, Attribute, AttributeValue, Box2i, Channel,
-    Chromaticities, Compression, LineOrder, MultipartScanlinePart, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Chromaticities, Compression, LineOrder,
+    MultipartScanlinePart, PixelType, encode_exr_multipart, encode_exr_scanline,
+    encode_exr_scanline_rgba_float_with, encode_exr_tiled_rgba_float_with, parse_exr,
 };
 
 fn tool_available(bin: &str) -> bool {

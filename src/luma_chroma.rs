@@ -507,12 +507,13 @@ mod tests {
             wts,
         )
         .unwrap();
-        assert!(back
-            .r
-            .iter()
-            .chain(&back.g)
-            .chain(&back.b)
-            .all(|&v| v == 0.0));
+        assert!(
+            back.r
+                .iter()
+                .chain(&back.g)
+                .chain(&back.b)
+                .all(|&v| v == 0.0)
+        );
     }
 
     #[test]

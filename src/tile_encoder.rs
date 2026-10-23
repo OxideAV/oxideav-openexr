@@ -34,7 +34,7 @@
 
 use crate::decoder::{apply_zip_interleave, apply_zip_predictor};
 use crate::error::{ExrError, Result};
-use crate::header::{encode_header, VersionField};
+use crate::header::{VersionField, encode_header};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 
 /// Build the standard 4-channel RGBA-float tiled-file attribute set
@@ -854,11 +854,7 @@ mod tests {
             }
         } else {
             let r = ((e | m) + (m & 0x80)) >> 8;
-            if r >= 0x7f8000 {
-                (e | m) >> 8
-            } else {
-                r
-            }
+            if r >= 0x7f8000 { (e | m) >> 8 } else { r }
         };
         let code24 = (s >> 8) | i;
         f32::from_bits((code24 & 0x00ff_ffff) << 8)

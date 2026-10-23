@@ -14,8 +14,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline, header::VersionField, parse_exr, Attribute, AttributeValue, Box2i,
-    Channel, Compression, ExrPart, LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, ExrPart, LineOrder, PixelType,
+    encode_exr_scanline, header::VersionField, parse_exr,
 };
 
 fn exrmetrics_available() -> bool {

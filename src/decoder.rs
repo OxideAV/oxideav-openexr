@@ -155,7 +155,7 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
         _ => {
             return Err(ExrError::invalid(
                 "missing required attribute 'channels'".to_string(),
-            ))
+            ));
         }
     };
     let compression = match find_attribute(attrs, "compression") {
@@ -163,7 +163,7 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
         _ => {
             return Err(ExrError::invalid(
                 "missing required attribute 'compression'".to_string(),
-            ))
+            ));
         }
     };
     let data_window = match find_attribute(attrs, "dataWindow") {
@@ -171,7 +171,7 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
         _ => {
             return Err(ExrError::invalid(
                 "missing required attribute 'dataWindow'".to_string(),
-            ))
+            ));
         }
     };
     let display_window = match find_attribute(attrs, "displayWindow") {
@@ -179,7 +179,7 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
         _ => {
             return Err(ExrError::invalid(
                 "missing required attribute 'displayWindow'".to_string(),
-            ))
+            ));
         }
     };
     let line_order = match find_attribute(attrs, "lineOrder") {
@@ -187,7 +187,7 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
         _ => {
             return Err(ExrError::invalid(
                 "missing required attribute 'lineOrder'".to_string(),
-            ))
+            ));
         }
     };
     let pixel_aspect_ratio = match find_attribute(attrs, "pixelAspectRatio") {
@@ -340,7 +340,7 @@ pub(crate) fn decode_pxr24_payload(
         let dst_y = spec.block_y0 + line;
         for ch in spec.sorted_channels {
             let ys = ch.y_sampling as u32;
-            if dst_y % ys != 0 {
+            if !dst_y.is_multiple_of(ys) {
                 continue;
             }
             let pw = subsampled_dim(spec.width, ch.x_sampling as u32) as usize;
@@ -366,7 +366,7 @@ pub(crate) fn decode_pxr24_payload(
         let dst_y = spec.block_y0 + line;
         for ch in spec.sorted_channels {
             let ys = ch.y_sampling as u32;
-            if dst_y % ys != 0 {
+            if !dst_y.is_multiple_of(ys) {
                 continue;
             }
             let pw = subsampled_dim(spec.width, ch.x_sampling as u32) as usize;
@@ -392,7 +392,9 @@ pub(crate) fn decode_pxr24_payload(
                     let (p0, rest) = planes.split_at(pw);
                     let (p1, p2) = rest.split_at(pw);
                     for (((d, &b0), &b1), &b2) in dst
-                        .chunks_exact_mut(4)
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
                         .zip(p0.iter())
                         .zip(p1.iter())
                         .zip(p2.iter())
@@ -404,7 +406,13 @@ pub(crate) fn decode_pxr24_payload(
                 }
                 PixelType::Half => {
                     let (p0, p1) = planes.split_at(pw);
-                    for ((d, &b0), &b1) in dst.chunks_exact_mut(2).zip(p0.iter()).zip(p1.iter()) {
+                    for ((d, &b0), &b1) in dst
+                        .as_chunks_mut::<2>()
+                        .0
+                        .iter_mut()
+                        .zip(p0.iter())
+                        .zip(p1.iter())
+                    {
                         let diff = (u32::from(b0) << 8) | u32::from(b1);
                         acc = acc.wrapping_add(diff);
                         d.copy_from_slice(&((acc & 0xffff) as u16).to_le_bytes());
@@ -415,7 +423,9 @@ pub(crate) fn decode_pxr24_payload(
                     let (p1, rest) = rest.split_at(pw);
                     let (p2, p3) = rest.split_at(pw);
                     for ((((d, &b0), &b1), &b2), &b3) in dst
-                        .chunks_exact_mut(4)
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
                         .zip(p0.iter())
                         .zip(p1.iter())
                         .zip(p2.iter())
@@ -461,7 +471,7 @@ pub(crate) fn scatter_block_into_planes(
         let dst_y = block_y0 as usize + line;
         for (ch_idx, ch) in sorted_channels.iter().enumerate() {
             let ys = ch.y_sampling as u32;
-            if (dst_y as u32) % ys != 0 {
+            if !(dst_y as u32).is_multiple_of(ys) {
                 continue;
             }
             let xs = ch.x_sampling as u32;
@@ -493,13 +503,13 @@ pub(crate) fn scatter_block_into_planes(
                 })?;
             match ch.pixel_type {
                 PixelType::Half => {
-                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
+                    for (d, c) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
                         *d = crate::half::half_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     }
                 }
                 PixelType::Float => {
-                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
-                        *d = f32::from_le_bytes(c.try_into().unwrap());
+                    for (d, c) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
+                        *d = f32::from_le_bytes(*c);
                     }
                 }
                 PixelType::Uint => {
@@ -509,8 +519,8 @@ pub(crate) fn scatter_block_into_planes(
                     // typically integer ID/depth maps that fit in
                     // 24 bits, so this matches the reference
                     // encoder's "as float" behaviour.
-                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
-                        *d = u32::from_le_bytes(c.try_into().unwrap()) as f32;
+                    for (d, c) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
+                        *d = u32::from_le_bytes(*c) as f32;
                     }
                 }
             }
@@ -568,7 +578,7 @@ pub(crate) fn scatter_b44_block_into_planes(
         .map(|ch| {
             let ys = ch.y_sampling as u32;
             let ph = (0..lines_in_block as u32)
-                .filter(|&l| (block_y0 + l) % ys == 0)
+                .filter(|&l| (block_y0 + l).is_multiple_of(ys))
                 .count();
             let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
             crate::b44::B44ChannelExtent { pw, ph }
@@ -589,7 +599,7 @@ pub(crate) fn scatter_b44_block_into_planes(
         let mut chunk_row = 0usize;
         for l in 0..lines_in_block as u32 {
             let dst_y = block_y0 + l;
-            if dst_y % ys != 0 {
+            if !dst_y.is_multiple_of(ys) {
                 continue;
             }
             let dst_y_sub = (dst_y / ys) as usize;
@@ -759,7 +769,7 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrPart> {
             .map(|ch| {
                 let ys = ch.y_sampling as u32;
                 let lines = (0..lines_in_block as u32)
-                    .filter(|&l| (block_y0 + l) % ys == 0)
+                    .filter(|&l| (block_y0 + l).is_multiple_of(ys))
                     .count();
                 let xs = ch.x_sampling as u32;
                 let pw = subsampled_dim(width, xs) as usize;
@@ -830,7 +840,7 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrPart> {
             other => {
                 return Err(ExrError::unsupported(format!(
                     "scanline compression {other:?} not yet implemented"
-                )))
+                )));
             }
         };
 
@@ -975,7 +985,7 @@ pub(crate) fn scatter_tile_into_planes(
         _ => {
             return Err(ExrError::unsupported(format!(
                 "compression {compression:?} not yet implemented for tiled files (tile {tile_idx})"
-            )))
+            )));
         }
     };
 
@@ -1006,18 +1016,18 @@ pub(crate) fn scatter_tile_into_planes(
                 })?;
             match ch.pixel_type {
                 PixelType::Half => {
-                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(2)) {
+                    for (d, c) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
                         *d = crate::half::half_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     }
                 }
                 PixelType::Float => {
-                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
-                        *d = f32::from_le_bytes(c.try_into().unwrap());
+                    for (d, c) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
+                        *d = f32::from_le_bytes(*c);
                     }
                 }
                 PixelType::Uint => {
-                    for (d, c) in dst.iter_mut().zip(src.chunks_exact(4)) {
-                        *d = u32::from_le_bytes(c.try_into().unwrap()) as f32;
+                    for (d, c) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
+                        *d = u32::from_le_bytes(*c) as f32;
                     }
                 }
             }
@@ -1878,7 +1888,7 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrPart>> {
             .map(|ch| {
                 let ys = ch.y_sampling as u32;
                 let lines = (0..lines_in_block as u32)
-                    .filter(|&l| (block_y0 + l) % ys == 0)
+                    .filter(|&l| (block_y0 + l).is_multiple_of(ys))
                     .count();
                 let xs = ch.x_sampling as u32;
                 let pw = subsampled_dim(width, xs) as usize;

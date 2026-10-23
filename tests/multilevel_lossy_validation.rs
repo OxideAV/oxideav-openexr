@@ -16,9 +16,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap,
-    encode_exr_tiled_ripmap, parse_exr, parse_exr_tiled_multilevel, Channel, Compression,
-    PixelType,
+    Channel, Compression, PixelType, build_box_filter_pyramid, build_box_filter_ripmap,
+    encode_exr_tiled_mipmap, encode_exr_tiled_ripmap, parse_exr, parse_exr_tiled_multilevel,
 };
 
 fn tool_available(bin: &str) -> bool {

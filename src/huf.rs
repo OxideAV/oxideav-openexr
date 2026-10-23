@@ -413,7 +413,7 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
     }
     // Consume `n` (1..=56) bits, MSB-first; errors past the limit.
     macro_rules! get {
-        ($n:expr) => {{
+        ($n:expr_2021) => {{
             let n: u32 = $n;
             if pos + n as u64 > limit {
                 return Err(exhausted());
@@ -514,7 +514,7 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
                     "Huffman payload: run overruns expected output".to_string(),
                 ));
             }
-            out.extend(std::iter::repeat(prev).take(cnt));
+            out.extend(std::iter::repeat_n(prev, cnt));
         } else {
             out.push((sym & 0xFFFF) as u16);
         }
@@ -581,7 +581,7 @@ fn build_code_lengths(freqs: &[u64], lengths: &mut [u8]) {
             heap.push(std::cmp::Reverse((wa + wb, idx)));
         }
         // Depth-assign iteratively.
-        let root = heap.pop().unwrap().0 .1;
+        let root = heap.pop().unwrap().0.1;
         let mut stack = vec![(root, 0u8)];
         let mut max_depth = 0u8;
         let mut depths: Vec<(usize, u8)> = Vec::with_capacity(coded.len());
@@ -730,7 +730,7 @@ mod tests {
         // Values at both alphabet ends force a wide im..iM span with long
         // zero runs in the code-length table.
         let mut vals = vec![0u16; 100];
-        vals.extend(std::iter::repeat(65535u16).take(100));
+        vals.extend(std::iter::repeat_n(65535u16, 100));
         vals.extend((0..50).map(|i| (i * 1000) as u16));
         roundtrip(&vals);
     }
@@ -749,7 +749,7 @@ mod tests {
         // Highest value present is 65535, so the escape lands on index
         // 65536 (the u16-truncation-ambiguous slot).
         let mut vals: Vec<u16> = (65000..=65535).collect();
-        vals.extend(std::iter::repeat(65535u16).take(300));
+        vals.extend(std::iter::repeat_n(65535u16, 300));
         roundtrip(&vals);
     }
 

@@ -27,10 +27,10 @@
 #![allow(deprecated)]
 
 use oxideav_openexr::{
+    Channel, Compression, MipmapLevel, PixelType, RipmapLevel, RipmapPyramid,
     encode_exr_scanline_rgba_float_with, encode_exr_tiled_mipmap, encode_exr_tiled_rgba_float_with,
     encode_exr_tiled_ripmap, mipmap_level_count, mipmap_level_dim, parse_exr,
-    parse_exr_tiled_multilevel, Channel, Compression, MipmapLevel, PixelType, RipmapLevel,
-    RipmapPyramid,
+    parse_exr_tiled_multilevel,
 };
 
 fn rgba_channels() -> Vec<Channel> {

@@ -15,8 +15,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_multipart_rgba_float_with, encode_exr_tiled_rgba_float_with, parse_exr,
-    parse_exr_multipart, Compression,
+    Compression, encode_exr_multipart_rgba_float_with, encode_exr_tiled_rgba_float_with, parse_exr,
+    parse_exr_multipart,
 };
 
 fn tool_available(name: &str) -> bool {

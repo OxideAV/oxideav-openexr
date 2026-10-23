@@ -16,11 +16,11 @@
 #![allow(clippy::type_complexity)]
 
 use oxideav_openexr::{
+    Channel, Compression, MultipartScanlinePart, MultipartTiledPart, PixelType,
     encode_exr_multipart, encode_exr_multipart_tiled, encode_exr_scanline_rgba_float,
     encode_exr_tiled_rgba_float_mipmap_box_filter, encode_exr_tiled_rgba_float_ripmap_box_filter,
     encode_exr_tiled_rgba_float_with, parse_exr, parse_exr_multipart, parse_exr_multipart_tiled,
-    parse_exr_tiled_multilevel, Channel, Compression, MultipartScanlinePart, MultipartTiledPart,
-    PixelType,
+    parse_exr_tiled_multilevel,
 };
 
 fn rgba(w: u32, h: u32) -> Vec<f32> {
@@ -150,8 +150,8 @@ fn multipart_tiled_hostile_window_never_panics() {
 #[test]
 fn multipart_tiled_mipmap_hostile_window_never_panics() {
     use oxideav_openexr::{
-        encode_exr_multipart_tiled_mipmap, parse_exr_multipart_tiled_multilevel, MipmapLevel,
-        MultipartMipmapTiledPart,
+        MipmapLevel, MultipartMipmapTiledPart, encode_exr_multipart_tiled_mipmap,
+        parse_exr_multipart_tiled_multilevel,
     };
     let w = 8u32;
     let h = 8u32;
@@ -191,8 +191,8 @@ fn multipart_tiled_mipmap_hostile_window_never_panics() {
 #[test]
 fn multipart_tiled_ripmap_hostile_window_never_panics() {
     use oxideav_openexr::{
-        encode_exr_multipart_tiled_ripmap, parse_exr_multipart_tiled_multilevel, MipmapLevel,
-        MultipartRipmapTiledPart, RipmapPyramid,
+        MipmapLevel, MultipartRipmapTiledPart, RipmapPyramid, encode_exr_multipart_tiled_ripmap,
+        parse_exr_multipart_tiled_multilevel,
     };
     let w = 8u32;
     let h = 4u32;
@@ -241,8 +241,8 @@ fn multipart_tiled_ripmap_hostile_window_never_panics() {
 #[test]
 fn mixed_deep_ripmap_hostile_window_never_panics() {
     use oxideav_openexr::{
-        encode_exr_multipart_mixed, parse_exr_multipart_mixed, DeepRipmapTiledLevelInput,
-        MultipartMixedPart,
+        DeepRipmapTiledLevelInput, MultipartMixedPart, encode_exr_multipart_mixed,
+        parse_exr_multipart_mixed,
     };
     let w = 8u32;
     let h = 4u32;

@@ -27,12 +27,12 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
+    Channel, Compression, DeepMipmapTiledInput, DeepMipmapTiledLevelInput, DeepRipmapTiledInput,
+    DeepRipmapTiledLevelInput, DeepScanlineInput, DeepTiledInput, MultipartDeepScanlinePart,
+    PixelType, encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
     encode_exr_deep_tiled_ripmap, encode_exr_multipart_deep_scanline, parse_exr_deep_multipart,
     parse_exr_deep_scanline, parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap,
-    parse_exr_deep_tiled_ripmap, Channel, Compression, DeepMipmapTiledInput,
-    DeepMipmapTiledLevelInput, DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepScanlineInput,
-    DeepTiledInput, MultipartDeepScanlinePart, PixelType,
+    parse_exr_deep_tiled_ripmap,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -471,7 +471,7 @@ fn deep_multipart_multi_row_zips_via_combine() {
 
 #[test]
 fn deep_multipart_rejects_flat_multipart() {
-    use oxideav_openexr::{encode_exr_multipart_rgba_float_with, Compression};
+    use oxideav_openexr::{Compression, encode_exr_multipart_rgba_float_with};
     // A flat multi-part file should not be readable as a deep multi-part.
     let bytes = encode_exr_multipart_rgba_float_with(&[(
         "x".to_string(),

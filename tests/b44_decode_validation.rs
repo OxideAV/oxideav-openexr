@@ -22,7 +22,7 @@
 use std::process::Command;
 
 use oxideav_openexr::types::{Channel, PixelType};
-use oxideav_openexr::{encode_exr_scanline, parse_exr, Compression};
+use oxideav_openexr::{Compression, encode_exr_scanline, parse_exr};
 
 fn exrmetrics_available() -> bool {
     Command::new("exrmetrics")
@@ -87,7 +87,7 @@ fn external_b44_roundtrip(
     h: u32,
     scheme: &str,
     p_linear: bool,
-    gen: impl Fn(usize, usize) -> f32,
+    r#gen: impl Fn(usize, usize) -> f32,
 ) {
     if !exrmetrics_available() {
         eprintln!("exrmetrics not available, skipping B44 round-trip ({w}x{h})");
@@ -112,7 +112,7 @@ fn external_b44_roundtrip(
     let pixels = (w * h) as usize;
     // One plane per channel in alphabetical order A, B, G, R.
     let planes_owned: Vec<Vec<f32>> = (0..4)
-        .map(|ci| (0..pixels).map(|i| gen(i, ci)).collect())
+        .map(|ci| (0..pixels).map(|i| r#gen(i, ci)).collect())
         .collect();
     let planes: Vec<&[f32]> = planes_owned.iter().map(|v| v.as_slice()).collect();
 

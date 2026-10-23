@@ -5,7 +5,7 @@
 //! `tests/deep_validation.rs`.
 
 use oxideav_openexr::{
-    encode_exr_deep_scanline, Channel, Compression, DeepScanlineInput, PixelType,
+    Channel, Compression, DeepScanlineInput, PixelType, encode_exr_deep_scanline,
 };
 
 fn main() {

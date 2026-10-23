@@ -3,7 +3,7 @@
 //! `exrheader` / `exrinfo` command-line tools (and as a smoke test for
 //! Cargo example builds).
 
-use oxideav_openexr::{encode, Compression, EncodeOptions, ExrImage, PixelFormat};
+use oxideav_openexr::{Compression, EncodeOptions, ExrImage, PixelFormat, encode};
 
 fn main() {
     let path = std::env::args()

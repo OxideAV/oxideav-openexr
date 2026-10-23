@@ -7,7 +7,7 @@
 
 use oxideav_core::{CodecId, CodecParameters, Frame, PixelFormat, RuntimeContext, VideoFrame};
 use oxideav_openexr::half::{f32_to_half, half_to_f32};
-use oxideav_openexr::{parse_exr, PixelType};
+use oxideav_openexr::{PixelType, parse_exr};
 
 const LOSSLESS: [&str; 5] = ["none", "rle", "zips", "zip", "piz"];
 const LOSSY: [&str; 5] = ["pxr24", "b44", "b44a", "dwaa", "dwab"];
@@ -28,9 +28,9 @@ fn ctx() -> RuntimeContext {
 fn sample(w: u32, x: usize, y: usize, c: usize) -> f32 {
     let t = (y * w as usize + x) as f32 / (w as f32 * 4.0);
     let base = 0.25 + t * 1.5 + c as f32 * 0.375;
-    if (x + y) % 7 == 0 {
+    if (x + y).is_multiple_of(7) {
         base * 12.0
-    } else if (x * 3 + y) % 11 == 0 {
+    } else if (x * 3 + y).is_multiple_of(11) {
         -base * 0.5
     } else {
         base
@@ -111,10 +111,11 @@ fn float_channels_round_trip_bit_exact_through_the_registry() {
             let (bytes, vf) = roundtrip(w, h, format, comps, "float", codec, sample);
             let img = parse_exr(&bytes).unwrap();
             assert_eq!(img.channels.len(), comps, "{format:?}/{codec}");
-            assert!(img
-                .channels
-                .iter()
-                .all(|c| c.pixel_type == PixelType::Float));
+            assert!(
+                img.channels
+                    .iter()
+                    .all(|c| c.pixel_type == PixelType::Float)
+            );
             assert_eq!(vf.planes[0].stride, format.plane_row_bytes(0, w).unwrap());
             assert_eq!(
                 vf.planes[0].data.len(),

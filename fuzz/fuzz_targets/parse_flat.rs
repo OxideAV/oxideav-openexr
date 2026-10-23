@@ -1,7 +1,6 @@
 // The pre-contract `*_rgba_float*` writers stay as deprecated wrappers
 // for one release; this file exercises them on purpose.
 #![allow(deprecated)]
-
 #![no_main]
 
 //! Coverage-guided fuzz harness for the single-part FLAT decode entry
@@ -36,11 +35,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_openexr::{
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_scanline,
     encode_exr_scanline_rgba_float_with_line_order, encode_exr_tiled_mipmap,
     encode_exr_tiled_rgba_float_with_line_order, encode_exr_tiled_ripmap, parse_exr,
-    parse_exr_tiled_multilevel, Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder,
-    PixelType,
+    parse_exr_tiled_multilevel,
 };
 
 fn rgba(w: u32, h: u32) -> Vec<f32> {

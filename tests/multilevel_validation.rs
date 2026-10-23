@@ -20,8 +20,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline_rgba_float_with, mipmap_level_count, mipmap_level_dim, parse_exr,
-    parse_exr_multipart, Compression,
+    Compression, encode_exr_scanline_rgba_float_with, mipmap_level_count, mipmap_level_dim,
+    parse_exr, parse_exr_multipart,
 };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

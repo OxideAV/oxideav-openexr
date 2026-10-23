@@ -24,8 +24,8 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_openexr::chunk_api::decode_scanline_chunk;
 use oxideav_openexr::{
-    encode_exr_scanline, parse_header, Attribute, AttributeValue, Box2i, Channel, Compression,
-    LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
+    encode_exr_scanline, parse_header,
 };
 
 fn ch(name: &str, pt: PixelType, p_linear: bool, sx: i32, sy: i32) -> Channel {
@@ -137,8 +137,15 @@ fn valid_chunk(compression: Compression, chs: &[Channel], w: u32, lines: u32) ->
         })
         .collect();
     let refs: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
-    let file = encode_exr_scanline(w, lines, chs, &refs, compression, attrs(w, lines, chs, compression))
-        .ok()?;
+    let file = encode_exr_scanline(
+        w,
+        lines,
+        chs,
+        &refs,
+        compression,
+        attrs(w, lines, chs, compression),
+    )
+    .ok()?;
     let hdr = parse_header(&file).ok()?;
     let start = hdr.end_offset + 8 + 8;
     file.get(start..).map(|p| p.to_vec())

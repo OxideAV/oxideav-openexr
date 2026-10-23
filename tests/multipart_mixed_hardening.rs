@@ -10,8 +10,8 @@
 #![allow(clippy::type_complexity)]
 
 use oxideav_openexr::{
-    encode_exr_multipart_mixed, parse_exr_multipart_mixed, Channel, Compression,
-    DeepMipmapTiledLevelInput, MultipartMixedPart, PixelType,
+    Channel, Compression, DeepMipmapTiledLevelInput, MultipartMixedPart, PixelType,
+    encode_exr_multipart_mixed, parse_exr_multipart_mixed,
 };
 
 fn channels_rgba_float() -> Vec<Channel> {

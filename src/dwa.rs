@@ -671,7 +671,7 @@ fn parse_rule_block(data: &[u8]) -> Result<(Vec<WireRule>, usize)> {
             other => {
                 return Err(ExrError::invalid(format!(
                     "DWA: rule scheme {other} invalid"
-                )))
+                )));
             }
         };
         let csc_slot = ((flag >> 4) & 0xF) as i8 - 1;
@@ -794,7 +794,9 @@ pub(crate) fn decode_dwa_payload(
                     )));
                 }
                 bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect()
             }
@@ -815,7 +817,9 @@ pub(crate) fn decode_dwa_payload(
         }
         let native = crate::decoder::undo_zip_pipeline_pub(raw);
         native
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect()
     } else {
@@ -1065,7 +1069,9 @@ pub(crate) fn decode_dwa_payload(
                     match ch.pixel_type {
                         PixelType::Half => {
                             for (d, &code) in dst
-                                .chunks_exact_mut(2)
+                                .as_chunks_mut::<2>()
+                                .0
+                                .iter_mut()
                                 .zip(plane[row * e.nx..(row + 1) * e.nx].iter())
                             {
                                 d.copy_from_slice(&code.to_le_bytes());
@@ -1073,7 +1079,9 @@ pub(crate) fn decode_dwa_payload(
                         }
                         PixelType::Float => {
                             for (d, &code) in dst
-                                .chunks_exact_mut(4)
+                                .as_chunks_mut::<4>()
+                                .0
+                                .iter_mut()
                                 .zip(plane[row * e.nx..(row + 1) * e.nx].iter())
                             {
                                 d.copy_from_slice(&crate::half::half_to_f32(code).to_le_bytes());
@@ -1236,7 +1244,7 @@ pub(crate) fn dwa_compress(raw: &[u8], shape: &ChunkShape, level: f32) -> Result
             let mut plane = Vec::with_capacity(nx * ny);
             match ch.pixel_type {
                 PixelType::Half => {
-                    for c in region.chunks_exact(2) {
+                    for c in region.as_chunks::<2>().0 {
                         let mut code = u16::from_le_bytes([c[0], c[1]]);
                         if !ch.p_linear {
                             code = to_nonlinear(code);
@@ -1245,8 +1253,8 @@ pub(crate) fn dwa_compress(raw: &[u8], shape: &ChunkShape, level: f32) -> Result
                     }
                 }
                 PixelType::Float => {
-                    for c in region.chunks_exact(4) {
-                        let v = f32::from_le_bytes(c.try_into().unwrap());
+                    for c in region.as_chunks::<4>().0 {
+                        let v = f32::from_le_bytes(*c);
                         let mut code = f32_to_half_clamped(v);
                         if !ch.p_linear {
                             code = to_nonlinear(code);
@@ -1258,7 +1266,7 @@ pub(crate) fn dwa_compress(raw: &[u8], shape: &ChunkShape, level: f32) -> Result
                     return Err(ExrError::invalid(format!(
                         "DWA: UINT channel '{}' cannot take the lossy path",
                         ch.name
-                    )))
+                    )));
                 }
             }
             planes.push(plane);
@@ -1698,7 +1706,7 @@ mod tests {
         // Constant blocks survive DCT + quantisation near-exactly; with
         // pLinear set there is no LUT wobble on top, so demand the
         // exact code back.
-        for chunk in back.chunks_exact(2) {
+        for chunk in back.as_chunks::<2>().0 {
             let got = u16::from_le_bytes([chunk[0], chunk[1]]);
             let a = crate::half::half_to_f32(got);
             let b = crate::half::half_to_f32(code);
@@ -1746,7 +1754,13 @@ mod tests {
         let payload = dwa_compress(&raw, &shape, DEFAULT_DWA_LEVEL).unwrap();
         let back = decode_dwa_payload(&payload, &shape, raw.len()).unwrap();
         assert_eq!(back.len(), raw.len());
-        for (i, (a, b)) in raw.chunks_exact(2).zip(back.chunks_exact(2)).enumerate() {
+        for (i, (a, b)) in raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(back.chunks_exact(2))
+            .enumerate()
+        {
             let va = crate::half::half_to_f32(u16::from_le_bytes([a[0], a[1]]));
             let vb = crate::half::half_to_f32(u16::from_le_bytes([b[0], b[1]]));
             assert!(

@@ -8,9 +8,9 @@
 #![allow(deprecated)]
 
 use oxideav_openexr::{
-    encode_exr_scanline, encode_exr_scanline_rgba_float_with, header::encode_header,
-    header::VersionField, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
-    LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
+    encode_exr_scanline, encode_exr_scanline_rgba_float_with, header::VersionField,
+    header::encode_header, parse_exr,
 };
 
 fn make_sample_image(w: u32, h: u32) -> Vec<f32> {
@@ -259,7 +259,7 @@ fn roundtrip_subsampled_chroma_yby_ry() {
         // Channels in alphabetical order: BY, RY, Y
         for ch in &chs {
             let ys = ch.y_sampling as u32;
-            if row % ys != 0 {
+            if !row.is_multiple_of(ys) {
                 continue;
             }
             let plane: &[f32] = match ch.name.as_str() {

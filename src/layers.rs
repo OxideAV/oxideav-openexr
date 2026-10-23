@@ -146,11 +146,11 @@ pub fn enumerate_layers(channels: &[Channel], attributes: &[Attribute]) -> Vec<E
             }),
         }
     }
-    if let Some(pos) = layers.iter().position(|l| l.name.is_empty()) {
-        if pos != 0 {
-            let base = layers.remove(pos);
-            layers.insert(0, base);
-        }
+    if let Some(pos) = layers.iter().position(|l| l.name.is_empty())
+        && pos != 0
+    {
+        let base = layers.remove(pos);
+        layers.insert(0, base);
     }
     for layer in &mut layers {
         layer.kind = classify(

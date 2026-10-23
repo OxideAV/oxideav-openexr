@@ -26,8 +26,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
-    ExrPart, LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, ExrPart, LineOrder, PixelType,
+    encode_exr_scanline, parse_exr,
 };
 
 fn exrmetrics_available() -> bool {
@@ -114,11 +114,7 @@ fn pxr24_reduce(v: f32) -> f32 {
         // Finite: add the round bit and shift; on exponent overflow
         // redo by truncation.
         let r = (em + (m & 0x80)) >> 8;
-        if r >= 0x7f_8000 {
-            em >> 8
-        } else {
-            r
-        }
+        if r >= 0x7f_8000 { em >> 8 } else { r }
     };
     f32::from_bits(((sign >> 8) | i) << 8)
 }

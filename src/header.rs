@@ -17,8 +17,8 @@
 use crate::error::{ExrError, Result};
 use crate::tiled::TileDesc;
 use crate::types::{
-    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EnvMap, Keycode,
-    LineOrder, PixelType, Preview, Timecode, EXR_MAGIC,
+    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EXR_MAGIC,
+    EnvMap, Keycode, LineOrder, PixelType, Preview, Timecode,
 };
 
 /// Decoded version field flags.
@@ -651,15 +651,17 @@ pub fn parse_attribute_value(type_name: &str, data: &[u8]) -> Result<AttributeVa
             }))
         }
         "floatvector" => {
-            if data.len() % 4 != 0 {
+            if !data.len().is_multiple_of(4) {
                 return Err(ExrError::invalid(format!(
                     "floatvector payload size {} is not a multiple of 4",
                     data.len()
                 )));
             }
             let values = data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
                 .collect();
             Ok(AttributeValue::FloatVector(values))
         }

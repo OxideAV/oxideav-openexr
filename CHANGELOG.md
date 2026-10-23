@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- edition 2024, MSRV 1.95
+
 ## [0.0.7](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.6...v0.0.7) - 2026-10-05
 
 ### Added
@@ -1351,7 +1355,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch and the chunk-level `lvlx != 0 || lvly != 0` branch surface
   pointer messages).
 
-
 ## [0.0.3](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.2...v0.0.3) - 2026-05-30
 
 ### Other
@@ -1618,7 +1621,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documentation alone (algorithm sketched in the Technical
   Introduction but exact byte layout is left to the reference source,
   which is off-limits).
-
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.1...v0.0.2) - 2026-05-07
 

@@ -111,23 +111,23 @@ pub use api::{
     encode, encode_all, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 pub use decoder::{
-    mipmap_level_count, mipmap_level_dim, parse_exr, parse_exr_multipart,
-    parse_exr_multipart_tiled, parse_exr_multipart_tiled_multilevel, parse_exr_tiled_multilevel,
-    MultilevelTiledImage, MultilevelTiledPart, TiledLevel,
+    MultilevelTiledImage, MultilevelTiledPart, TiledLevel, mipmap_level_count, mipmap_level_dim,
+    parse_exr, parse_exr_multipart, parse_exr_multipart_tiled,
+    parse_exr_multipart_tiled_multilevel, parse_exr_tiled_multilevel,
 };
 pub use deep::{
+    DeepExrImage, DeepMipmapTiledImage, DeepMipmapTiledInput, DeepMipmapTiledLevelInput,
+    DeepMipmapTiledPart, DeepRipmapTiledImage, DeepRipmapTiledInput, DeepRipmapTiledLevelInput,
+    DeepRipmapTiledPart, DeepScanlineInput, DeepScanlinePart, DeepTiledImage, DeepTiledInput,
+    DeepTiledMipmapLevel, DeepTiledPart, DeepTiledRipmapCell, MultipartDeepMipmapTiledPart,
+    MultipartDeepRipmapTiledPart, MultipartDeepScanlinePart, MultipartDeepTiledPart,
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
     encode_exr_deep_tiled_ripmap, encode_exr_multipart_deep_scanline,
     encode_exr_multipart_deep_tiled, encode_exr_multipart_deep_tiled_mipmap,
     encode_exr_multipart_deep_tiled_ripmap, parse_exr_deep_multipart, parse_exr_deep_scanline,
     parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap, parse_exr_deep_tiled_ripmap,
     parse_exr_multipart_deep_tiled, parse_exr_multipart_deep_tiled_mipmap,
-    parse_exr_multipart_deep_tiled_ripmap, DeepExrImage, DeepMipmapTiledImage,
-    DeepMipmapTiledInput, DeepMipmapTiledLevelInput, DeepMipmapTiledPart, DeepRipmapTiledImage,
-    DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepRipmapTiledPart, DeepScanlineInput,
-    DeepScanlinePart, DeepTiledImage, DeepTiledInput, DeepTiledMipmapLevel, DeepTiledPart,
-    DeepTiledRipmapCell, MultipartDeepMipmapTiledPart, MultipartDeepRipmapTiledPart,
-    MultipartDeepScanlinePart, MultipartDeepTiledPart,
+    parse_exr_multipart_deep_tiled_ripmap,
 };
 #[allow(deprecated)]
 pub use encoder::{
@@ -136,38 +136,38 @@ pub use encoder::{
 };
 pub use error::{Error, ExrError, Result};
 pub use header::{
-    encode_header, parse_header, parse_multipart_headers, ParsedHeader, VersionField,
+    ParsedHeader, VersionField, encode_header, parse_header, parse_multipart_headers,
 };
 pub use image::{
     ColorInfo, ColorRange, ExrImage, ExrPixelFormat, Frame, ImageInfo, Metadata, PixelFormat,
     Plane, RgbImage, RgbaImage,
 };
 pub use layers::{
-    enumerate_layers, find_layer, multi_view, split_channel_name, ExrLayer, LayerKind,
+    ExrLayer, LayerKind, enumerate_layers, find_layer, multi_view, split_channel_name,
 };
 pub use luma_chroma::{
-    chromaticities_of, downsample_tent, luma_chroma_to_rgb, luminance_weights,
-    luminance_weights_of, rgb_to_luma_chroma, upsample_bilinear, ChromaPlane, LumaChromaPlanes,
-    RgbPlanes, BT709_CHROMATICITIES,
+    BT709_CHROMATICITIES, ChromaPlane, LumaChromaPlanes, RgbPlanes, chromaticities_of,
+    downsample_tent, luma_chroma_to_rgb, luminance_weights, luminance_weights_of,
+    rgb_to_luma_chroma, upsample_bilinear,
 };
 #[allow(deprecated)]
 pub use mipmap_encoder::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap,
-    encode_exr_tiled_mipmap_with_line_order, encode_exr_tiled_rgba_float_mipmap_box_filter,
-    encode_exr_tiled_rgba_float_ripmap_box_filter, encode_exr_tiled_ripmap,
-    encode_exr_tiled_ripmap_with_line_order, mipmap_level_count_round_down,
-    ripmap_level_counts_round_down, MipmapLevel, RipmapLevel, RipmapPyramid,
+    MipmapLevel, RipmapLevel, RipmapPyramid, build_box_filter_pyramid, build_box_filter_ripmap,
+    encode_exr_tiled_mipmap, encode_exr_tiled_mipmap_with_line_order,
+    encode_exr_tiled_rgba_float_mipmap_box_filter, encode_exr_tiled_rgba_float_ripmap_box_filter,
+    encode_exr_tiled_ripmap, encode_exr_tiled_ripmap_with_line_order,
+    mipmap_level_count_round_down, ripmap_level_counts_round_down,
 };
 #[allow(deprecated)]
 pub use multipart_encoder::{
-    encode_exr_multipart, encode_exr_multipart_rgba_float_with, MultipartScanlinePart,
+    MultipartScanlinePart, encode_exr_multipart, encode_exr_multipart_rgba_float_with,
 };
-pub use multipart_mipmap_encoder::{encode_exr_multipart_tiled_mipmap, MultipartMipmapTiledPart};
+pub use multipart_mipmap_encoder::{MultipartMipmapTiledPart, encode_exr_multipart_tiled_mipmap};
 pub use multipart_mixed_encoder::{
-    encode_exr_multipart_mixed, parse_exr_multipart_mixed, MultipartMixedImage, MultipartMixedPart,
+    MultipartMixedImage, MultipartMixedPart, encode_exr_multipart_mixed, parse_exr_multipart_mixed,
 };
-pub use multipart_ripmap_encoder::{encode_exr_multipart_tiled_ripmap, MultipartRipmapTiledPart};
-pub use multipart_tiled_encoder::{encode_exr_multipart_tiled, MultipartTiledPart};
+pub use multipart_ripmap_encoder::{MultipartRipmapTiledPart, encode_exr_multipart_tiled_ripmap};
+pub use multipart_tiled_encoder::{MultipartTiledPart, encode_exr_multipart_tiled};
 pub use options::{ColourLayout, DecodeOptions, EncodeOptions, LevelMode};
 pub use part::{ExrPart, ExrPlane};
 #[allow(deprecated)]
@@ -176,8 +176,8 @@ pub use tile_encoder::{
     encode_exr_tiled_rgba_float_with_line_order, encode_exr_tiled_with_line_order,
 };
 pub use types::{
-    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EnvMap, Keycode,
-    LineOrder, PixelType, Preview, Timecode, EXR_MAGIC,
+    Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EXR_MAGIC,
+    EnvMap, Keycode, LineOrder, PixelType, Preview, Timecode,
 };
 
 #[cfg(feature = "registry")]

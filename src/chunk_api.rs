@@ -4,8 +4,8 @@
 //! rustdoc / semver); the file-level readers are the public route.
 
 use crate::decoder::{
-    decode_pxr24_payload, decode_rle_payload, decode_zip_payload, scatter_b44_block_into_planes,
-    scatter_block_into_planes, subsampled_dim, Pxr24RowSpec,
+    Pxr24RowSpec, decode_pxr24_payload, decode_rle_payload, decode_zip_payload,
+    scatter_b44_block_into_planes, scatter_block_into_planes, subsampled_dim,
 };
 use crate::error::{ExrError, Result};
 use crate::part::ExrPlane;
@@ -25,7 +25,7 @@ pub fn native_chunk_size(
     for ch in sorted_channels {
         let ys = ch.y_sampling.max(1) as u32;
         let rows = (0..lines_in_block as u32)
-            .filter(|&l| (block_y0 + l) % ys == 0)
+            .filter(|&l| (block_y0 + l).is_multiple_of(ys))
             .count();
         let pw = subsampled_dim(width, ch.x_sampling.max(1) as u32) as usize;
         total += rows * pw * ch.pixel_type.bytes_per_sample();

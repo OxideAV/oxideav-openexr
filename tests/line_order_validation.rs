@@ -27,11 +27,11 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_scanline_rgba_float_with,
-    encode_exr_scanline_rgba_float_with_line_order, encode_exr_tiled_mipmap,
-    encode_exr_tiled_mipmap_with_line_order, encode_exr_tiled_rgba_float_with,
-    encode_exr_tiled_rgba_float_with_line_order, encode_exr_tiled_ripmap_with_line_order,
-    parse_exr, parse_exr_tiled_multilevel, Channel, Compression, LineOrder, PixelType,
+    Channel, Compression, LineOrder, PixelType, build_box_filter_pyramid, build_box_filter_ripmap,
+    encode_exr_scanline_rgba_float_with, encode_exr_scanline_rgba_float_with_line_order,
+    encode_exr_tiled_mipmap, encode_exr_tiled_mipmap_with_line_order,
+    encode_exr_tiled_rgba_float_with, encode_exr_tiled_rgba_float_with_line_order,
+    encode_exr_tiled_ripmap_with_line_order, parse_exr, parse_exr_tiled_multilevel,
 };
 
 fn tool_available(bin: &str) -> bool {

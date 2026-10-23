@@ -15,8 +15,8 @@
 //! encode/decode pair — no external tool needed.
 
 use oxideav_openexr::{
-    encode_exr_multipart_mixed, parse_exr_multipart_mixed, Channel, Compression,
-    MultipartMixedPart, PixelType,
+    Channel, Compression, MultipartMixedPart, PixelType, encode_exr_multipart_mixed,
+    parse_exr_multipart_mixed,
 };
 use std::process::Command;
 
@@ -384,7 +384,7 @@ fn mixed_pxr24_and_b44_and_zip_in_one_file() {
 // Multi-level (MIPMAP / RIPMAP) flat tiled parts now carry PXR24 / B44.
 // ---------------------------------------------------------------------------
 
-use oxideav_openexr::{build_box_filter_pyramid, build_box_filter_ripmap, MultipartMixedImage};
+use oxideav_openexr::{MultipartMixedImage, build_box_filter_pyramid, build_box_filter_ripmap};
 
 /// Re-encode each decoded level through the given scheme via the ONE_LEVEL
 /// tiled path and decode again, twice with the same chunk shape; from

@@ -11,7 +11,7 @@
 
 use std::process::Command;
 
-use oxideav_openexr::{encode_exr_scanline_rgba_float_with, parse_exr, Compression};
+use oxideav_openexr::{Compression, encode_exr_scanline_rgba_float_with, parse_exr};
 
 fn exrmaketiled_available() -> bool {
     Command::new("exrmaketiled")

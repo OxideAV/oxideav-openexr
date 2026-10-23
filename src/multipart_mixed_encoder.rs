@@ -53,26 +53,25 @@
 //! in arbitrary order.
 
 use crate::decoder::{
-    apply_zip_interleave, apply_zip_predictor, decode_pxr24_payload, extract_required,
-    find_chunk_count, find_part_type, mipmap_level_count, mipmap_level_dim,
-    scatter_b44_block_into_planes, scatter_tile_into_planes, subsampled_dim, MultilevelTiledPart,
-    Pxr24RowSpec, RequiredAttrs, TiledLevel,
+    MultilevelTiledPart, Pxr24RowSpec, RequiredAttrs, TiledLevel, apply_zip_interleave,
+    apply_zip_predictor, decode_pxr24_payload, extract_required, find_chunk_count, find_part_type,
+    mipmap_level_count, mipmap_level_dim, scatter_b44_block_into_planes, scatter_tile_into_planes,
+    subsampled_dim,
 };
 use crate::deep::{
-    compress_buffer, cumulative_inclusive, decompress_buffer, find_string_attr,
-    per_pixel_from_cumulative, DeepMipmapTiledLevelInput, DeepMipmapTiledPart,
-    DeepRipmapTiledLevelInput, DeepRipmapTiledPart, DeepScanlinePart, DeepTiledMipmapLevel,
-    DeepTiledPart, DeepTiledRipmapCell,
+    DeepMipmapTiledLevelInput, DeepMipmapTiledPart, DeepRipmapTiledLevelInput, DeepRipmapTiledPart,
+    DeepScanlinePart, DeepTiledMipmapLevel, DeepTiledPart, DeepTiledRipmapCell, compress_buffer,
+    cumulative_inclusive, decompress_buffer, find_string_attr, per_pixel_from_cumulative,
 };
 use crate::error::{ExrError, Result};
-use crate::header::{encode_attribute_value, parse_multipart_headers, VersionField};
+use crate::header::{VersionField, encode_attribute_value, parse_multipart_headers};
 use crate::mipmap_encoder::{
-    mipmap_level_count_round_down, ripmap_level_counts_round_down, MipmapLevel,
+    MipmapLevel, mipmap_level_count_round_down, ripmap_level_counts_round_down,
 };
 use crate::part::{ExrPart, ExrPlane};
 use crate::tiled::tiledesc_from_attribute;
 use crate::types::{
-    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
+    Attribute, AttributeValue, Box2i, Channel, Compression, EXR_MAGIC, LineOrder, PixelType,
 };
 
 /// One part for [`encode_exr_multipart_mixed`]. The flat variants carry
@@ -2576,7 +2575,7 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     .map(|ch| {
                         let ys = ch.y_sampling as u32;
                         let lines = (0..lines_in_block as u32)
-                            .filter(|&l| (block_y0 + l) % ys == 0)
+                            .filter(|&l| (block_y0 + l).is_multiple_of(ys))
                             .count();
                         let xs = ch.x_sampling as u32;
                         let pw = subsampled_dim(width, xs) as usize;
@@ -2879,7 +2878,7 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 let block_y0 = row_in_image as u32;
                 let block_h = req.compression.scanlines_per_block();
                 let block_idx_in_part = (block_y0 / block_h) as usize;
-                if block_y0 % block_h != 0 || block_idx_in_part >= seen_blocks.len() {
+                if !block_y0.is_multiple_of(block_h) || block_idx_in_part >= seen_blocks.len() {
                     return Err(ExrError::invalid(format!(
                         "mixed multi-part deep scanline part {part_idx} ('{name}'): \
                          chunk Y={y_coord} not on the block grid"
@@ -2901,8 +2900,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     req.compression,
                 )?;
                 let mut cumulative_flat: Vec<i32> = Vec::with_capacity(entries);
-                for ch in table_bytes.chunks_exact(4) {
-                    cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+                for ch in table_bytes.as_chunks::<4>().0 {
+                    cumulative_flat.push(i32::from_le_bytes(*ch));
                 }
                 let mut block_samples_total: u64 = 0;
                 for r in 0..rows_in_block {
@@ -3546,8 +3545,8 @@ fn decode_deep_tile_body(
         };
     let table_bytes = decompress_buffer(table_payload, unpacked_table_size, compression)?;
     let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-    for ch in table_bytes.chunks_exact(4) {
-        cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+    for ch in table_bytes.as_chunks::<4>().0 {
+        cumulative_flat.push(i32::from_le_bytes(*ch));
     }
     let mut tile_total_samples: u64 = 0;
     for r in 0..th as usize {
@@ -3745,7 +3744,7 @@ fn scanline_block_raw(
         let y = row0 as usize + line;
         for (ch_idx, ch) in channels.iter().enumerate() {
             let ys = ch.y_sampling as u32;
-            if (y as u32) % ys != 0 {
+            if !(y as u32).is_multiple_of(ys) {
                 continue;
             }
             let xs = ch.x_sampling as u32;
@@ -3774,7 +3773,7 @@ fn scanline_block_raw_len(
         let y = row0 + line;
         for ch in channels {
             let ys = ch.y_sampling as u32;
-            if y % ys != 0 {
+            if !y.is_multiple_of(ys) {
                 continue;
             }
             let pw = subsampled_dim(width, ch.x_sampling as u32) as usize;
@@ -3996,7 +3995,7 @@ fn scatter_scanline_block_into_planes(
         let dst_y = block_y0 as usize + line;
         for (ch_idx, ch) in sorted_channels.iter().enumerate() {
             let ys = ch.y_sampling as u32;
-            if (dst_y as u32) % ys != 0 {
+            if !(dst_y as u32).is_multiple_of(ys) {
                 continue;
             }
             let xs = ch.x_sampling as u32;

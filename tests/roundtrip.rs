@@ -11,8 +11,8 @@
 #![allow(deprecated)]
 
 use oxideav_openexr::{
-    encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with, parse_exr, Compression,
-    PixelType,
+    Compression, PixelType, encode_exr_scanline_rgba_float, encode_exr_scanline_rgba_float_with,
+    parse_exr,
 };
 
 fn make_sample_image(w: u32, h: u32) -> Vec<f32> {

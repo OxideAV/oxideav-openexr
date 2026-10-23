@@ -13,7 +13,7 @@
 
 use std::process::Command;
 
-use oxideav_openexr::{encode_exr_scanline_rgba_float_with, Compression};
+use oxideav_openexr::{Compression, encode_exr_scanline_rgba_float_with};
 
 fn exrheader_available() -> bool {
     Command::new("exrheader")

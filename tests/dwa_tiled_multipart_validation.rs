@@ -12,11 +12,11 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    build_box_filter_pyramid, encode_exr_multipart, encode_exr_multipart_mixed,
-    encode_exr_multipart_tiled, encode_exr_tiled, encode_exr_tiled_mipmap, parse_exr,
-    parse_exr_multipart, parse_exr_multipart_mixed, parse_exr_multipart_tiled,
-    parse_exr_tiled_multilevel, Channel, Compression, MultipartMixedImage, MultipartMixedPart,
-    MultipartScanlinePart, MultipartTiledPart, PixelType,
+    Channel, Compression, MultipartMixedImage, MultipartMixedPart, MultipartScanlinePart,
+    MultipartTiledPart, PixelType, build_box_filter_pyramid, encode_exr_multipart,
+    encode_exr_multipart_mixed, encode_exr_multipart_tiled, encode_exr_tiled,
+    encode_exr_tiled_mipmap, parse_exr, parse_exr_multipart, parse_exr_multipart_mixed,
+    parse_exr_multipart_tiled, parse_exr_tiled_multilevel,
 };
 
 fn exrmetrics_available() -> bool {

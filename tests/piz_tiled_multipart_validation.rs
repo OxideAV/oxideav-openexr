@@ -10,14 +10,13 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_multipart,
+    Channel, Compression, MipmapLevel, MultipartMipmapTiledPart, MultipartMixedImage,
+    MultipartMixedPart, MultipartRipmapTiledPart, MultipartScanlinePart, MultipartTiledPart,
+    PixelType, build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_multipart,
     encode_exr_multipart_mixed, encode_exr_multipart_tiled, encode_exr_multipart_tiled_mipmap,
     encode_exr_multipart_tiled_ripmap, encode_exr_tiled, encode_exr_tiled_mipmap,
     encode_exr_tiled_ripmap, parse_exr, parse_exr_multipart, parse_exr_multipart_mixed,
     parse_exr_multipart_tiled, parse_exr_multipart_tiled_multilevel, parse_exr_tiled_multilevel,
-    Channel, Compression, MipmapLevel, MultipartMipmapTiledPart, MultipartMixedImage,
-    MultipartMixedPart, MultipartRipmapTiledPart, MultipartScanlinePart, MultipartTiledPart,
-    PixelType,
 };
 
 fn exrmetrics_available() -> bool {
@@ -87,11 +86,7 @@ fn plane(w: u32, h: u32, seed: u32) -> Vec<f32> {
     (0..(w * h) as usize)
         .map(|i| {
             let k = (i as u32).wrapping_mul(7).wrapping_add(seed) % 53;
-            if k == 51 {
-                2048.0
-            } else {
-                (k as f32) * 0.25
-            }
+            if k == 51 { 2048.0 } else { (k as f32) * 0.25 }
         })
         .collect()
 }

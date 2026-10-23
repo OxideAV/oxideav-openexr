@@ -27,7 +27,7 @@
 use std::process::Command;
 
 use oxideav_openexr::types::{Attribute, AttributeValue, Box2i, Channel, LineOrder, PixelType};
-use oxideav_openexr::{encode_exr_scanline, parse_exr, Compression};
+use oxideav_openexr::{Compression, encode_exr_scanline, parse_exr};
 
 fn exrmetrics_available() -> bool {
     Command::new("exrmetrics")
@@ -143,12 +143,12 @@ fn encode_b44(
     h: u32,
     scheme: Compression,
     p_linear: bool,
-    gen: impl Fn(usize, usize) -> f32,
+    r#gen: impl Fn(usize, usize) -> f32,
 ) -> (Vec<u8>, Vec<Vec<f32>>) {
     let channels = build_channels(p_linear);
     let pixels = (w * h) as usize;
     let planes_owned: Vec<Vec<f32>> = (0..4)
-        .map(|ci| (0..pixels).map(|i| gen(i, ci)).collect())
+        .map(|ci| (0..pixels).map(|i| r#gen(i, ci)).collect())
         .collect();
     let planes: Vec<&[f32]> = planes_owned.iter().map(|v| v.as_slice()).collect();
     let attrs = build_attrs(w, h, &channels, scheme);
@@ -169,9 +169,9 @@ fn self_roundtrip_idempotent(
     h: u32,
     scheme: Compression,
     p_linear: bool,
-    gen: impl Fn(usize, usize) -> f32,
+    r#gen: impl Fn(usize, usize) -> f32,
 ) {
-    let (bytes, _) = encode_b44(w, h, scheme, p_linear, &gen);
+    let (bytes, _) = encode_b44(w, h, scheme, p_linear, &r#gen);
     let img1 = parse_exr(&bytes).unwrap();
     assert_eq!(img1.compression, scheme);
 
@@ -215,13 +215,13 @@ fn reference_accepts_our_b44(
     h: u32,
     scheme: Compression,
     p_linear: bool,
-    gen: impl Fn(usize, usize) -> f32,
+    r#gen: impl Fn(usize, usize) -> f32,
 ) {
     if !exrmetrics_available() {
         eprintln!("exrmetrics not available, skipping B44 encode cross-check ({w}x{h})");
         return;
     }
-    let (bytes, _) = encode_b44(w, h, scheme, p_linear, &gen);
+    let (bytes, _) = encode_b44(w, h, scheme, p_linear, &r#gen);
     let ours = parse_exr(&bytes).unwrap();
 
     let dir = tempdir();
@@ -383,6 +383,10 @@ fn b44a_beats_b44_on_flat_field() {
 }
 
 /// Helper: NONE-compressed HALF EXR of the same shape, for the ratio test.
-fn encode_b44_none(w: u32, h: u32, gen: impl Fn(usize, usize) -> f32) -> (Vec<u8>, Vec<Vec<f32>>) {
-    encode_b44(w, h, Compression::None, false, gen)
+fn encode_b44_none(
+    w: u32,
+    h: u32,
+    r#gen: impl Fn(usize, usize) -> f32,
+) -> (Vec<u8>, Vec<Vec<f32>>) {
+    encode_b44(w, h, Compression::None, false, r#gen)
 }

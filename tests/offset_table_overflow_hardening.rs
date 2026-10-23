@@ -21,9 +21,9 @@
 #![allow(deprecated)]
 
 use oxideav_openexr::{
-    encode_exr_scanline_rgba_float_with, encode_exr_tiled_rgba_float_mipmap_box_filter,
-    encode_exr_tiled_rgba_float_with, parse_exr, parse_exr_tiled_multilevel, parse_header,
-    Compression,
+    Compression, encode_exr_scanline_rgba_float_with,
+    encode_exr_tiled_rgba_float_mipmap_box_filter, encode_exr_tiled_rgba_float_with, parse_exr,
+    parse_exr_tiled_multilevel, parse_header,
 };
 
 /// Overwrite the 8-byte offset-table entry at `table_index` (entry 0 is

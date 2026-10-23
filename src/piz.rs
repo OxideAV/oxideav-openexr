@@ -58,7 +58,7 @@ impl ChunkShape<'_> {
             .map(|ch| {
                 let ys = ch.y_sampling as u32;
                 let ny = (0..self.lines_in_block as u32)
-                    .filter(|&l| (self.block_y0 + l) % ys == 0)
+                    .filter(|&l| (self.block_y0 + l).is_multiple_of(ys))
                     .count();
                 let nx = crate::decoder::subsampled_dim(self.width, ch.x_sampling as u32) as usize;
                 ChannelExtent {
@@ -73,7 +73,7 @@ impl ChunkShape<'_> {
     /// Does image row `line` (chunk-relative) include channel `ch`?
     #[inline]
     pub(crate) fn row_present(&self, ch: &Channel, line: usize) -> bool {
-        (self.block_y0 + line as u32) % (ch.y_sampling as u32) == 0
+        (self.block_y0 + line as u32).is_multiple_of(ch.y_sampling as u32)
     }
 }
 
@@ -409,7 +409,9 @@ fn scatter_words(
             let row_words = e.nx * e.words_per_sample;
             let src = bases[ci] + row_of_channel[ci] * row_words;
             for (chunk, &w) in out[wp..wp + row_words * 2]
-                .chunks_exact_mut(2)
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
                 .zip(words[src..src + row_words].iter())
             {
                 chunk.copy_from_slice(&w.to_le_bytes());
@@ -501,7 +503,7 @@ pub(crate) fn decode_piz_payload(
     if payload.len() == uncompressed_size {
         return Ok(payload.to_vec());
     }
-    if uncompressed_size % 2 != 0 {
+    if !uncompressed_size.is_multiple_of(2) {
         return Err(ExrError::invalid(format!(
             "PIZ: odd uncompressed chunk size {uncompressed_size}"
         )));

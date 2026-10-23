@@ -18,13 +18,13 @@
 //! CI host regardless of whether an OpenEXR install is present.
 
 use oxideav_openexr::{
-    encode_exr_multipart, encode_exr_multipart_deep_scanline, encode_exr_multipart_tiled,
-    encode_exr_multipart_tiled_mipmap, encode_exr_multipart_tiled_ripmap,
-    mipmap_level_count_round_down, parse_exr_deep_multipart, parse_exr_multipart,
-    parse_exr_multipart_tiled, parse_exr_multipart_tiled_multilevel,
-    ripmap_level_counts_round_down, Attribute, AttributeValue, Box2i, Channel, Compression,
-    MipmapLevel, MultipartDeepScanlinePart, MultipartMipmapTiledPart, MultipartRipmapTiledPart,
-    MultipartScanlinePart, MultipartTiledPart, RipmapPyramid,
+    Attribute, AttributeValue, Box2i, Channel, Compression, MipmapLevel, MultipartDeepScanlinePart,
+    MultipartMipmapTiledPart, MultipartRipmapTiledPart, MultipartScanlinePart, MultipartTiledPart,
+    RipmapPyramid, encode_exr_multipart, encode_exr_multipart_deep_scanline,
+    encode_exr_multipart_tiled, encode_exr_multipart_tiled_mipmap,
+    encode_exr_multipart_tiled_ripmap, mipmap_level_count_round_down, parse_exr_deep_multipart,
+    parse_exr_multipart, parse_exr_multipart_tiled, parse_exr_multipart_tiled_multilevel,
+    ripmap_level_counts_round_down,
 };
 
 fn display_window(attrs: &[Attribute]) -> Box2i {

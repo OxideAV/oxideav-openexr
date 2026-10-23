@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_scanline, luma_chroma_to_rgb, luminance_weights, luminance_weights_of, parse_exr,
-    rgb_to_luma_chroma, Attribute, AttributeValue, Box2i, Channel, ChromaPlane, Compression,
-    ExrPart, LineOrder, PixelType, BT709_CHROMATICITIES,
+    Attribute, AttributeValue, BT709_CHROMATICITIES, Box2i, Channel, ChromaPlane, Compression,
+    ExrPart, LineOrder, PixelType, encode_exr_scanline, luma_chroma_to_rgb, luminance_weights,
+    luminance_weights_of, parse_exr, rgb_to_luma_chroma,
 };
 
 fn tool_available(name: &str) -> bool {

@@ -11,7 +11,7 @@ use std::process::Command;
 use oxideav_core::{
     CodecId, CodecParameters, Frame, Packet, PixelFormat, RuntimeContext, TimeBase, VideoFrame,
 };
-use oxideav_openexr::{parse_exr, LayerKind};
+use oxideav_openexr::{LayerKind, parse_exr};
 
 fn tool_available(name: &str) -> bool {
     Command::new(name)

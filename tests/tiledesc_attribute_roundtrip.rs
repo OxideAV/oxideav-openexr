@@ -63,7 +63,7 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_tiled_rgba_float_with, parse_header, tiled::TileDesc, AttributeValue, Compression,
+    AttributeValue, Compression, encode_exr_tiled_rgba_float_with, parse_header, tiled::TileDesc,
 };
 
 // ---------------------------------------------------------------------------

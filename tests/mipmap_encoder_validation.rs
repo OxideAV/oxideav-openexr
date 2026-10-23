@@ -24,8 +24,8 @@
 use std::process::Command;
 
 use oxideav_openexr::{
-    encode_exr_tiled_rgba_float_mipmap_box_filter, mipmap_level_count_round_down, parse_exr,
-    Compression,
+    Compression, encode_exr_tiled_rgba_float_mipmap_box_filter, mipmap_level_count_round_down,
+    parse_exr,
 };
 
 fn tool_available(name: &str) -> bool {

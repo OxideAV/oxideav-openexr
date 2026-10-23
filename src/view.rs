@@ -26,9 +26,9 @@
 
 use crate::error::{ExrError, Result};
 use crate::image::{ColorInfo, ExrImage, Metadata, PixelFormat, Plane};
-use crate::layers::{enumerate_layers, find_layer, ExrLayer};
+use crate::layers::{ExrLayer, enumerate_layers, find_layer};
 use crate::luma_chroma::{
-    luma_chroma_to_rgb, luminance_weights_of, rgb_to_luma_chroma, ChromaPlane,
+    ChromaPlane, luma_chroma_to_rgb, luminance_weights_of, rgb_to_luma_chroma,
 };
 use crate::options::{ColourLayout, EncodeOptions};
 use crate::part::{ExrPart, ExrPlane};
@@ -294,7 +294,7 @@ pub(crate) fn image_to_channels(
     Ok(match (opts.colour, image.format) {
         (ColourLayout::LumaChroma, PixelFormat::RgbaF32Le | PixelFormat::RgbF32Le) => {
             let s = opts.chroma_sampling;
-            if width % s != 0 || height % s != 0 {
+            if !width.is_multiple_of(s) || !height.is_multiple_of(s) {
                 return Err(ExrError::invalid(format!(
                     "OpenEXR encoder: {width}x{height} image is not a multiple of \
                      chroma_sampling={s} (conforming readers require sub-sampled extents \

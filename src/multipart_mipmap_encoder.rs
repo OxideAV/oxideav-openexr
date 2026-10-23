@@ -38,10 +38,10 @@
 
 use crate::decoder::{apply_zip_interleave, apply_zip_predictor, mipmap_level_dim};
 use crate::error::{ExrError, Result};
-use crate::header::{encode_attribute_value, VersionField};
-use crate::mipmap_encoder::{mipmap_level_count_round_down, MipmapLevel};
+use crate::header::{VersionField, encode_attribute_value};
+use crate::mipmap_encoder::{MipmapLevel, mipmap_level_count_round_down};
 use crate::types::{
-    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
+    Attribute, AttributeValue, Box2i, Channel, Compression, EXR_MAGIC, LineOrder, PixelType,
 };
 
 /// One multi-level flat tiled part for

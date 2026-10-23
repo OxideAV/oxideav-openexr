@@ -11,8 +11,8 @@ use std::process::Command;
 
 use oxideav_openexr::half::f32_to_half;
 use oxideav_openexr::{
-    encode_exr_scanline, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
-    LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
+    encode_exr_scanline, parse_exr,
 };
 
 fn tool_available(name: &str) -> bool {

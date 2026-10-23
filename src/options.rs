@@ -123,34 +123,34 @@ impl DecodeOptions {
     /// Check a part's geometry against the limits. `bytes` is the size of
     /// the `f32` planes the decoder will allocate for it.
     pub(crate) fn check(&self, width: u32, height: u32, bytes: u64) -> Result<()> {
-        if let Some(m) = self.max_width {
-            if width > m {
-                return Err(ExrError::limit(format!(
-                    "OpenEXR: dataWindow width {width} exceeds max_width {m}"
-                )));
-            }
+        if let Some(m) = self.max_width
+            && width > m
+        {
+            return Err(ExrError::limit(format!(
+                "OpenEXR: dataWindow width {width} exceeds max_width {m}"
+            )));
         }
-        if let Some(m) = self.max_height {
-            if height > m {
-                return Err(ExrError::limit(format!(
-                    "OpenEXR: dataWindow height {height} exceeds max_height {m}"
-                )));
-            }
+        if let Some(m) = self.max_height
+            && height > m
+        {
+            return Err(ExrError::limit(format!(
+                "OpenEXR: dataWindow height {height} exceeds max_height {m}"
+            )));
         }
         let pixels = u64::from(width) * u64::from(height);
-        if let Some(m) = self.max_pixels {
-            if pixels > m {
-                return Err(ExrError::limit(format!(
-                    "OpenEXR: {pixels} pixels exceed max_pixels {m}"
-                )));
-            }
+        if let Some(m) = self.max_pixels
+            && pixels > m
+        {
+            return Err(ExrError::limit(format!(
+                "OpenEXR: {pixels} pixels exceed max_pixels {m}"
+            )));
         }
-        if let Some(m) = self.max_bytes {
-            if bytes > m {
-                return Err(ExrError::limit(format!(
-                    "OpenEXR: decoded planes of {bytes} bytes exceed max_bytes {m}"
-                )));
-            }
+        if let Some(m) = self.max_bytes
+            && bytes > m
+        {
+            return Err(ExrError::limit(format!(
+                "OpenEXR: decoded planes of {bytes} bytes exceed max_bytes {m}"
+            )));
         }
         Ok(())
     }
@@ -424,18 +424,20 @@ mod tests {
         assert!(e.clone().with_layer(".x").validate().is_err());
         assert!(e.clone().with_layer("a..b").validate().is_err());
         assert!(e.clone().with_levels(LevelMode::Mipmap).validate().is_err());
-        assert!(e
-            .clone()
-            .with_line_order(LineOrder::RandomY)
-            .validate()
-            .is_err());
-        assert!(e
-            .clone()
-            .with_tile_size(16)
-            .with_levels(LevelMode::Ripmap)
-            .with_line_order(LineOrder::RandomY)
-            .validate()
-            .is_ok());
+        assert!(
+            e.clone()
+                .with_line_order(LineOrder::RandomY)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            e.clone()
+                .with_tile_size(16)
+                .with_levels(LevelMode::Ripmap)
+                .with_line_order(LineOrder::RandomY)
+                .validate()
+                .is_ok()
+        );
         assert!(matches!(
             e.with_pixel_type(PixelType::Uint).validate(),
             Err(ExrError::Unsupported(_))

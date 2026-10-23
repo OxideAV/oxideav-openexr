@@ -38,7 +38,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_openexr::deep::DeepMipmapTiledLevelInput;
 use oxideav_openexr::multipart_mixed_encoder::{
-    encode_exr_multipart_mixed, parse_exr_multipart_mixed, MultipartMixedPart,
+    MultipartMixedPart, encode_exr_multipart_mixed, parse_exr_multipart_mixed,
 };
 use oxideav_openexr::types::{Channel, Compression, PixelType};
 

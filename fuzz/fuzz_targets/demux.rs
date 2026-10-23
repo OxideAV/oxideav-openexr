@@ -75,11 +75,10 @@ fn drive(ctx: &RuntimeContext, file: &[u8]) {
     let _ = ctx
         .containers
         .probe_input(&mut Cursor::new(file), Some("exr"));
-    let Ok(mut demuxer) = ctx.containers.open_demuxer(
-        "openexr",
-        Box::new(Cursor::new(file.to_vec())),
-        &ctx.codecs,
-    ) else {
+    let Ok(mut demuxer) =
+        ctx.containers
+            .open_demuxer("openexr", Box::new(Cursor::new(file.to_vec())), &ctx.codecs)
+    else {
         return;
     };
     let stream = demuxer.streams()[0].clone();

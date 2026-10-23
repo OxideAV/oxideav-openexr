@@ -16,16 +16,16 @@
 #![allow(clippy::type_complexity)]
 
 use oxideav_openexr::deep::{
+    DeepMipmapTiledInput, DeepMipmapTiledLevelInput, DeepRipmapTiledInput,
+    DeepRipmapTiledLevelInput, DeepScanlineInput, DeepTiledInput, MultipartDeepMipmapTiledPart,
+    MultipartDeepRipmapTiledPart, MultipartDeepScanlinePart, MultipartDeepTiledPart,
     encode_exr_deep_scanline, encode_exr_deep_tiled, encode_exr_deep_tiled_mipmap,
     encode_exr_deep_tiled_ripmap, encode_exr_multipart_deep_scanline,
     encode_exr_multipart_deep_tiled, encode_exr_multipart_deep_tiled_mipmap,
     encode_exr_multipart_deep_tiled_ripmap, parse_exr_deep_multipart, parse_exr_deep_scanline,
     parse_exr_deep_tiled, parse_exr_deep_tiled_mipmap, parse_exr_deep_tiled_ripmap,
     parse_exr_multipart_deep_tiled, parse_exr_multipart_deep_tiled_mipmap,
-    parse_exr_multipart_deep_tiled_ripmap, DeepMipmapTiledInput, DeepMipmapTiledLevelInput,
-    DeepRipmapTiledInput, DeepRipmapTiledLevelInput, DeepScanlineInput, DeepTiledInput,
-    MultipartDeepMipmapTiledPart, MultipartDeepRipmapTiledPart, MultipartDeepScanlinePart,
-    MultipartDeepTiledPart,
+    parse_exr_multipart_deep_tiled_ripmap,
 };
 use oxideav_openexr::types::{Channel, Compression, PixelType};
 

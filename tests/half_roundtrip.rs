@@ -3,8 +3,8 @@
 //! pixel type to HALF.
 
 use oxideav_openexr::{
-    encode_exr_scanline, parse_exr, Attribute, AttributeValue, Box2i, Channel, Compression,
-    LineOrder, PixelType,
+    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
+    encode_exr_scanline, parse_exr,
 };
 
 #[test]

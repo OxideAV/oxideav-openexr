@@ -46,24 +46,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, SeekFrom, Write};
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, ContainerRegistry, Demuxer, Error, MediaType, Muxer,
-    Packet, ProbeData, ProbeScore, ReadSeek, Result, StreamInfo, TimeBase, WriteSeek,
-    MAX_PROBE_SCORE, PROBE_SCORE_EXTENSION,
+    CodecId, CodecParameters, CodecResolver, ContainerRegistry, Demuxer, Error, MAX_PROBE_SCORE,
+    MediaType, Muxer, PROBE_SCORE_EXTENSION, Packet, ProbeData, ProbeScore, ReadSeek, Result,
+    StreamInfo, TimeBase, WriteSeek,
 };
 
+use crate::CODEC_ID_STR;
 use crate::decoder::{compute_total_tiles, extract_required, find_chunk_count, find_part_type};
 use crate::deep::parse_header_allow_deep;
 use crate::error::ExrError;
 use crate::header::{
-    encode_attribute_value, encode_header, parse_header, parse_multipart_headers, ParsedHeader,
-    VersionField,
+    ParsedHeader, VersionField, encode_attribute_value, encode_header, parse_header,
+    parse_multipart_headers,
 };
-use crate::image::{string_attribute, ColorInfo};
+use crate::image::{ColorInfo, string_attribute};
 use crate::registry::{to_color_signal, to_core_pixel_format};
 use crate::tiled::tiledesc_from_attribute;
 use crate::types::{Attribute, AttributeValue, Box2i, EXR_MAGIC};
 use crate::view::plan_view;
-use crate::CODEC_ID_STR;
 
 /// Registered container name (the same string as the codec id).
 pub const CONTAINER_NAME: &str = CODEC_ID_STR;
@@ -160,7 +160,7 @@ impl PartShape {
             other => {
                 return Err(ExrError::invalid(format!(
                     "OpenEXR container: part {idx} has unknown type '{other}'"
-                )))
+                )));
             }
         })
     }

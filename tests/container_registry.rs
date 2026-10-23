@@ -13,8 +13,8 @@ use oxideav_core::{
     StreamInfo, TimeBase, VideoFrame,
 };
 use oxideav_openexr::{
-    encode_exr_multipart_mixed, Channel, ColourLayout, Compression, DecodeOptions, EncodeOptions,
-    ExrImage, ExrPixelFormat, Frame, LevelMode, MultipartMixedPart, PixelType, CODEC_ID_STR,
+    CODEC_ID_STR, Channel, ColourLayout, Compression, DecodeOptions, EncodeOptions, ExrImage,
+    ExrPixelFormat, Frame, LevelMode, MultipartMixedPart, PixelType, encode_exr_multipart_mixed,
 };
 
 const CONTAINER: &str = "openexr";
@@ -226,10 +226,11 @@ fn probe_names_the_container_from_magic_and_extension() {
                 .is_err(),
             "foreign bytes must not probe as openexr"
         );
-        assert!(ctx
-            .containers
-            .probe_input(&mut Cursor::new(foreign), Some("ff"))
-            .is_err());
+        assert!(
+            ctx.containers
+                .probe_input(&mut Cursor::new(foreign), Some("ff"))
+                .is_err()
+        );
     }
     assert!(ctx.containers.demuxer_names().any(|n| n == CONTAINER));
     assert!(ctx.containers.muxer_names().any(|n| n == CONTAINER));
@@ -728,9 +729,10 @@ fn mux_rejects_bad_streams_and_packets() {
         &EncodeOptions::default(),
     )
     .unwrap();
-    assert!(two
-        .write_packet(&Packet::new(2, TimeBase::new(1, 1), pict.clone()))
-        .is_err());
+    assert!(
+        two.write_packet(&Packet::new(2, TimeBase::new(1, 1), pict.clone()))
+            .is_err()
+    );
     two.write_packet(&Packet::new(1, TimeBase::new(1, 1), pict))
         .unwrap();
     two.write_trailer().unwrap();
@@ -738,22 +740,27 @@ fn mux_rejects_bad_streams_and_packets() {
         params: CodecParameters::audio(CodecId::new("pcm")),
         ..video.clone()
     };
-    assert!(ctx
-        .containers
-        .open_muxer(CONTAINER, sink(), &[audio])
-        .is_err());
+    assert!(
+        ctx.containers
+            .open_muxer(CONTAINER, sink(), &[audio])
+            .is_err()
+    );
 
     let mut muxer = ctx
         .containers
         .open_muxer(CONTAINER, sink(), std::slice::from_ref(&video))
         .unwrap();
     muxer.write_header().unwrap();
-    assert!(muxer
-        .write_packet(&Packet::new(0, TimeBase::new(1, 1), Vec::new()))
-        .is_err());
-    assert!(muxer
-        .write_packet(&Packet::new(0, TimeBase::new(1, 1), b"not an exr".to_vec()))
-        .is_err());
+    assert!(
+        muxer
+            .write_packet(&Packet::new(0, TimeBase::new(1, 1), Vec::new()))
+            .is_err()
+    );
+    assert!(
+        muxer
+            .write_packet(&Packet::new(0, TimeBase::new(1, 1), b"not an exr".to_vec()))
+            .is_err()
+    );
     assert!(muxer.write_trailer().is_err(), "no packet, no file");
 
     // A deep single-part packet cannot combine into a multi-part file.
@@ -798,10 +805,11 @@ fn mux_rejects_bad_streams_and_packets() {
 #[test]
 fn register_installs_codec_and_container() {
     let ctx = ctx();
-    assert!(ctx
-        .codecs
-        .decoder_ids()
-        .any(|c| *c == CodecId::new(CODEC_ID_STR)));
+    assert!(
+        ctx.codecs
+            .decoder_ids()
+            .any(|c| *c == CodecId::new(CODEC_ID_STR))
+    );
     assert!(ctx.containers.demuxer_names().any(|n| n == CONTAINER));
     assert!(ctx.containers.muxer_names().any(|n| n == CONTAINER));
     assert_eq!(

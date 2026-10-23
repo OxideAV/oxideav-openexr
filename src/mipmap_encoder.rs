@@ -33,7 +33,7 @@
 
 use crate::decoder::{apply_zip_interleave, apply_zip_predictor};
 use crate::error::{ExrError, Result};
-use crate::header::{encode_header, VersionField};
+use crate::header::{VersionField, encode_header};
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType};
 
 /// One level of a mipmap pyramid: explicit width/height plus one f32 plane

@@ -2,8 +2,8 @@
 //! multi-part (`scanlineimage` + `tiledimage`) WRITE + READ pair.
 
 use oxideav_openexr::{
-    encode_exr_multipart_mixed, parse_exr_multipart_mixed, Channel, Compression,
-    MultipartMixedPart, PixelType,
+    Channel, Compression, MultipartMixedPart, PixelType, encode_exr_multipart_mixed,
+    parse_exr_multipart_mixed,
 };
 
 fn make_planes(w: u32, h: u32, salt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
@@ -433,8 +433,8 @@ fn mixed_uint_and_half_pixel_types() {
 // ---------------------------------------------------------------------
 
 use oxideav_openexr::{
-    build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_multipart_tiled_mipmap,
-    parse_exr, parse_exr_deep_scanline, parse_exr_deep_tiled, MultipartMipmapTiledPart,
+    MultipartMipmapTiledPart, build_box_filter_pyramid, build_box_filter_ripmap,
+    encode_exr_multipart_tiled_mipmap, parse_exr, parse_exr_deep_scanline, parse_exr_deep_tiled,
 };
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -791,10 +791,11 @@ fn exrmultipart_separate_splits_mixed_deep_flat() {
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for ent in rd.flatten() {
             let p = ent.path();
-            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                if name != "in.exr" && name.ends_with(".exr") {
-                    splits.push(p.to_string_lossy().into_owned());
-                }
+            if let Some(name) = p.file_name().and_then(|s| s.to_str())
+                && name != "in.exr"
+                && name.ends_with(".exr")
+            {
+                splits.push(p.to_string_lossy().into_owned());
             }
         }
     }

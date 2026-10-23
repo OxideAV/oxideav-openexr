@@ -39,18 +39,18 @@
 //! [`crate::encode_all`] and the depth API.
 
 use oxideav_core::{
-    parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Decoder, Encoder, Frame,
-    MatrixCoefficients, OptionField, OptionKind, OptionValue, Packet, PixelFormat, RuntimeContext,
-    TimeBase, TransferCharacteristics, VideoFrame, VideoPlane,
+    CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters, CodecRegistry,
+    ColorPrimaries, ColorSignal, ContainerRegistry, Decoder, Encoder, Frame, MatrixCoefficients,
+    OptionField, OptionKind, OptionValue, Packet, PixelFormat, RuntimeContext, TimeBase,
+    TransferCharacteristics, VideoFrame, VideoPlane, parse_options,
 };
 
+use crate::CODEC_ID_STR;
 use crate::error::ExrError;
 use crate::image::{ColorInfo, ColorRange, ExrImage, ExrPixelFormat};
 pub use crate::options::{ColourLayout, LevelMode};
 use crate::options::{DecodeOptions, EncodeOptions};
 use crate::types::{Compression, LineOrder, PixelType};
-use crate::CODEC_ID_STR;
 
 /// The pre-contract name of [`DecodeOptions`].
 #[deprecated(note = "use oxideav_openexr::DecodeOptions (IMAGE_CRATE_API)")]
@@ -258,7 +258,7 @@ impl ExrImage {
                 return Err(ExrError::unsupported(format!(
                     "OpenEXR: pixel format {other:?} not supported (RgbaF32Le / RgbF32Le / \
                      GrayF32Le / Rgb24 / Rgba)"
-                )))
+                )));
             }
         };
         let sig = frame
@@ -463,7 +463,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "OpenEXR encoder: unknown colour layout '{other}'"
-                        )))
+                        )));
                     }
                 }
             }
@@ -476,7 +476,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "OpenEXR encoder: unknown level mode '{other}'"
-                        )))
+                        )));
                     }
                 }
             }
@@ -488,7 +488,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "OpenEXR encoder: unknown line order '{other}'"
-                        )))
+                        )));
                     }
                 }
             }
@@ -518,7 +518,7 @@ impl CodecOptionsStruct for EncodeOptions {
                     other => {
                         return Err(oxideav_core::Error::invalid(format!(
                             "OpenEXR encoder: unknown pixel_type '{other}'"
-                        )))
+                        )));
                     }
                 }
             }
@@ -633,7 +633,7 @@ impl Encoder for ExrEncoder {
             _ => {
                 return Err(oxideav_core::Error::invalid(
                     "OpenEXR encoder: expected video frame",
-                ))
+                ));
             }
         };
         let format = self.out_params.pixel_format.ok_or_else(|| {
@@ -784,9 +784,11 @@ mod tests {
         assert_eq!(impls.len(), 1, "openexr registered once");
         let caps = &impls[0].caps;
         assert_eq!(&caps.accepted_pixel_formats[..3], &FRAME_FORMATS[..]);
-        assert!(caps.accepted_pixel_formats[..3]
-            .iter()
-            .all(|f| f.is_float()));
+        assert!(
+            caps.accepted_pixel_formats[..3]
+                .iter()
+                .all(|f| f.is_float())
+        );
         assert_eq!(&caps.accepted_pixel_formats[3..], &RAW_FORMATS[..]);
     }
 
@@ -932,7 +934,7 @@ mod tests {
 
     #[test]
     fn decoder_reconstructs_rgb_from_luma_chroma() {
-        use crate::luma_chroma::{luminance_weights, rgb_to_luma_chroma, BT709_CHROMATICITIES};
+        use crate::luma_chroma::{BT709_CHROMATICITIES, luminance_weights, rgb_to_luma_chroma};
         let (w, h) = (6u32, 4u32);
         let n = (w * h) as usize;
         // Constant chroma so the 2×2 reduction is exact everywhere.
@@ -1200,7 +1202,7 @@ mod tests {
 
     #[test]
     fn decoder_rejects_deep_files_as_unsupported() {
-        use crate::deep::{encode_exr_deep_scanline, DeepScanlineInput};
+        use crate::deep::{DeepScanlineInput, encode_exr_deep_scanline};
         let ch = Channel {
             name: "R".to_string(),
             pixel_type: PixelType::Float,
@@ -1227,7 +1229,7 @@ mod tests {
 
     #[test]
     fn decoder_part_option_selects_multipart_part() {
-        use crate::multipart_encoder::{encode_exr_multipart, MultipartScanlinePart};
+        use crate::multipart_encoder::{MultipartScanlinePart, encode_exr_multipart};
         let (w, h) = (2u32, 1u32);
         let mk = |n: &str| Channel {
             name: n.to_string(),
@@ -1308,10 +1310,11 @@ mod tests {
                 )
                 .unwrap();
                 let img = parse_exr(&bytes).unwrap();
-                assert!(img
-                    .channels
-                    .iter()
-                    .all(|c| c.pixel_type == PixelType::Float));
+                assert!(
+                    img.channels
+                        .iter()
+                        .all(|c| c.pixel_type == PixelType::Float)
+                );
                 assert_eq!(img.channels.len(), comps, "{format:?}/{codec}");
                 let vf = decode_frame(bytes, None).unwrap();
                 assert_eq!(vf.planes[0].data, src.planes[0].data, "{format:?}/{codec}");
@@ -1493,10 +1496,11 @@ mod tests {
         )
         .unwrap();
         let img = parse_exr(&bytes).unwrap();
-        assert!(img
-            .channels
-            .iter()
-            .all(|c| c.x_sampling == 1 && c.y_sampling == 1));
+        assert!(
+            img.channels
+                .iter()
+                .all(|c| c.x_sampling == 1 && c.y_sampling == 1)
+        );
         let vf = decode_frame(bytes, None).unwrap();
         for px in 0..n {
             for c in 0..3 {
@@ -1590,27 +1594,31 @@ mod tests {
             src.planes[0].data
         );
         let src = packed_frame(w, h, 3, value);
-        assert!(encode_frame(
-            src,
-            w,
-            h,
-            PixelFormat::RgbF32Le,
-            &[("line_order", "random_y")]
-        )
-        .is_err());
+        assert!(
+            encode_frame(
+                src,
+                w,
+                h,
+                PixelFormat::RgbF32Le,
+                &[("line_order", "random_y")]
+            )
+            .is_err()
+        );
         // levels without tiles, and tiles with sub-sampled chroma, are
         // rejected up front.
         let src = packed_frame(w, h, 3, value);
         assert!(encode_frame(src, w, h, PixelFormat::RgbF32Le, &[("levels", "mipmap")]).is_err());
         let src = packed_frame(w, h, 3, value);
-        assert!(encode_frame(
-            src,
-            w,
-            h,
-            PixelFormat::RgbF32Le,
-            &[("tile_size", "8"), ("colour", "luma_chroma")]
-        )
-        .is_err());
+        assert!(
+            encode_frame(
+                src,
+                w,
+                h,
+                PixelFormat::RgbF32Le,
+                &[("tile_size", "8"), ("colour", "luma_chroma")]
+            )
+            .is_err()
+        );
         let src = packed_frame(w, h, 3, value);
         let bytes = encode_frame(
             src,

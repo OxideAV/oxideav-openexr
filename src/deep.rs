@@ -55,11 +55,11 @@ use crate::decoder::{
     apply_zip_interleave, apply_zip_predictor, apply_zip_uninterleave, apply_zip_unpredictor,
 };
 use crate::error::{ExrError, Result};
-use crate::header::{encode_attribute_value, parse_header, VersionField};
+use crate::header::{VersionField, encode_attribute_value, parse_header};
 use crate::rle::{rle_compress, rle_decompress};
 use crate::tiled::tiledesc_raw_from_attribute;
 use crate::types::{
-    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType, EXR_MAGIC,
+    Attribute, AttributeValue, Box2i, Channel, Compression, EXR_MAGIC, LineOrder, PixelType,
 };
 
 /// One deep-scanline image, returned by [`parse_exr_deep_scanline`].
@@ -188,7 +188,7 @@ pub(crate) fn compress_buffer(raw: &[u8], compression: Compression) -> Result<Ve
                  (reference encoder accepts only NONE/RLE/ZIPS — even \
                  though the spec page also lists ZIP, exrinfo rejects \
                  ZIP-compressed deep files with EXR_ERR_INVALID_ATTR)"
-            )))
+            )));
         }
     })
 }
@@ -497,7 +497,7 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
         let block_y0 = row_in_image as u32;
         let block_h = compression.scanlines_per_block();
         let block_idx_in_part = (block_y0 / block_h) as usize;
-        if block_y0 % block_h != 0 || block_idx_in_part >= ps.seen_blocks.len() {
+        if !block_y0.is_multiple_of(block_h) || block_idx_in_part >= ps.seen_blocks.len() {
             return Err(ExrError::invalid(format!(
                 "multi-part deep part {part_idx} ('{}'): chunk Y={y_coord} not on the \
                  block grid",
@@ -522,8 +522,8 @@ pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
             compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(entries_in_table);
-        for chunk in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(chunk.try_into().unwrap()));
+        for chunk in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*chunk));
         }
         if cumulative_flat.len() != entries_in_table {
             return Err(ExrError::invalid(format!(
@@ -818,8 +818,8 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
             compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(entries_in_table);
-        for chunk in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(chunk.try_into().unwrap()));
+        for chunk in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*chunk));
         }
         if cumulative_flat.len() != entries_in_table {
             return Err(ExrError::invalid(format!(
@@ -970,10 +970,10 @@ fn find_int_attr(attrs: &[Attribute], name: &str) -> Option<i32> {
 
 fn find_box2i(attrs: &[Attribute], name: &str) -> Option<Box2i> {
     for a in attrs {
-        if a.name == name {
-            if let AttributeValue::Box2i(b) = &a.value {
-                return Some(*b);
-            }
+        if a.name == name
+            && let AttributeValue::Box2i(b) = &a.value
+        {
+            return Some(*b);
         }
     }
     None
@@ -981,10 +981,10 @@ fn find_box2i(attrs: &[Attribute], name: &str) -> Option<Box2i> {
 
 fn find_line_order(attrs: &[Attribute], name: &str) -> Option<LineOrder> {
     for a in attrs {
-        if a.name == name {
-            if let AttributeValue::LineOrder(l) = &a.value {
-                return Some(*l);
-            }
+        if a.name == name
+            && let AttributeValue::LineOrder(l) = &a.value
+        {
+            return Some(*l);
         }
     }
     None
@@ -992,10 +992,10 @@ fn find_line_order(attrs: &[Attribute], name: &str) -> Option<LineOrder> {
 
 fn find_compression(attrs: &[Attribute], name: &str) -> Option<Compression> {
     for a in attrs {
-        if a.name == name {
-            if let AttributeValue::Compression(c) = &a.value {
-                return Some(*c);
-            }
+        if a.name == name
+            && let AttributeValue::Compression(c) = &a.value
+        {
+            return Some(*c);
         }
     }
     None
@@ -1003,10 +1003,10 @@ fn find_compression(attrs: &[Attribute], name: &str) -> Option<Compression> {
 
 fn find_channels(attrs: &[Attribute]) -> Option<Vec<Channel>> {
     for a in attrs {
-        if a.name == "channels" {
-            if let AttributeValue::Channels(c) = &a.value {
-                return Some(c.clone());
-            }
+        if a.name == "channels"
+            && let AttributeValue::Channels(c) = &a.value
+        {
+            return Some(c.clone());
         }
     }
     None
@@ -2377,8 +2377,8 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
             compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-        for ch in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        for ch in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*ch));
         }
         if cumulative_flat.len() != unpacked_table_size / 4 {
             return Err(ExrError::invalid(format!(
@@ -3375,8 +3375,8 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
             ps.compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-        for ch in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        for ch in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*ch));
         }
         if cumulative_flat.len() != unpacked_table_size / 4 {
             return Err(ExrError::invalid(format!(
@@ -4304,8 +4304,8 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
             compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-        for ch in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        for ch in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*ch));
         }
         if cumulative_flat.len() != unpacked_table_size / 4 {
             return Err(ExrError::invalid(format!(
@@ -5279,8 +5279,8 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
             compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-        for ch in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        for ch in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*ch));
         }
         if cumulative_flat.len() != unpacked_table_size / 4 {
             return Err(ExrError::invalid(format!(
@@ -6176,38 +6176,39 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
                     "multi-part deep tiled MIPMAP part {i} ('{name}') missing required 'tiles' attribute"
                 ))
             })?;
-        let (tile_x, tile_y) =
-            if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
-                if (mode & 0x0F) == 0x02 {
-                    return Err(ExrError::unsupported(format!(
+        let (tile_x, tile_y) = if let Some((xs, ys, mode)) =
+            tiledesc_raw_from_attribute(&tile_attr.value)
+        {
+            if (mode & 0x0F) == 0x02 {
+                return Err(ExrError::unsupported(format!(
                     "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
                      (RIPMAP_LEVELS multi-part deep tiled routes through \
                      parse_exr_multipart_deep_tiled_ripmap)"
                 )));
-                }
-                if mode != 0x01 {
-                    return Err(ExrError::unsupported(format!(
+            }
+            if mode != 0x01 {
+                return Err(ExrError::unsupported(format!(
                     "multi-part deep tiled MIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
                      (parse_exr_multipart_deep_tiled_mipmap requires mode=0x01 = \
                      MIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
                      parse_exr_multipart_deep_tiled, RIPMAP_LEVELS through \
                      parse_exr_multipart_deep_tiled_ripmap)"
                 )));
-                }
-                if xs == 0 || ys == 0 {
-                    return Err(ExrError::invalid(format!(
-                        "multi-part deep tiled MIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
-                     must both be > 0"
-                    )));
-                }
-                (xs, ys)
-            } else {
+            }
+            if xs == 0 || ys == 0 {
                 return Err(ExrError::invalid(format!(
-                    "multi-part deep tiled MIPMAP part {i} ('{name}'): tiles attribute has \
-                 unexpected shape: {:?}",
-                    tile_attr.value
+                    "multi-part deep tiled MIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
+                     must both be > 0"
                 )));
-            };
+            }
+            (xs, ys)
+        } else {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled MIPMAP part {i} ('{name}'): tiles attribute has \
+                 unexpected shape: {:?}",
+                tile_attr.value
+            )));
+        };
         let width = data_window.width();
         let height = data_window.height();
         if width == 0 || height == 0 {
@@ -6375,8 +6376,8 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
             ps.compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-        for ch in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        for ch in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*ch));
         }
         if cumulative_flat.len() != unpacked_table_size / 4 {
             return Err(ExrError::invalid(format!(
@@ -7295,31 +7296,32 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
                     "multi-part deep tiled RIPMAP part {i} ('{name}') missing required 'tiles' attribute"
                 ))
             })?;
-        let (tile_x, tile_y) =
-            if let Some((xs, ys, mode)) = tiledesc_raw_from_attribute(&tile_attr.value) {
-                if mode != 0x02 {
-                    return Err(ExrError::unsupported(format!(
+        let (tile_x, tile_y) = if let Some((xs, ys, mode)) =
+            tiledesc_raw_from_attribute(&tile_attr.value)
+        {
+            if mode != 0x02 {
+                return Err(ExrError::unsupported(format!(
                     "multi-part deep tiled RIPMAP part {i} ('{name}'): tiledesc mode=0x{mode:02x} \
                      (parse_exr_multipart_deep_tiled_ripmap requires mode=0x02 = \
                      RIPMAP_LEVELS + ROUND_DOWN; ONE_LEVEL routes through \
                      parse_exr_multipart_deep_tiled, MIPMAP through \
                      parse_exr_multipart_deep_tiled_mipmap)"
                 )));
-                }
-                if xs == 0 || ys == 0 {
-                    return Err(ExrError::invalid(format!(
-                        "multi-part deep tiled RIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
-                     must both be > 0"
-                    )));
-                }
-                (xs, ys)
-            } else {
+            }
+            if xs == 0 || ys == 0 {
                 return Err(ExrError::invalid(format!(
-                    "multi-part deep tiled RIPMAP part {i} ('{name}'): tiles attribute has \
-                 unexpected shape: {:?}",
-                    tile_attr.value
+                    "multi-part deep tiled RIPMAP part {i} ('{name}'): tile size {xs}×{ys} \
+                     must both be > 0"
                 )));
-            };
+            }
+            (xs, ys)
+        } else {
+            return Err(ExrError::invalid(format!(
+                "multi-part deep tiled RIPMAP part {i} ('{name}'): tiles attribute has \
+                 unexpected shape: {:?}",
+                tile_attr.value
+            )));
+        };
         let width = data_window.width();
         let height = data_window.height();
         if width == 0 || height == 0 {
@@ -7501,8 +7503,8 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
             ps.compression,
         )?;
         let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
-        for ch in table_bytes.chunks_exact(4) {
-            cumulative_flat.push(i32::from_le_bytes(ch.try_into().unwrap()));
+        for ch in table_bytes.as_chunks::<4>().0 {
+            cumulative_flat.push(i32::from_le_bytes(*ch));
         }
         if cumulative_flat.len() != unpacked_table_size / 4 {
             return Err(ExrError::invalid(format!(
