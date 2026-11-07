@@ -42,13 +42,7 @@ fn tempdir() -> String {
 }
 
 fn channel(name: &str, pt: PixelType) -> Channel {
-    Channel {
-        name: name.to_string(),
-        pixel_type: pt,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }
+    Channel::new(name.to_string(), pt, false, 1, 1)
 }
 
 /// Scattered (high per-block dynamic range) plane — used for schemes

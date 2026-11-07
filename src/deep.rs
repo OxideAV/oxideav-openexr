@@ -77,6 +77,7 @@ use crate::types::{
 ///   pixel-scan order; pixel `p`'s slice spans
 ///   `[prefix_sum[p]..prefix_sum[p] + samples_per_pixel[p]]`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepExrImage {
     pub data_window: Box2i,
     pub display_window: Box2i,
@@ -92,6 +93,32 @@ pub struct DeepExrImage {
     /// [`crate::part::ExrPlane`]).
     pub channel_samples: Vec<Vec<f32>>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepExrImage {
+    /// Build `DeepExrImage` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        channels: Vec<Channel>,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            attributes,
+        }
+    }
 }
 
 impl DeepExrImage {
@@ -241,6 +268,7 @@ pub(crate) fn decompress_buffer(
 ///
 /// Returned by [`parse_exr_deep_multipart`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepScanlinePart {
     pub name: String,
     pub data_window: Box2i,
@@ -255,6 +283,34 @@ pub struct DeepScanlinePart {
     /// f32 (matching the flat-EXR convention).
     pub channel_samples: Vec<Vec<f32>>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepScanlinePart {
+    /// Build `DeepScanlinePart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        channels: Vec<Channel>,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            attributes,
+        }
+    }
 }
 
 impl DeepScanlinePart {
@@ -1020,6 +1076,7 @@ fn find_channels(attrs: &[Attribute]) -> Option<Vec<Channel>> {
 // ---------------------------------------------------------------------
 
 /// Input descriptor for [`encode_exr_deep_scanline`].
+#[non_exhaustive]
 pub struct DeepScanlineInput<'a> {
     pub width: u32,
     pub height: u32,
@@ -1033,6 +1090,27 @@ pub struct DeepScanlineInput<'a> {
     /// long, in pixel-scan order.
     pub channel_samples: Vec<&'a [f32]>,
     pub compression: Compression,
+}
+
+impl<'a> DeepScanlineInput<'a> {
+    /// Build `DeepScanlineInput` from every field, in declaration order.
+    pub fn new(
+        width: u32,
+        height: u32,
+        channels: Vec<Channel>,
+        samples_per_pixel: &'a [u32],
+        channel_samples: Vec<&'a [f32]>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            compression,
+        }
+    }
 }
 
 /// Self-roundtrip-tested deep scanline writer. Emits a single-part
@@ -1323,6 +1401,7 @@ pub fn encode_exr_deep_scanline(input: &DeepScanlineInput) -> Result<Vec<u8>> {
 /// shape to [`DeepScanlineInput`] plus a unique `name` slot — the
 /// per-part `name` attribute is mandatory on every multi-part header
 /// per the OpenEXR spec.
+#[non_exhaustive]
 pub struct MultipartDeepScanlinePart<'a> {
     /// Part name (must be unique across all parts in the file).
     pub name: String,
@@ -1339,6 +1418,29 @@ pub struct MultipartDeepScanlinePart<'a> {
     /// the [`DeepExrImage`] convention).
     pub channel_samples: Vec<&'a [f32]>,
     pub compression: Compression,
+}
+
+impl<'a> MultipartDeepScanlinePart<'a> {
+    /// Build `MultipartDeepScanlinePart` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        width: u32,
+        height: u32,
+        channels: Vec<Channel>,
+        samples_per_pixel: &'a [u32],
+        channel_samples: Vec<&'a [f32]>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            width,
+            height,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            compression,
+        }
+    }
 }
 
 /// Encode a multi-part deep scanline EXR (version-field bits 0x1800).
@@ -1749,6 +1851,7 @@ fn build_deep_part_attrs(
 // ---------------------------------------------------------------------
 
 /// Input descriptor for [`encode_exr_deep_tiled`].
+#[non_exhaustive]
 pub struct DeepTiledInput<'a> {
     pub width: u32,
     pub height: u32,
@@ -1770,6 +1873,32 @@ pub struct DeepTiledInput<'a> {
     pub compression: Compression,
 }
 
+impl<'a> DeepTiledInput<'a> {
+    /// Build `DeepTiledInput` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        width: u32,
+        height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        samples_per_pixel: &'a [u32],
+        channel_samples: Vec<&'a [f32]>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            tile_x,
+            tile_y,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            compression,
+        }
+    }
+}
+
 /// Single-part deep-tiled EXR returned by [`parse_exr_deep_tiled`].
 ///
 /// Pixel data is materialised into the same flat layout
@@ -1780,6 +1909,7 @@ pub struct DeepTiledInput<'a> {
 /// coordinates before return — callers don't have to know the file was
 /// tiled.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepTiledImage {
     pub data_window: Box2i,
     pub display_window: Box2i,
@@ -1792,6 +1922,36 @@ pub struct DeepTiledImage {
     pub samples_per_pixel: Vec<u32>,
     pub channel_samples: Vec<Vec<f32>>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepTiledImage {
+    /// Build `DeepTiledImage` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            tile_x,
+            tile_y,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            attributes,
+        }
+    }
 }
 
 impl DeepTiledImage {
@@ -2595,6 +2755,7 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
 /// [`encode_exr_multipart_deep_tiled`].
 ///
 /// `name` is mandatory and must be unique across all parts.
+#[non_exhaustive]
 pub struct MultipartDeepTiledPart<'a> {
     /// Part name (must be unique across all parts in the file).
     pub name: String,
@@ -2617,6 +2778,34 @@ pub struct MultipartDeepTiledPart<'a> {
     pub compression: Compression,
 }
 
+impl<'a> MultipartDeepTiledPart<'a> {
+    /// Build `MultipartDeepTiledPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        width: u32,
+        height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        samples_per_pixel: &'a [u32],
+        channel_samples: Vec<&'a [f32]>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            width,
+            height,
+            tile_x,
+            tile_y,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            compression,
+        }
+    }
+}
+
 /// One part of a multi-part deep-tiled file, returned from
 /// [`parse_exr_multipart_deep_tiled`].
 ///
@@ -2627,6 +2816,7 @@ pub struct MultipartDeepTiledPart<'a> {
 /// into row-major pixel coordinates before return — callers don't have
 /// to know the part was tiled.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepTiledPart {
     pub name: String,
     pub data_window: Box2i,
@@ -2639,6 +2829,38 @@ pub struct DeepTiledPart {
     pub samples_per_pixel: Vec<u32>,
     pub channel_samples: Vec<Vec<f32>>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepTiledPart {
+    /// Build `DeepTiledPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            tile_x,
+            tile_y,
+            channels,
+            samples_per_pixel,
+            channel_samples,
+            attributes,
+        }
+    }
 }
 
 impl DeepTiledPart {
@@ -3601,6 +3823,7 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
 /// `channel_samples[c]` is `samples_per_pixel.iter().sum()` long, in
 /// pixel-scan (row-major) order. UINT channels store the u32 bits as f32
 /// (matching the [`DeepExrImage`] convention).
+#[non_exhaustive]
 pub struct DeepMipmapTiledLevelInput<'a> {
     pub width: u32,
     pub height: u32,
@@ -3610,7 +3833,25 @@ pub struct DeepMipmapTiledLevelInput<'a> {
     pub channel_samples: Vec<&'a [f32]>,
 }
 
+impl<'a> DeepMipmapTiledLevelInput<'a> {
+    /// Build `DeepMipmapTiledLevelInput` from every field, in declaration order.
+    pub fn new(
+        width: u32,
+        height: u32,
+        samples_per_pixel: &'a [u32],
+        channel_samples: Vec<&'a [f32]>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            samples_per_pixel,
+            channel_samples,
+        }
+    }
+}
+
 /// Input descriptor for [`encode_exr_deep_tiled_mipmap`].
+#[non_exhaustive]
 pub struct DeepMipmapTiledInput<'a> {
     /// Tile pixel dimensions. Both must be > 0; edge tiles store only
     /// the valid pixel rectangle (i.e. last row/column tiles in a level
@@ -3628,8 +3869,28 @@ pub struct DeepMipmapTiledInput<'a> {
     pub compression: Compression,
 }
 
+impl<'a> DeepMipmapTiledInput<'a> {
+    /// Build `DeepMipmapTiledInput` from every field, in declaration order.
+    pub fn new(
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        pyramid: Vec<DeepMipmapTiledLevelInput<'a>>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            tile_x,
+            tile_y,
+            channels,
+            pyramid,
+            compression,
+        }
+    }
+}
+
 /// One decoded level of a deep-tiled MIPMAP pyramid.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepTiledMipmapLevel {
     pub width: u32,
     pub height: u32,
@@ -3640,9 +3901,27 @@ pub struct DeepTiledMipmapLevel {
     pub channel_samples: Vec<Vec<f32>>,
 }
 
+impl DeepTiledMipmapLevel {
+    /// Build `DeepTiledMipmapLevel` from every field, in declaration order.
+    pub fn new(
+        width: u32,
+        height: u32,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            samples_per_pixel,
+            channel_samples,
+        }
+    }
+}
+
 /// Single-part deep-tiled MIPMAP_LEVELS EXR returned by
 /// [`parse_exr_deep_tiled_mipmap`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepMipmapTiledImage {
     pub data_window: Box2i,
     pub display_window: Box2i,
@@ -3655,6 +3934,34 @@ pub struct DeepMipmapTiledImage {
     /// One entry per level (`0..N-1`).
     pub levels: Vec<DeepTiledMipmapLevel>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepMipmapTiledImage {
+    /// Build `DeepMipmapTiledImage` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        levels: Vec<DeepTiledMipmapLevel>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            tile_x,
+            tile_y,
+            channels,
+            levels,
+            attributes,
+        }
+    }
 }
 
 impl DeepMipmapTiledImage {
@@ -4527,6 +4834,7 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
 /// `channel_samples[c]` is `samples_per_pixel.iter().sum()` long, in
 /// pixel-scan (row-major) order. UINT channels store the u32 bits as f32
 /// (matching the [`DeepExrImage`] convention).
+#[non_exhaustive]
 pub struct DeepRipmapTiledLevelInput<'a> {
     pub width: u32,
     pub height: u32,
@@ -4534,6 +4842,23 @@ pub struct DeepRipmapTiledLevelInput<'a> {
     pub samples_per_pixel: &'a [u32],
     /// One f32 slice per channel.
     pub channel_samples: Vec<&'a [f32]>,
+}
+
+impl<'a> DeepRipmapTiledLevelInput<'a> {
+    /// Build `DeepRipmapTiledLevelInput` from every field, in declaration order.
+    pub fn new(
+        width: u32,
+        height: u32,
+        samples_per_pixel: &'a [u32],
+        channel_samples: Vec<&'a [f32]>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            samples_per_pixel,
+            channel_samples,
+        }
+    }
 }
 
 /// Input descriptor for [`encode_exr_deep_tiled_ripmap`].
@@ -4544,6 +4869,7 @@ pub struct DeepRipmapTiledLevelInput<'a> {
 /// ROUND_DOWN reduction convention, and every row must have the same
 /// length. Cell `(lvlx, lvly)` must have dimensions `(mipmap_level_dim(w,
 /// lvlx), mipmap_level_dim(h, lvly))`.
+#[non_exhaustive]
 pub struct DeepRipmapTiledInput<'a> {
     /// Tile pixel dimensions. Both must be > 0; edge tiles store only
     /// the valid pixel rectangle.
@@ -4557,8 +4883,28 @@ pub struct DeepRipmapTiledInput<'a> {
     pub compression: Compression,
 }
 
+impl<'a> DeepRipmapTiledInput<'a> {
+    /// Build `DeepRipmapTiledInput` from every field, in declaration order.
+    pub fn new(
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        grid: Vec<Vec<DeepRipmapTiledLevelInput<'a>>>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            tile_x,
+            tile_y,
+            channels,
+            grid,
+            compression,
+        }
+    }
+}
+
 /// One decoded cell of a deep-tiled RIPMAP grid.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepTiledRipmapCell {
     pub level_x: u32,
     pub level_y: u32,
@@ -4571,10 +4917,32 @@ pub struct DeepTiledRipmapCell {
     pub channel_samples: Vec<Vec<f32>>,
 }
 
+impl DeepTiledRipmapCell {
+    /// Build `DeepTiledRipmapCell` from every field, in declaration order.
+    pub fn new(
+        level_x: u32,
+        level_y: u32,
+        width: u32,
+        height: u32,
+        samples_per_pixel: Vec<u32>,
+        channel_samples: Vec<Vec<f32>>,
+    ) -> Self {
+        Self {
+            level_x,
+            level_y,
+            width,
+            height,
+            samples_per_pixel,
+            channel_samples,
+        }
+    }
+}
+
 /// Single-part deep-tiled RIPMAP_LEVELS EXR returned by
 /// [`parse_exr_deep_tiled_ripmap`]. `grid[lvly][lvlx]` matches the
 /// encoder's input shape.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepRipmapTiledImage {
     pub data_window: Box2i,
     pub display_window: Box2i,
@@ -4588,6 +4956,34 @@ pub struct DeepRipmapTiledImage {
     /// is the x-level (0..nx-1).
     pub grid: Vec<Vec<DeepTiledRipmapCell>>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepRipmapTiledImage {
+    /// Build `DeepRipmapTiledImage` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        grid: Vec<Vec<DeepTiledRipmapCell>>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            tile_x,
+            tile_y,
+            channels,
+            grid,
+            attributes,
+        }
+    }
 }
 
 impl DeepRipmapTiledImage {
@@ -5520,6 +5916,7 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
 /// is the full ROUND_DOWN mipmap pyramid; `pyramid[0]` is the
 /// full-resolution level and length must equal
 /// `mipmap_level_count(max(width, height), false)`.
+#[non_exhaustive]
 pub struct MultipartDeepMipmapTiledPart<'a> {
     /// Part name (must be unique across all parts in the file).
     pub name: String,
@@ -5538,6 +5935,27 @@ pub struct MultipartDeepMipmapTiledPart<'a> {
     pub compression: Compression,
 }
 
+impl<'a> MultipartDeepMipmapTiledPart<'a> {
+    /// Build `MultipartDeepMipmapTiledPart` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        pyramid: Vec<DeepMipmapTiledLevelInput<'a>>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            tile_x,
+            tile_y,
+            channels,
+            pyramid,
+            compression,
+        }
+    }
+}
+
 /// One part of a multi-part deep-tiled MIPMAP_LEVELS file, returned
 /// from [`parse_exr_multipart_deep_tiled_mipmap`].
 ///
@@ -5545,6 +5963,7 @@ pub struct MultipartDeepMipmapTiledPart<'a> {
 /// by [`DeepMipmapTiledImage::levels`]; the tile-grid structure is
 /// fully reassembled into row-major pixel coordinates before return.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepMipmapTiledPart {
     pub name: String,
     pub data_window: Box2i,
@@ -5557,6 +5976,36 @@ pub struct DeepMipmapTiledPart {
     /// One entry per level (`0..N-1`).
     pub levels: Vec<DeepTiledMipmapLevel>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepMipmapTiledPart {
+    /// Build `DeepMipmapTiledPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        levels: Vec<DeepTiledMipmapLevel>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            tile_x,
+            tile_y,
+            channels,
+            levels,
+            attributes,
+        }
+    }
 }
 
 impl DeepMipmapTiledPart {
@@ -6606,6 +7055,7 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
 /// must have `mipmap_level_count(level0_w, false)` cells. Cell `(lvlx,
 /// lvly)` has dimensions
 /// `(mipmap_level_dim(level0_w, lvlx), mipmap_level_dim(level0_h, lvly))`.
+#[non_exhaustive]
 pub struct MultipartDeepRipmapTiledPart<'a> {
     /// Part name (must be unique across all parts in the file).
     pub name: String,
@@ -6621,6 +7071,27 @@ pub struct MultipartDeepRipmapTiledPart<'a> {
     pub compression: Compression,
 }
 
+impl<'a> MultipartDeepRipmapTiledPart<'a> {
+    /// Build `MultipartDeepRipmapTiledPart` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        grid: Vec<Vec<DeepRipmapTiledLevelInput<'a>>>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            tile_x,
+            tile_y,
+            channels,
+            grid,
+            compression,
+        }
+    }
+}
+
 /// One part of a multi-part deep-tiled RIPMAP_LEVELS file, returned
 /// from [`parse_exr_multipart_deep_tiled_ripmap`].
 ///
@@ -6628,6 +7099,7 @@ pub struct MultipartDeepRipmapTiledPart<'a> {
 /// by [`DeepRipmapTiledImage::grid`]; the tile-grid structure is fully
 /// reassembled into row-major pixel coordinates before return.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DeepRipmapTiledPart {
     pub name: String,
     pub data_window: Box2i,
@@ -6641,6 +7113,36 @@ pub struct DeepRipmapTiledPart {
     /// is the x-level (0..nx-1).
     pub grid: Vec<Vec<DeepTiledRipmapCell>>,
     pub attributes: Vec<Attribute>,
+}
+
+impl DeepRipmapTiledPart {
+    /// Build `DeepRipmapTiledPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        grid: Vec<Vec<DeepTiledRipmapCell>>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            name,
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            tile_x,
+            tile_y,
+            channels,
+            grid,
+            attributes,
+        }
+    }
 }
 
 impl DeepRipmapTiledPart {

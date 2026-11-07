@@ -52,13 +52,13 @@ fn data_window(attrs: &[Attribute]) -> Box2i {
 }
 
 fn gray_channel() -> Vec<Channel> {
-    vec![Channel {
-        name: "Y".to_string(),
-        pixel_type: oxideav_openexr::PixelType::Half,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }]
+    vec![Channel::new(
+        "Y".to_string(),
+        oxideav_openexr::PixelType::Half,
+        false,
+        1,
+        1,
+    )]
 }
 
 /// Assert every part shares one displayWindow equal to the bounding box
@@ -87,22 +87,22 @@ fn scanline_multipart_shares_display_window() {
     let g0: Vec<f32> = (0..(w0 * h0) as usize).map(|i| i as f32 * 0.02).collect();
     let g1: Vec<f32> = (0..(w1 * h1) as usize).map(|i| i as f32 * 0.03).collect();
     let parts = vec![
-        MultipartScanlinePart {
-            name: "big".to_string(),
-            width: w0,
-            height: h0,
-            channels: gray_channel(),
-            planes: vec![g0.as_slice()],
-            compression: Compression::Zip,
-        },
-        MultipartScanlinePart {
-            name: "small".to_string(),
-            width: w1,
-            height: h1,
-            channels: gray_channel(),
-            planes: vec![g1.as_slice()],
-            compression: Compression::Rle,
-        },
+        MultipartScanlinePart::new(
+            "big".to_string(),
+            w0,
+            h0,
+            gray_channel(),
+            vec![g0.as_slice()],
+            Compression::Zip,
+        ),
+        MultipartScanlinePart::new(
+            "small".to_string(),
+            w1,
+            h1,
+            gray_channel(),
+            vec![g1.as_slice()],
+            Compression::Rle,
+        ),
     ];
     let bytes = encode_exr_multipart(&parts).unwrap();
     let images = parse_exr_multipart(&bytes).unwrap();
@@ -121,26 +121,26 @@ fn tiled_multipart_shares_display_window() {
     let g0: Vec<f32> = vec![0.5; (w0 * h0) as usize];
     let g1: Vec<f32> = vec![0.7; (w1 * h1) as usize];
     let parts = vec![
-        MultipartTiledPart {
-            name: "big".to_string(),
-            width: w0,
-            height: h0,
-            tile_x: 8,
-            tile_y: 8,
-            channels: gray_channel(),
-            planes: vec![g0.as_slice()],
-            compression: Compression::Zip,
-        },
-        MultipartTiledPart {
-            name: "small".to_string(),
-            width: w1,
-            height: h1,
-            tile_x: 8,
-            tile_y: 8,
-            channels: gray_channel(),
-            planes: vec![g1.as_slice()],
-            compression: Compression::Zip,
-        },
+        MultipartTiledPart::new(
+            "big".to_string(),
+            w0,
+            h0,
+            8,
+            8,
+            gray_channel(),
+            vec![g0.as_slice()],
+            Compression::Zip,
+        ),
+        MultipartTiledPart::new(
+            "small".to_string(),
+            w1,
+            h1,
+            8,
+            8,
+            gray_channel(),
+            vec![g1.as_slice()],
+            Compression::Zip,
+        ),
     ];
     let bytes = encode_exr_multipart_tiled(&parts).unwrap();
     let images = parse_exr_multipart_tiled(&bytes).unwrap();
@@ -158,11 +158,11 @@ fn mipmap_pyramid(w: u32, h: u32, fill: f32) -> Vec<MipmapLevel> {
     let mut levels = Vec::with_capacity(n as usize);
     let (mut lw, mut lh) = (w, h);
     for _ in 0..n {
-        levels.push(MipmapLevel {
-            width: lw,
-            height: lh,
-            planes: vec![vec![fill; (lw * lh) as usize]],
-        });
+        levels.push(MipmapLevel::new(
+            lw,
+            lh,
+            vec![vec![fill; (lw * lh) as usize]],
+        ));
         lw = (lw / 2).max(1);
         lh = (lh / 2).max(1);
     }
@@ -173,22 +173,22 @@ fn mipmap_pyramid(w: u32, h: u32, fill: f32) -> Vec<MipmapLevel> {
 fn mipmap_multipart_shares_display_window() {
     let (w0, h0, w1, h1) = (32u32, 32u32, 16u32, 16u32);
     let parts = vec![
-        MultipartMipmapTiledPart {
-            name: "big".to_string(),
-            tile_x: 8,
-            tile_y: 8,
-            channels: gray_channel(),
-            pyramid: mipmap_pyramid(w0, h0, 0.5),
-            compression: Compression::Zip,
-        },
-        MultipartMipmapTiledPart {
-            name: "small".to_string(),
-            tile_x: 8,
-            tile_y: 8,
-            channels: gray_channel(),
-            pyramid: mipmap_pyramid(w1, h1, 0.7),
-            compression: Compression::Zip,
-        },
+        MultipartMipmapTiledPart::new(
+            "big".to_string(),
+            8,
+            8,
+            gray_channel(),
+            mipmap_pyramid(w0, h0, 0.5),
+            Compression::Zip,
+        ),
+        MultipartMipmapTiledPart::new(
+            "small".to_string(),
+            8,
+            8,
+            gray_channel(),
+            mipmap_pyramid(w1, h1, 0.7),
+            Compression::Zip,
+        ),
     ];
     let bytes = encode_exr_multipart_tiled_mipmap(&parts).unwrap();
     let parts_out = parse_exr_multipart_tiled_multilevel(&bytes).unwrap();
@@ -222,37 +222,37 @@ fn ripmap_pyramid(w: u32, h: u32, fill: f32) -> RipmapPyramid {
         for lx in 0..nx {
             let lw = (w >> lx).max(1);
             let lh = (h >> ly).max(1);
-            row.push(MipmapLevel {
-                width: lw,
-                height: lh,
-                planes: vec![vec![fill; (lw * lh) as usize]],
-            });
+            row.push(MipmapLevel::new(
+                lw,
+                lh,
+                vec![vec![fill; (lw * lh) as usize]],
+            ));
         }
         grid.push(row);
     }
-    RipmapPyramid { grid }
+    RipmapPyramid::new(grid)
 }
 
 #[test]
 fn ripmap_multipart_shares_display_window() {
     let (w0, h0, w1, h1) = (32u32, 32u32, 16u32, 16u32);
     let parts = vec![
-        MultipartRipmapTiledPart {
-            name: "big".to_string(),
-            tile_x: 8,
-            tile_y: 8,
-            channels: gray_channel(),
-            pyramid: ripmap_pyramid(w0, h0, 0.5),
-            compression: Compression::Zip,
-        },
-        MultipartRipmapTiledPart {
-            name: "small".to_string(),
-            tile_x: 8,
-            tile_y: 8,
-            channels: gray_channel(),
-            pyramid: ripmap_pyramid(w1, h1, 0.7),
-            compression: Compression::Zip,
-        },
+        MultipartRipmapTiledPart::new(
+            "big".to_string(),
+            8,
+            8,
+            gray_channel(),
+            ripmap_pyramid(w0, h0, 0.5),
+            Compression::Zip,
+        ),
+        MultipartRipmapTiledPart::new(
+            "small".to_string(),
+            8,
+            8,
+            gray_channel(),
+            ripmap_pyramid(w1, h1, 0.7),
+            Compression::Zip,
+        ),
     ];
     let bytes = encode_exr_multipart_tiled_ripmap(&parts).unwrap();
     let parts_out = parse_exr_multipart_tiled_multilevel(&bytes).unwrap();
@@ -289,32 +289,32 @@ fn deep_scanline_multipart_shares_display_window() {
     let samp1: Vec<f32> = (0..spp1.iter().sum::<u32>())
         .map(|i| i as f32 * 0.2)
         .collect();
-    let deep_ch = vec![Channel {
-        name: "A".to_string(),
-        pixel_type: oxideav_openexr::PixelType::Float,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let deep_ch = vec![Channel::new(
+        "A".to_string(),
+        oxideav_openexr::PixelType::Float,
+        false,
+        1,
+        1,
+    )];
     let parts = vec![
-        MultipartDeepScanlinePart {
-            name: "big".to_string(),
-            width: w0,
-            height: h0,
-            channels: deep_ch.clone(),
-            samples_per_pixel: &spp0,
-            channel_samples: vec![&samp0],
-            compression: Compression::Zips,
-        },
-        MultipartDeepScanlinePart {
-            name: "small".to_string(),
-            width: w1,
-            height: h1,
-            channels: deep_ch.clone(),
-            samples_per_pixel: &spp1,
-            channel_samples: vec![&samp1],
-            compression: Compression::Zips,
-        },
+        MultipartDeepScanlinePart::new(
+            "big".to_string(),
+            w0,
+            h0,
+            deep_ch.clone(),
+            &spp0,
+            vec![&samp0],
+            Compression::Zips,
+        ),
+        MultipartDeepScanlinePart::new(
+            "small".to_string(),
+            w1,
+            h1,
+            deep_ch.clone(),
+            &spp1,
+            vec![&samp1],
+            Compression::Zips,
+        ),
     ];
     let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
     let parts_out = parse_exr_deep_multipart(&bytes).unwrap();

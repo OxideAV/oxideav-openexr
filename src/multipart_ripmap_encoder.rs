@@ -52,6 +52,7 @@ use crate::types::{
 /// Channels must be in alphabetical order and match each ripmap cell's
 /// plane order. The pyramid grid is indexed `grid[lvly][lvlx]` and must
 /// be `ripmap_level_counts_round_down(level0_w, level0_h)` shaped.
+#[non_exhaustive]
 pub struct MultipartRipmapTiledPart {
     /// Unique non-empty part name.
     pub name: String,
@@ -69,6 +70,27 @@ pub struct MultipartRipmapTiledPart {
     /// Per-part compression (applied uniformly across the grid, per the
     /// single `compression` header attribute).
     pub compression: Compression,
+}
+
+impl MultipartRipmapTiledPart {
+    /// Build `MultipartRipmapTiledPart` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        pyramid: RipmapPyramid,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            tile_x,
+            tile_y,
+            channels,
+            pyramid,
+            compression,
+        }
+    }
 }
 
 /// Encode a multi-part flat (non-deep) RIPMAP_LEVELS tiled EXR file.

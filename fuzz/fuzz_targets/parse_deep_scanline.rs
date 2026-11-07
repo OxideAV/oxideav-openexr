@@ -40,20 +40,8 @@ fn mk_channels() -> Vec<Channel> {
     // Two HALF channels in alphabetical order (the decoder sorts, but
     // the writer wants them pre-sorted).
     vec![
-        Channel {
-            name: "A".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "Z".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("A".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("Z".to_string(), PixelType::Half, false, 1, 1),
     ]
 }
 
@@ -67,14 +55,14 @@ fn base_file(compression: Compression) -> Option<Vec<u8>> {
     let total: usize = spp.iter().map(|&v| v as usize).sum();
     let ch_a: Vec<f32> = (0..total).map(|i| i as f32 * 0.5).collect();
     let ch_z: Vec<f32> = (0..total).map(|i| i as f32 * 0.25).collect();
-    let input = DeepScanlineInput {
+    let input = DeepScanlineInput::new(
         width,
         height,
-        channels: mk_channels(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&ch_a, &ch_z],
+        mk_channels(),
+        &spp,
+        vec![&ch_a, &ch_z],
         compression,
-    };
+    );
     encode_exr_deep_scanline(&input).ok()
 }
 

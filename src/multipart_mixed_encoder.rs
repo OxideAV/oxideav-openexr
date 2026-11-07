@@ -80,6 +80,7 @@ use crate::types::{
 /// [`crate::MultipartDeepScanlinePart`] and
 /// [`crate::MultipartDeepTiledPart`]. The writer dispatches on the
 /// variant to emit the matching per-part header + chunk shape.
+#[non_exhaustive]
 pub enum MultipartMixedPart<'a> {
     /// Flat scanline part (`type="scanlineimage"`). Honours every
     /// rule the single-typed scanline writer does.
@@ -264,6 +265,7 @@ impl MultipartMixedPart<'_> {
 /// [`ExrPart`], deep variants wrap the same part payloads the
 /// homogeneous deep multi-part readers return.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MultipartMixedImage {
     Scanline(ExrPart),
     Tiled(ExrPart),

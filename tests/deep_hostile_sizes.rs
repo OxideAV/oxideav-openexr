@@ -32,13 +32,7 @@ use oxideav_openexr::types::{Channel, Compression, PixelType};
 fn channels_half() -> Vec<Channel> {
     ["A", "Z"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Half, false, 1, 1))
         .collect()
 }
 
@@ -68,14 +62,14 @@ fn sweep<F: Fn(&[u8])>(bytes: &[u8], parse: F) {
 #[test]
 fn deep_scanline_hostile_sizes_never_panic() {
     let (spp, a, z) = build_level(6, 4);
-    let bytes = encode_exr_deep_scanline(&DeepScanlineInput {
-        width: 6,
-        height: 4,
-        channels: channels_half(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&a, &z],
-        compression: Compression::None,
-    })
+    let bytes = encode_exr_deep_scanline(&DeepScanlineInput::new(
+        6,
+        4,
+        channels_half(),
+        &spp,
+        vec![&a, &z],
+        Compression::None,
+    ))
     .unwrap();
     assert!(parse_exr_deep_scanline(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -86,16 +80,16 @@ fn deep_scanline_hostile_sizes_never_panic() {
 #[test]
 fn deep_tiled_hostile_sizes_never_panic() {
     let (spp, a, z) = build_level(8, 8);
-    let bytes = encode_exr_deep_tiled(&DeepTiledInput {
-        width: 8,
-        height: 8,
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_half(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&a, &z],
-        compression: Compression::None,
-    })
+    let bytes = encode_exr_deep_tiled(&DeepTiledInput::new(
+        8,
+        8,
+        4,
+        4,
+        channels_half(),
+        &spp,
+        vec![&a, &z],
+        Compression::None,
+    ))
     .unwrap();
     assert!(parse_exr_deep_tiled(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -124,20 +118,15 @@ fn deep_tiled_mipmap_hostile_sizes_never_panic() {
     let levels = mipmap_levels(8, 8);
     let pyramid: Vec<DeepMipmapTiledLevelInput> = levels
         .iter()
-        .map(|(lw, lh, spp, a, z)| DeepMipmapTiledLevelInput {
-            width: *lw,
-            height: *lh,
-            samples_per_pixel: spp,
-            channel_samples: vec![a, z],
-        })
+        .map(|(lw, lh, spp, a, z)| DeepMipmapTiledLevelInput::new(*lw, *lh, spp, vec![a, z]))
         .collect();
-    let bytes = encode_exr_deep_tiled_mipmap(&DeepMipmapTiledInput {
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_half(),
+    let bytes = encode_exr_deep_tiled_mipmap(&DeepMipmapTiledInput::new(
+        4,
+        4,
+        channels_half(),
         pyramid,
-        compression: Compression::None,
-    })
+        Compression::None,
+    ))
     .unwrap();
     assert!(parse_exr_deep_tiled_mipmap(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -176,22 +165,19 @@ fn deep_tiled_ripmap_hostile_sizes_never_panic() {
         .iter()
         .map(|row| {
             row.iter()
-                .map(|(lw, lh, spp, a, z)| DeepRipmapTiledLevelInput {
-                    width: *lw,
-                    height: *lh,
-                    samples_per_pixel: spp,
-                    channel_samples: vec![a, z],
+                .map(|(lw, lh, spp, a, z)| {
+                    DeepRipmapTiledLevelInput::new(*lw, *lh, spp, vec![a, z])
                 })
                 .collect()
         })
         .collect();
-    let bytes = encode_exr_deep_tiled_ripmap(&DeepRipmapTiledInput {
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_half(),
+    let bytes = encode_exr_deep_tiled_ripmap(&DeepRipmapTiledInput::new(
+        4,
+        4,
+        channels_half(),
         grid,
-        compression: Compression::None,
-    })
+        Compression::None,
+    ))
     .unwrap();
     assert!(parse_exr_deep_tiled_ripmap(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -202,15 +188,15 @@ fn deep_tiled_ripmap_hostile_sizes_never_panic() {
 #[test]
 fn multipart_deep_scanline_hostile_sizes_never_panic() {
     let (spp, a, z) = build_level(6, 4);
-    let bytes = encode_exr_multipart_deep_scanline(&[MultipartDeepScanlinePart {
-        name: "p0".to_string(),
-        width: 6,
-        height: 4,
-        channels: channels_half(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&a, &z],
-        compression: Compression::None,
-    }])
+    let bytes = encode_exr_multipart_deep_scanline(&[MultipartDeepScanlinePart::new(
+        "p0".to_string(),
+        6,
+        4,
+        channels_half(),
+        &spp,
+        vec![&a, &z],
+        Compression::None,
+    )])
     .unwrap();
     assert!(parse_exr_deep_multipart(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -221,17 +207,17 @@ fn multipart_deep_scanline_hostile_sizes_never_panic() {
 #[test]
 fn multipart_deep_tiled_hostile_sizes_never_panic() {
     let (spp, a, z) = build_level(8, 8);
-    let bytes = encode_exr_multipart_deep_tiled(&[MultipartDeepTiledPart {
-        name: "p0".to_string(),
-        width: 8,
-        height: 8,
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_half(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&a, &z],
-        compression: Compression::None,
-    }])
+    let bytes = encode_exr_multipart_deep_tiled(&[MultipartDeepTiledPart::new(
+        "p0".to_string(),
+        8,
+        8,
+        4,
+        4,
+        channels_half(),
+        &spp,
+        vec![&a, &z],
+        Compression::None,
+    )])
     .unwrap();
     assert!(parse_exr_multipart_deep_tiled(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -244,21 +230,16 @@ fn multipart_deep_tiled_mipmap_hostile_sizes_never_panic() {
     let levels = mipmap_levels(8, 8);
     let pyramid: Vec<DeepMipmapTiledLevelInput> = levels
         .iter()
-        .map(|(lw, lh, spp, a, z)| DeepMipmapTiledLevelInput {
-            width: *lw,
-            height: *lh,
-            samples_per_pixel: spp,
-            channel_samples: vec![a, z],
-        })
+        .map(|(lw, lh, spp, a, z)| DeepMipmapTiledLevelInput::new(*lw, *lh, spp, vec![a, z]))
         .collect();
-    let bytes = encode_exr_multipart_deep_tiled_mipmap(&[MultipartDeepMipmapTiledPart {
-        name: "p0".to_string(),
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_half(),
+    let bytes = encode_exr_multipart_deep_tiled_mipmap(&[MultipartDeepMipmapTiledPart::new(
+        "p0".to_string(),
+        4,
+        4,
+        channels_half(),
         pyramid,
-        compression: Compression::None,
-    }])
+        Compression::None,
+    )])
     .unwrap();
     assert!(parse_exr_multipart_deep_tiled_mipmap(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -273,23 +254,20 @@ fn multipart_deep_tiled_ripmap_hostile_sizes_never_panic() {
         .iter()
         .map(|row| {
             row.iter()
-                .map(|(lw, lh, spp, a, z)| DeepRipmapTiledLevelInput {
-                    width: *lw,
-                    height: *lh,
-                    samples_per_pixel: spp,
-                    channel_samples: vec![a, z],
+                .map(|(lw, lh, spp, a, z)| {
+                    DeepRipmapTiledLevelInput::new(*lw, *lh, spp, vec![a, z])
                 })
                 .collect()
         })
         .collect();
-    let bytes = encode_exr_multipart_deep_tiled_ripmap(&[MultipartDeepRipmapTiledPart {
-        name: "p0".to_string(),
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_half(),
+    let bytes = encode_exr_multipart_deep_tiled_ripmap(&[MultipartDeepRipmapTiledPart::new(
+        "p0".to_string(),
+        4,
+        4,
+        channels_half(),
         grid,
-        compression: Compression::None,
-    }])
+        Compression::None,
+    )])
     .unwrap();
     assert!(parse_exr_multipart_deep_tiled_ripmap(&bytes).is_ok());
     sweep(&bytes, |b| {

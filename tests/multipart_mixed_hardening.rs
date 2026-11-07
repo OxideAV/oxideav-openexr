@@ -17,13 +17,7 @@ use oxideav_openexr::{
 fn channels_rgba_float() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -54,11 +48,13 @@ fn fixture() -> Vec<u8> {
         .collect();
     let pyramid: Vec<DeepMipmapTiledLevelInput> = levels
         .iter()
-        .map(|(lw, lh, spp, planes)| DeepMipmapTiledLevelInput {
-            width: *lw,
-            height: *lh,
-            samples_per_pixel: spp,
-            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        .map(|(lw, lh, spp, planes)| {
+            DeepMipmapTiledLevelInput::new(
+                *lw,
+                *lh,
+                spp,
+                vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            )
         })
         .collect();
     encode_exr_multipart_mixed(&[

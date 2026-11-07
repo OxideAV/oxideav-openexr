@@ -21,20 +21,8 @@ use oxideav_openexr::{
 
 fn channels() -> Vec<Channel> {
     vec![
-        Channel {
-            name: "A".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "Z".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("A".to_string(), PixelType::Float, false, 1, 1),
+        Channel::new("Z".to_string(), PixelType::Float, false, 1, 1),
     ]
 }
 
@@ -157,24 +145,24 @@ fn deep_multipart_decreasing_storage_decodes_identically() {
     let (spp0, a0, z0) = part_data(w, h, 100.0);
     let (spp1, a1, z1) = part_data(w, h, 500.0);
     let file = encode_exr_multipart_deep_scanline(&[
-        MultipartDeepScanlinePart {
-            name: "front".to_string(),
-            width: w,
-            height: h,
-            channels: channels(),
-            samples_per_pixel: &spp0,
-            channel_samples: vec![&a0, &z0],
-            compression: Compression::None,
-        },
-        MultipartDeepScanlinePart {
-            name: "back".to_string(),
-            width: w,
-            height: h,
-            channels: channels(),
-            samples_per_pixel: &spp1,
-            channel_samples: vec![&a1, &z1],
-            compression: Compression::None,
-        },
+        MultipartDeepScanlinePart::new(
+            "front".to_string(),
+            w,
+            h,
+            channels(),
+            &spp0,
+            vec![&a0, &z0],
+            Compression::None,
+        ),
+        MultipartDeepScanlinePart::new(
+            "back".to_string(),
+            w,
+            h,
+            channels(),
+            &spp1,
+            vec![&a1, &z1],
+            Compression::None,
+        ),
     ])
     .unwrap();
 

@@ -72,13 +72,7 @@ fn reference_convert(input_bytes: &[u8], z: &str) -> Option<Vec<u8>> {
 }
 
 fn ch(name: &str, pt: PixelType) -> Channel {
-    Channel {
-        name: name.to_string(),
-        pixel_type: pt,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }
+    Channel::new(name.to_string(), pt, false, 1, 1)
 }
 
 fn smooth_plane(w: u32, h: u32, scale: f32, offset: f32) -> Vec<f32> {
@@ -173,28 +167,28 @@ fn dwa_mipmap_roundtrip() {
 fn dwa_multipart_scanline_and_tiled_roundtrip() {
     let (w, h) = (33u32, 40u32);
     let g0 = smooth_plane(w, h, 1.5, 0.3);
-    let parts = vec![MultipartScanlinePart {
-        name: "p0".to_string(),
-        width: w,
-        height: h,
-        channels: vec![ch("G", PixelType::Half)],
-        planes: vec![&g0],
-        compression: Compression::Dwaa,
-    }];
+    let parts = vec![MultipartScanlinePart::new(
+        "p0".to_string(),
+        w,
+        h,
+        vec![ch("G", PixelType::Half)],
+        vec![&g0],
+        Compression::Dwaa,
+    )];
     let bytes = encode_exr_multipart(&parts).unwrap();
     let imgs = parse_exr_multipart(&bytes).unwrap();
     assert_close(&imgs[0].planes[0].samples, &g0, 0.05, "mp scanline dwaa");
 
-    let tiled = vec![MultipartTiledPart {
-        name: "t0".to_string(),
-        width: w,
-        height: h,
-        tile_x: 16,
-        tile_y: 16,
-        channels: vec![ch("G", PixelType::Half)],
-        planes: vec![&g0],
-        compression: Compression::Dwaa,
-    }];
+    let tiled = vec![MultipartTiledPart::new(
+        "t0".to_string(),
+        w,
+        h,
+        16,
+        16,
+        vec![ch("G", PixelType::Half)],
+        vec![&g0],
+        Compression::Dwaa,
+    )];
     let bytes = encode_exr_multipart_tiled(&tiled).unwrap();
     let imgs = parse_exr_multipart_tiled(&bytes).unwrap();
     assert_close(&imgs[0].planes[0].samples, &g0, 0.05, "mp tiled dwaa");

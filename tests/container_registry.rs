@@ -445,13 +445,7 @@ fn multipart_demux_metadata_carries_part_names() {
 fn rgba_float_channels() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: (*n).to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new((*n).to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -489,13 +483,13 @@ fn multipart_demux_skips_deep_and_viewless_parts_like_decode_all() {
             name: "aov".to_string(),
             width: w,
             height: h,
-            channels: vec![Channel {
-                name: "N.x".to_string(),
-                pixel_type: PixelType::Float,
-                p_linear: false,
-                x_sampling: 1,
-                y_sampling: 1,
-            }],
+            channels: vec![Channel::new(
+                "N.x".to_string(),
+                PixelType::Float,
+                false,
+                1,
+                1,
+            )],
             planes: vec![&aov],
             compression: Compression::None,
         },
@@ -513,13 +507,7 @@ fn multipart_demux_skips_deep_and_viewless_parts_like_decode_all() {
             name: "deep".to_string(),
             width: w,
             height: h,
-            channels: vec![Channel {
-                name: "Z".to_string(),
-                pixel_type: PixelType::Float,
-                p_linear: false,
-                x_sampling: 1,
-                y_sampling: 1,
-            }],
+            channels: vec![Channel::new("Z".to_string(), PixelType::Float, false, 1, 1)],
             samples_per_pixel: &deep_counts,
             channel_samples: vec![&deep_z],
             compression: Compression::Zips,
@@ -771,20 +759,14 @@ fn mux_rejects_bad_streams_and_packets() {
     .unwrap();
     let counts = vec![1u32; 16];
     let z: Vec<f32> = (0..16).map(|i| i as f32).collect();
-    let deep = oxideav_openexr::encode_exr_deep_scanline(&oxideav_openexr::DeepScanlineInput {
-        width: 4,
-        height: 4,
-        channels: vec![Channel {
-            name: "Z".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        }],
-        samples_per_pixel: &counts,
-        channel_samples: vec![&z],
-        compression: Compression::None,
-    })
+    let deep = oxideav_openexr::encode_exr_deep_scanline(&oxideav_openexr::DeepScanlineInput::new(
+        4,
+        4,
+        vec![Channel::new("Z".to_string(), PixelType::Float, false, 1, 1)],
+        &counts,
+        vec![&z],
+        Compression::None,
+    ))
     .unwrap();
     let mut muxer = ctx
         .containers

@@ -50,13 +50,7 @@ fn tempdir(tag: &str) -> String {
 fn rgba_channels() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -88,26 +82,26 @@ fn exrheader_accepts_our_multipart_tiled_file() {
     let p0 = make_planes(w, h, 0.0);
     let p1 = make_planes(w, h, 0.5);
     let parts = vec![
-        MultipartTiledPart {
-            name: "partA".to_string(),
-            width: w,
-            height: h,
-            tile_x: 8,
-            tile_y: 8,
-            channels: rgba_channels(),
-            planes: vec![&p0[0], &p0[1], &p0[2], &p0[3]],
-            compression: Compression::Zip,
-        },
-        MultipartTiledPart {
-            name: "partB".to_string(),
-            width: w,
-            height: h,
-            tile_x: 8,
-            tile_y: 8,
-            channels: rgba_channels(),
-            planes: vec![&p1[0], &p1[1], &p1[2], &p1[3]],
-            compression: Compression::Zip,
-        },
+        MultipartTiledPart::new(
+            "partA".to_string(),
+            w,
+            h,
+            8,
+            8,
+            rgba_channels(),
+            vec![&p0[0], &p0[1], &p0[2], &p0[3]],
+            Compression::Zip,
+        ),
+        MultipartTiledPart::new(
+            "partB".to_string(),
+            w,
+            h,
+            8,
+            8,
+            rgba_channels(),
+            vec![&p1[0], &p1[1], &p1[2], &p1[3]],
+            Compression::Zip,
+        ),
     ];
     let bytes = encode_exr_multipart_tiled(&parts).unwrap();
     let dir = tempdir("exrheader");
@@ -146,26 +140,26 @@ fn exrmultipart_separate_splits_our_multipart_tiled() {
     let p0 = make_planes(w, h, 0.0);
     let p1 = make_planes(w, h, 0.25);
     let parts = vec![
-        MultipartTiledPart {
-            name: "alpha".to_string(),
-            width: w,
-            height: h,
-            tile_x: 4,
-            tile_y: 3,
-            channels: rgba_channels(),
-            planes: vec![&p0[0], &p0[1], &p0[2], &p0[3]],
-            compression: Compression::None,
-        },
-        MultipartTiledPart {
-            name: "beta".to_string(),
-            width: w,
-            height: h,
-            tile_x: 4,
-            tile_y: 3,
-            channels: rgba_channels(),
-            planes: vec![&p1[0], &p1[1], &p1[2], &p1[3]],
-            compression: Compression::Zips,
-        },
+        MultipartTiledPart::new(
+            "alpha".to_string(),
+            w,
+            h,
+            4,
+            3,
+            rgba_channels(),
+            vec![&p0[0], &p0[1], &p0[2], &p0[3]],
+            Compression::None,
+        ),
+        MultipartTiledPart::new(
+            "beta".to_string(),
+            w,
+            h,
+            4,
+            3,
+            rgba_channels(),
+            vec![&p1[0], &p1[1], &p1[2], &p1[3]],
+            Compression::Zips,
+        ),
     ];
     let bytes = encode_exr_multipart_tiled(&parts).unwrap();
     let dir = tempdir("separate");
@@ -293,36 +287,36 @@ fn our_writer_and_reader_multipart_tiled_full_roundtrip() {
     let p1 = make_planes(w, h, 0.5);
     let p2 = make_planes(w, h, 0.75);
     let parts = vec![
-        MultipartTiledPart {
-            name: "p0".to_string(),
-            width: w,
-            height: h,
-            tile_x: 8,
-            tile_y: 8,
-            channels: rgba_channels(),
-            planes: vec![&p0[0], &p0[1], &p0[2], &p0[3]],
-            compression: Compression::Zip,
-        },
-        MultipartTiledPart {
-            name: "p1".to_string(),
-            width: w,
-            height: h,
-            tile_x: 8,
-            tile_y: 8,
-            channels: rgba_channels(),
-            planes: vec![&p1[0], &p1[1], &p1[2], &p1[3]],
-            compression: Compression::Zips,
-        },
-        MultipartTiledPart {
-            name: "p2".to_string(),
-            width: w,
-            height: h,
-            tile_x: 8,
-            tile_y: 8,
-            channels: rgba_channels(),
-            planes: vec![&p2[0], &p2[1], &p2[2], &p2[3]],
-            compression: Compression::Rle,
-        },
+        MultipartTiledPart::new(
+            "p0".to_string(),
+            w,
+            h,
+            8,
+            8,
+            rgba_channels(),
+            vec![&p0[0], &p0[1], &p0[2], &p0[3]],
+            Compression::Zip,
+        ),
+        MultipartTiledPart::new(
+            "p1".to_string(),
+            w,
+            h,
+            8,
+            8,
+            rgba_channels(),
+            vec![&p1[0], &p1[1], &p1[2], &p1[3]],
+            Compression::Zips,
+        ),
+        MultipartTiledPart::new(
+            "p2".to_string(),
+            w,
+            h,
+            8,
+            8,
+            rgba_channels(),
+            vec![&p2[0], &p2[1], &p2[2], &p2[3]],
+            Compression::Rle,
+        ),
     ];
     let bytes = encode_exr_multipart_tiled(&parts).unwrap();
     let imgs = parse_exr_multipart_tiled(&bytes).unwrap();

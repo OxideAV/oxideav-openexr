@@ -35,34 +35,10 @@ use oxideav_openexr::{
 
 fn rgba_channels() -> Vec<Channel> {
     vec![
-        Channel {
-            name: "A".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "B".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "G".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "R".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("A".to_string(), PixelType::Float, false, 1, 1),
+        Channel::new("B".to_string(), PixelType::Float, false, 1, 1),
+        Channel::new("G".to_string(), PixelType::Float, false, 1, 1),
+        Channel::new("R".to_string(), PixelType::Float, false, 1, 1),
     ]
 }
 
@@ -100,11 +76,11 @@ fn mipmap_full_pyramid_zip_roundtrip() {
     for level in 0..n {
         let lw = mipmap_level_dim(w, level, false);
         let lh = mipmap_level_dim(h, level, false);
-        pyramid.push(MipmapLevel {
-            width: lw,
-            height: lh,
-            planes: make_level_planes(level as f32 * 0.1, lw, lh),
-        });
+        pyramid.push(MipmapLevel::new(
+            lw,
+            lh,
+            make_level_planes(level as f32 * 0.1, lw, lh),
+        ));
     }
     let chs = rgba_channels();
     let bytes = encode_exr_tiled_mipmap(&chs, &pyramid, Compression::Zip, 16, 16).unwrap();
@@ -165,11 +141,11 @@ fn mipmap_full_pyramid_none_rle_zips_roundtrip() {
         for level in 0..n {
             let lw = mipmap_level_dim(w, level, false);
             let lh = mipmap_level_dim(h, level, false);
-            pyramid.push(MipmapLevel {
-                width: lw,
-                height: lh,
-                planes: make_level_planes(0.2 + level as f32 * 0.05, lw, lh),
-            });
+            pyramid.push(MipmapLevel::new(
+                lw,
+                lh,
+                make_level_planes(0.2 + level as f32 * 0.05, lw, lh),
+            ));
         }
         let bytes = encode_exr_tiled_mipmap(&chs, &pyramid, comp, 8, 8).unwrap();
         let img = parse_exr_tiled_multilevel(&bytes).unwrap();
@@ -207,15 +183,11 @@ fn ripmap_full_grid_zip_roundtrip() {
             // tag uniquely encodes (lvlx, lvly) so cross-cell mix-ups
             // surface immediately.
             let tag = (lvly as f32) * 0.1 + (lvlx as f32) * 0.01;
-            row.push(RipmapLevel {
-                width: lw,
-                height: lh,
-                planes: make_level_planes(tag, lw, lh),
-            });
+            row.push(RipmapLevel::new(lw, lh, make_level_planes(tag, lw, lh)));
         }
         grid.push(row);
     }
-    let pyramid = RipmapPyramid { grid: grid.clone() };
+    let pyramid = RipmapPyramid::new(grid.clone());
     let bytes = encode_exr_tiled_ripmap(&chs, &pyramid, Compression::Zip, 8, 8).unwrap();
 
     let img = parse_exr_tiled_multilevel(&bytes).unwrap();

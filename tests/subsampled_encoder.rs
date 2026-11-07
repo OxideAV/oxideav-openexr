@@ -64,27 +64,9 @@ fn make_yuv420_planes(w: u32, h: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 fn yuv420_attrs(w: u32, h: u32, compression: Compression) -> Vec<Attribute> {
     // Channels alphabetical: U, V, Y.
     let chs = vec![
-        Channel {
-            name: "U".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 2,
-            y_sampling: 2,
-        },
-        Channel {
-            name: "V".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 2,
-            y_sampling: 2,
-        },
-        Channel {
-            name: "Y".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("U".to_string(), PixelType::Float, false, 2, 2),
+        Channel::new("V".to_string(), PixelType::Float, false, 2, 2),
+        Channel::new("Y".to_string(), PixelType::Float, false, 1, 1),
     ];
     let win = Box2i {
         x_min: 0,
@@ -93,38 +75,23 @@ fn yuv420_attrs(w: u32, h: u32, compression: Compression) -> Vec<Attribute> {
         y_max: (h - 1) as i32,
     };
     vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(compression),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new("channels".to_string(), AttributeValue::Channels(chs)),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(compression),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ]
 }
 

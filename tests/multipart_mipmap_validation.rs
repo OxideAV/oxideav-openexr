@@ -50,13 +50,7 @@ fn tempdir(tag: &str) -> String {
 fn rgba_channels() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -98,14 +92,7 @@ fn build_part(
     );
     let snapshot = pyramid.clone();
     (
-        MultipartMipmapTiledPart {
-            name: name.to_string(),
-            tile_x: tile,
-            tile_y: tile,
-            channels: rgba_channels(),
-            pyramid,
-            compression: comp,
-        },
+        MultipartMipmapTiledPart::new(name.to_string(), tile, tile, rgba_channels(), pyramid, comp),
         snapshot,
     )
 }

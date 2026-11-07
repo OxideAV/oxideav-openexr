@@ -72,13 +72,7 @@ fn reference_convert(input_bytes: &[u8], z: &str) -> Option<Vec<u8>> {
 }
 
 fn ch(name: &str, pt: PixelType) -> Channel {
-    Channel {
-        name: name.to_string(),
-        pixel_type: pt,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }
+    Channel::new(name.to_string(), pt, false, 1, 1)
 }
 
 /// Half-friendly structured plane: quarter steps and outliers.
@@ -170,22 +164,22 @@ fn piz_multipart_scanline_roundtrip() {
     let g0 = plane(w, h, 5);
     let g1 = plane(w, h, 11);
     let parts = vec![
-        MultipartScanlinePart {
-            name: "left".to_string(),
-            width: w,
-            height: h,
-            channels: vec![ch("G", PixelType::Half)],
-            planes: vec![&g0],
-            compression: Compression::Piz,
-        },
-        MultipartScanlinePart {
-            name: "right".to_string(),
-            width: w,
-            height: h,
-            channels: vec![ch("G", PixelType::Half)],
-            planes: vec![&g1],
-            compression: Compression::Zip,
-        },
+        MultipartScanlinePart::new(
+            "left".to_string(),
+            w,
+            h,
+            vec![ch("G", PixelType::Half)],
+            vec![&g0],
+            Compression::Piz,
+        ),
+        MultipartScanlinePart::new(
+            "right".to_string(),
+            w,
+            h,
+            vec![ch("G", PixelType::Half)],
+            vec![&g1],
+            Compression::Zip,
+        ),
     ];
     let bytes = encode_exr_multipart(&parts).unwrap();
     let imgs = parse_exr_multipart(&bytes).unwrap();
@@ -202,16 +196,16 @@ fn piz_multipart_scanline_roundtrip() {
 fn piz_multipart_tiled_and_multilevel_roundtrip() {
     let (w, h) = (26u32, 18u32);
     let g = plane(w, h, 2);
-    let tiled_parts = vec![MultipartTiledPart {
-        name: "t0".to_string(),
-        width: w,
-        height: h,
-        tile_x: 8,
-        tile_y: 8,
-        channels: vec![ch("G", PixelType::Half)],
-        planes: vec![&g],
-        compression: Compression::Piz,
-    }];
+    let tiled_parts = vec![MultipartTiledPart::new(
+        "t0".to_string(),
+        w,
+        h,
+        8,
+        8,
+        vec![ch("G", PixelType::Half)],
+        vec![&g],
+        Compression::Piz,
+    )];
     let bytes = encode_exr_multipart_tiled(&tiled_parts).unwrap();
     let imgs = parse_exr_multipart_tiled(&bytes).unwrap();
     for (i, &v) in g.iter().enumerate() {
@@ -220,27 +214,27 @@ fn piz_multipart_tiled_and_multilevel_roundtrip() {
 
     let pyramid = build_box_filter_pyramid(w, h, std::slice::from_ref(&g));
     let pyr_levels: Vec<MipmapLevel> = pyramid.clone();
-    let parts = vec![MultipartMipmapTiledPart {
-        name: "m0".to_string(),
-        tile_x: 8,
-        tile_y: 8,
-        channels: vec![ch("G", PixelType::Half)],
-        pyramid: pyr_levels,
-        compression: Compression::Piz,
-    }];
+    let parts = vec![MultipartMipmapTiledPart::new(
+        "m0".to_string(),
+        8,
+        8,
+        vec![ch("G", PixelType::Half)],
+        pyr_levels,
+        Compression::Piz,
+    )];
     let bytes = encode_exr_multipart_tiled_mipmap(&parts).unwrap();
     let mp = parse_exr_multipart_tiled_multilevel(&bytes).unwrap();
     assert_eq!(mp[0].levels.len(), pyramid.len());
 
     let ripmap = build_box_filter_ripmap(w, h, std::slice::from_ref(&g));
-    let rparts = vec![MultipartRipmapTiledPart {
-        name: "r0".to_string(),
-        tile_x: 8,
-        tile_y: 8,
-        channels: vec![ch("G", PixelType::Half)],
-        pyramid: ripmap,
-        compression: Compression::Piz,
-    }];
+    let rparts = vec![MultipartRipmapTiledPart::new(
+        "r0".to_string(),
+        8,
+        8,
+        vec![ch("G", PixelType::Half)],
+        ripmap,
+        Compression::Piz,
+    )];
     let bytes = encode_exr_multipart_tiled_ripmap(&rparts).unwrap();
     let mp = parse_exr_multipart_tiled_multilevel(&bytes).unwrap();
     assert!(!mp[0].levels.is_empty());

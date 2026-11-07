@@ -20,13 +20,7 @@ use oxideav_openexr::{
 fn channels_rgba_float() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -84,11 +78,13 @@ fn mipmap_inputs_with_dims<'a>(
 ) -> Vec<DeepMipmapTiledLevelInput<'a>> {
     pyr.iter()
         .enumerate()
-        .map(|(l, (spp, planes))| DeepMipmapTiledLevelInput {
-            width: level_dim(w0, l as u32),
-            height: level_dim(h0, l as u32),
-            samples_per_pixel: spp,
-            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        .map(|(l, (spp, planes))| {
+            DeepMipmapTiledLevelInput::new(
+                level_dim(w0, l as u32),
+                level_dim(h0, l as u32),
+                spp,
+                vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            )
         })
         .collect()
 }
@@ -104,11 +100,13 @@ fn ripmap_inputs_with_dims<'a>(
         .map(|(ly, row)| {
             row.iter()
                 .enumerate()
-                .map(|(lx, (spp, planes))| DeepRipmapTiledLevelInput {
-                    width: level_dim(w0, lx as u32),
-                    height: level_dim(h0, ly as u32),
-                    samples_per_pixel: spp,
-                    channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                .map(|(lx, (spp, planes))| {
+                    DeepRipmapTiledLevelInput::new(
+                        level_dim(w0, lx as u32),
+                        level_dim(h0, ly as u32),
+                        spp,
+                        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+                    )
                 })
                 .collect()
         })
@@ -305,13 +303,13 @@ fn mixed_kitchen_sink_all_eight_part_types() {
             let lw = level_dim(w, l);
             let lh = level_dim(h, l);
             let n = (lw * lh) as usize;
-            MipmapLevel {
-                width: lw,
-                height: lh,
-                planes: (0..4)
+            MipmapLevel::new(
+                lw,
+                lh,
+                (0..4)
                     .map(|c| (0..n).map(|i| (i + c) as f32 * 0.1 + l as f32).collect())
                     .collect(),
-            }
+            )
         })
         .collect();
     let flat_grid: Vec<Vec<MipmapLevel>> = (0..n_levels)
@@ -321,17 +319,17 @@ fn mixed_kitchen_sink_all_eight_part_types() {
                     let lw = level_dim(w, lx);
                     let lh = level_dim(h, ly);
                     let n = (lw * lh) as usize;
-                    MipmapLevel {
-                        width: lw,
-                        height: lh,
-                        planes: (0..4)
+                    MipmapLevel::new(
+                        lw,
+                        lh,
+                        (0..4)
                             .map(|c| {
                                 (0..n)
                                     .map(|i| (i + c) as f32 * 0.2 + (ly * 8 + lx) as f32)
                                     .collect()
                             })
                             .collect(),
-                    }
+                    )
                 })
                 .collect()
         })

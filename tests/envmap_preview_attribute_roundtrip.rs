@@ -38,11 +38,7 @@ fn roundtrip(v: &AttributeValue) -> AttributeValue {
 }
 
 fn sample_preview() -> Preview {
-    Preview {
-        width: 2,
-        height: 3,
-        rgba: (0..24u8).collect(),
-    }
+    Preview::new(2, 3, (0..24u8).collect())
 }
 
 // ---------------------------------------------------------------------
@@ -82,11 +78,7 @@ fn preview_algebraic_roundtrip_and_layout() {
     assert_eq!(roundtrip(&v), v);
 
     // Zero-dimension preview: header only.
-    let empty = AttributeValue::Preview(Preview {
-        width: 0,
-        height: 0,
-        rgba: Vec::new(),
-    });
+    let empty = AttributeValue::Preview(Preview::new(0, 0, Vec::new()));
     let (_, bytes) = encode_attribute_value(&empty);
     assert_eq!(bytes.len(), 8);
     assert_eq!(roundtrip(&empty), empty);
@@ -177,13 +169,7 @@ fn malformed_sizes_rejected() {
 fn encode_with(extra: Vec<Attribute>) -> Vec<u8> {
     let w = 4u32;
     let h = 4u32;
-    let chs = vec![Channel {
-        name: "G".to_string(),
-        pixel_type: PixelType::Half,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let chs = vec![Channel::new("G".to_string(), PixelType::Half, false, 1, 1)];
     let win = Box2i {
         x_min: 0,
         y_min: 0,
@@ -191,38 +177,26 @@ fn encode_with(extra: Vec<Attribute>) -> Vec<u8> {
         y_max: (h - 1) as i32,
     };
     let mut attrs = vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.clone()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::None),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.clone()),
+        ),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::None),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ];
     attrs.extend(extra);
     let g: Vec<f32> = vec![0.5; (w * h) as usize];
@@ -242,22 +216,19 @@ fn find<'a>(img: &'a oxideav_openexr::ExrPart, name: &str) -> &'a AttributeValue
 fn full_file_roundtrip_all_four_types() {
     let preview = sample_preview();
     let bytes = encode_with(vec![
-        Attribute {
-            name: "envmap".to_string(),
-            value: AttributeValue::EnvMap(EnvMap::Cube),
-        },
-        Attribute {
-            name: "preview".to_string(),
-            value: AttributeValue::Preview(preview.clone()),
-        },
-        Attribute {
-            name: "sampleWeights".to_string(),
-            value: AttributeValue::FloatVector(vec![0.25, 0.5, 0.25]),
-        },
-        Attribute {
-            name: "deepImageState".to_string(),
-            value: AttributeValue::DeepImageState(2),
-        },
+        Attribute::new("envmap".to_string(), AttributeValue::EnvMap(EnvMap::Cube)),
+        Attribute::new(
+            "preview".to_string(),
+            AttributeValue::Preview(preview.clone()),
+        ),
+        Attribute::new(
+            "sampleWeights".to_string(),
+            AttributeValue::FloatVector(vec![0.25, 0.5, 0.25]),
+        ),
+        Attribute::new(
+            "deepImageState".to_string(),
+            AttributeValue::DeepImageState(2),
+        ),
     ]);
     let img = parse_exr(&bytes).unwrap();
     assert_eq!(find(&img, "envmap"), &AttributeValue::EnvMap(EnvMap::Cube));
@@ -284,40 +255,36 @@ fn exrheader_renders_envmap_and_preview() {
     }
     let cases: Vec<(Vec<Attribute>, Vec<&str>)> = vec![
         (
-            vec![Attribute {
-                name: "envmap".to_string(),
-                value: AttributeValue::EnvMap(EnvMap::LatLong),
-            }],
+            vec![Attribute::new(
+                "envmap".to_string(),
+                AttributeValue::EnvMap(EnvMap::LatLong),
+            )],
             vec!["envmap", "latitude-longitude map"],
         ),
         (
-            vec![Attribute {
-                name: "envmap".to_string(),
-                value: AttributeValue::EnvMap(EnvMap::Cube),
-            }],
+            vec![Attribute::new(
+                "envmap".to_string(),
+                AttributeValue::EnvMap(EnvMap::Cube),
+            )],
             vec!["envmap", "cube-face map"],
         ),
         (
-            vec![Attribute {
-                name: "preview".to_string(),
-                value: AttributeValue::Preview(Preview {
-                    width: 5,
-                    height: 7,
-                    rgba: vec![0x40; 4 * 5 * 7],
-                }),
-            }],
+            vec![Attribute::new(
+                "preview".to_string(),
+                AttributeValue::Preview(Preview::new(5, 7, vec![0x40; 4 * 5 * 7])),
+            )],
             vec!["preview", "5 by 7 pixels"],
         ),
         (
             vec![
-                Attribute {
-                    name: "sampleWeights".to_string(),
-                    value: AttributeValue::FloatVector(vec![1.0, 2.0]),
-                },
-                Attribute {
-                    name: "deepImageState".to_string(),
-                    value: AttributeValue::DeepImageState(1),
-                },
+                Attribute::new(
+                    "sampleWeights".to_string(),
+                    AttributeValue::FloatVector(vec![1.0, 2.0]),
+                ),
+                Attribute::new(
+                    "deepImageState".to_string(),
+                    AttributeValue::DeepImageState(1),
+                ),
             ],
             vec![
                 "sampleWeights (type floatvector)",

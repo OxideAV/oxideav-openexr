@@ -71,13 +71,7 @@ fn reference_convert(input_bytes: &[u8], z: &str) -> Option<Vec<u8>> {
 }
 
 fn ch(name: &str, pt: PixelType) -> Channel {
-    Channel {
-        name: name.to_string(),
-        pixel_type: pt,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }
+    Channel::new(name.to_string(), pt, false, 1, 1)
 }
 
 fn base_attrs(w: u32, h: u32, chans: &[Channel], z: Compression) -> Vec<Attribute> {
@@ -88,38 +82,23 @@ fn base_attrs(w: u32, h: u32, chans: &[Channel], z: Compression) -> Vec<Attribut
         y_max: (h - 1) as i32,
     };
     vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chans.to_vec()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(z),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chans.to_vec()),
+        ),
+        Attribute::new("compression".to_string(), AttributeValue::Compression(z)),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ]
 }
 
@@ -338,10 +317,10 @@ fn dwa_compression_level_attribute_is_honoured() {
         encode_exr_scanline(w, h, &chans, &refs, Compression::Dwaa, attrs_default).unwrap();
 
     let mut attrs_coarse = base_attrs(w, h, &chans, Compression::Dwaa);
-    attrs_coarse.push(Attribute {
-        name: "dwaCompressionLevel".to_string(),
-        value: AttributeValue::Float(500.0),
-    });
+    attrs_coarse.push(Attribute::new(
+        "dwaCompressionLevel".to_string(),
+        AttributeValue::Float(500.0),
+    ));
     let bytes_coarse =
         encode_exr_scanline(w, h, &chans, &refs, Compression::Dwaa, attrs_coarse).unwrap();
 

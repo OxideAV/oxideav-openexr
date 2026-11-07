@@ -30,13 +30,7 @@ fn rgba(w: u32, h: u32) -> Vec<f32> {
 fn channels_float() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -100,22 +94,22 @@ fn multipart_scanline_hostile_window_never_panics() {
     let n = (w * h) as usize;
     let p: Vec<f32> = (0..n).map(|i| i as f32 * 0.02).collect();
     let bytes = encode_exr_multipart(&[
-        MultipartScanlinePart {
-            name: "p0".to_string(),
-            width: w,
-            height: h,
-            channels: channels_float(),
-            planes: vec![&p, &p, &p, &p],
-            compression: Compression::Zips,
-        },
-        MultipartScanlinePart {
-            name: "p1".to_string(),
-            width: w,
-            height: h,
-            channels: channels_float(),
-            planes: vec![&p, &p, &p, &p],
-            compression: Compression::Rle,
-        },
+        MultipartScanlinePart::new(
+            "p0".to_string(),
+            w,
+            h,
+            channels_float(),
+            vec![&p, &p, &p, &p],
+            Compression::Zips,
+        ),
+        MultipartScanlinePart::new(
+            "p1".to_string(),
+            w,
+            h,
+            channels_float(),
+            vec![&p, &p, &p, &p],
+            Compression::Rle,
+        ),
     ])
     .unwrap();
     assert!(parse_exr_multipart(&bytes).is_ok());
@@ -130,16 +124,16 @@ fn multipart_tiled_hostile_window_never_panics() {
     let h = 8u32;
     let n = (w * h) as usize;
     let p: Vec<f32> = (0..n).map(|i| i as f32 * 0.02).collect();
-    let bytes = encode_exr_multipart_tiled(&[MultipartTiledPart {
-        name: "p0".to_string(),
-        width: w,
-        height: h,
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_float(),
-        planes: vec![&p, &p, &p, &p],
-        compression: Compression::Zip,
-    }])
+    let bytes = encode_exr_multipart_tiled(&[MultipartTiledPart::new(
+        "p0".to_string(),
+        w,
+        h,
+        4,
+        4,
+        channels_float(),
+        vec![&p, &p, &p, &p],
+        Compression::Zip,
+    )])
     .unwrap();
     assert!(parse_exr_multipart_tiled(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -161,26 +155,26 @@ fn multipart_tiled_mipmap_hostile_window_never_panics() {
         let lw = (w >> l).max(1);
         let lh = (h >> l).max(1);
         let n = (lw * lh) as usize;
-        pyramid.push(MipmapLevel {
-            width: lw,
-            height: lh,
-            planes: (0..4)
+        pyramid.push(MipmapLevel::new(
+            lw,
+            lh,
+            (0..4)
                 .map(|c| (0..n).map(|i| (i + c) as f32 * 0.1).collect())
                 .collect(),
-        });
+        ));
         if lw == 1 && lh == 1 {
             break;
         }
         l += 1;
     }
-    let bytes = encode_exr_multipart_tiled_mipmap(&[MultipartMipmapTiledPart {
-        name: "p0".to_string(),
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_float(),
+    let bytes = encode_exr_multipart_tiled_mipmap(&[MultipartMipmapTiledPart::new(
+        "p0".to_string(),
+        4,
+        4,
+        channels_float(),
         pyramid,
-        compression: Compression::Zips,
-    }])
+        Compression::Zips,
+    )])
     .unwrap();
     assert!(parse_exr_multipart_tiled_multilevel(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -212,25 +206,25 @@ fn multipart_tiled_ripmap_hostile_window_never_panics() {
                     let lw = (w >> lx).max(1);
                     let lh = (h >> ly).max(1);
                     let n = (lw * lh) as usize;
-                    MipmapLevel {
-                        width: lw,
-                        height: lh,
-                        planes: (0..4)
+                    MipmapLevel::new(
+                        lw,
+                        lh,
+                        (0..4)
                             .map(|c| (0..n).map(|i| (i + c) as f32 * 0.2).collect())
                             .collect(),
-                    }
+                    )
                 })
                 .collect()
         })
         .collect();
-    let bytes = encode_exr_multipart_tiled_ripmap(&[MultipartRipmapTiledPart {
-        name: "p0".to_string(),
-        tile_x: 4,
-        tile_y: 4,
-        channels: channels_float(),
-        pyramid: RipmapPyramid { grid },
-        compression: Compression::Rle,
-    }])
+    let bytes = encode_exr_multipart_tiled_ripmap(&[MultipartRipmapTiledPart::new(
+        "p0".to_string(),
+        4,
+        4,
+        channels_float(),
+        RipmapPyramid::new(grid),
+        Compression::Rle,
+    )])
     .unwrap();
     assert!(parse_exr_multipart_tiled_multilevel(&bytes).is_ok());
     sweep(&bytes, |b| {
@@ -271,23 +265,12 @@ fn mixed_deep_ripmap_hostile_window_never_panics() {
                 .collect()
         })
         .collect();
-    let single_channel = vec![Channel {
-        name: "Z".to_string(),
-        pixel_type: PixelType::Float,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let single_channel = vec![Channel::new("Z".to_string(), PixelType::Float, false, 1, 1)];
     let grid: Vec<Vec<DeepRipmapTiledLevelInput>> = cells
         .iter()
         .map(|row| {
             row.iter()
-                .map(|(lw, lh, spp, s)| DeepRipmapTiledLevelInput {
-                    width: *lw,
-                    height: *lh,
-                    samples_per_pixel: spp,
-                    channel_samples: vec![s],
-                })
+                .map(|(lw, lh, spp, s)| DeepRipmapTiledLevelInput::new(*lw, *lh, spp, vec![s]))
                 .collect()
         })
         .collect();

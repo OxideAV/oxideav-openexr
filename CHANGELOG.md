@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `new(..)` (every field, in declaration order) on every newly `#[non_exhaustive]` record listed below, so callers keep a way to build them.
+
+### Changed
+
+- `#[non_exhaustive]` on the growable enums `LayerKind`, `MultipartMixedPart`, `MultipartMixedImage`, `Compression`, `AttributeValue`. `PixelType` (uint / half / float), `LineOrder` and `EnvMap` stay exhaustive: the file format fixes their value sets.
+- `#[non_exhaustive]` on the records `TiledLevel`, `MultilevelTiledImage`, `MultilevelTiledPart`, `DeepExrImage`, `DeepScanlinePart`, `DeepScanlineInput`, `MultipartDeepScanlinePart`, `DeepTiledInput`, `DeepTiledImage`, `MultipartDeepTiledPart`, `DeepTiledPart`, `DeepMipmapTiledLevelInput`, `DeepMipmapTiledInput`, `DeepTiledMipmapLevel`, `DeepMipmapTiledImage`, `DeepRipmapTiledLevelInput`, `DeepRipmapTiledInput`, `DeepTiledRipmapCell`, `DeepRipmapTiledImage`, `MultipartDeepMipmapTiledPart`, `DeepMipmapTiledPart`, `MultipartDeepRipmapTiledPart`, `DeepRipmapTiledPart`, `VersionField`, `ParsedHeader`, `ExrLayer`, `ChromaPlane`, `RgbPlanes`, `LumaChromaPlanes`, `MipmapLevel`, `RipmapPyramid`, `MultipartScanlinePart`, `MultipartMipmapTiledPart`, `MultipartRipmapTiledPart`, `MultipartTiledPart`, `ExrPlane`, `ExrPart`, `Channel`, `Preview`, `Attribute`. The plain value types `Box2i`, `Box2f`, `Chromaticities`, `Timecode`, `Keycode` and `TileDesc` stay as they are.
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.7...v0.0.8) - 2026-10-23
 
 ### Fixed

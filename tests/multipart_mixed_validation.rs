@@ -26,13 +26,7 @@ fn make_planes(w: u32, h: u32, salt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<
 fn rgba_channels() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: (*n).to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new((*n).to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -374,20 +368,8 @@ fn mixed_uint_and_half_pixel_types() {
     let id_plane: Vec<f32> = (0..pixels).map(|i| i as f32).collect();
     let z_plane: Vec<f32> = (0..pixels).map(|i| (i as f32) * 0.125).collect();
     let id_chans = vec![
-        Channel {
-            name: "ID".to_string(),
-            pixel_type: PixelType::Uint,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "Z".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("ID".to_string(), PixelType::Uint, false, 1, 1),
+        Channel::new("Z".to_string(), PixelType::Half, false, 1, 1),
     ];
     // Part 1: standard RGBA FLOAT tiled.
     let (a1, b1, g1, r1) = make_planes(w, h, 0.5);
@@ -473,13 +455,7 @@ fn cleanup_dir(dir: &str) -> std::io::Result<()> {
 fn az_deep_channels() -> Vec<Channel> {
     ["A", "Z"]
         .iter()
-        .map(|n| Channel {
-            name: (*n).to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new((*n).to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -708,14 +684,14 @@ fn mixed_reader_decodes_homogeneous_multilevel_mipmap_file() {
     // pyramid level sample-for-sample.
     let (a, b, g, r) = make_planes(16, 16, 0.0);
     let pyramid = build_box_filter_pyramid(16, 16, &[a, b, g, r]);
-    let parts = vec![MultipartMipmapTiledPart {
-        name: "pyr".to_string(),
-        tile_x: 8,
-        tile_y: 8,
-        channels: rgba_channels(),
-        pyramid: pyramid.clone(),
-        compression: Compression::Zip,
-    }];
+    let parts = vec![MultipartMipmapTiledPart::new(
+        "pyr".to_string(),
+        8,
+        8,
+        rgba_channels(),
+        pyramid.clone(),
+        Compression::Zip,
+    )];
     let bytes = encode_exr_multipart_tiled_mipmap(&parts).unwrap();
     let imgs = parse_exr_multipart_mixed(&bytes).unwrap();
     assert_eq!(imgs.len(), 1);

@@ -79,13 +79,7 @@ fn build_synthetic(w: u32, h: u32) -> (Vec<u32>, [Vec<f32>; 4]) {
 fn channels_rgba_float() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -96,14 +90,14 @@ fn exrheader_accepts_our_deep_file() {
         return;
     }
     let (spp, planes) = build_synthetic(8, 4);
-    let input = DeepScanlineInput {
-        width: 8,
-        height: 4,
-        channels: channels_rgba_float(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-        compression: Compression::Zips,
-    };
+    let input = DeepScanlineInput::new(
+        8,
+        4,
+        channels_rgba_float(),
+        &spp,
+        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        Compression::Zips,
+    );
     let bytes = encode_exr_deep_scanline(&input).unwrap();
     let dir = tempdir();
     let path = format!("{dir}/deep.exr");
@@ -130,14 +124,14 @@ fn cross_roundtrip_via_exrmetrics(z: Compression) {
         return;
     }
     let (spp, planes) = build_synthetic(8, 4);
-    let input = DeepScanlineInput {
-        width: 8,
-        height: 4,
-        channels: channels_rgba_float(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-        compression: z,
-    };
+    let input = DeepScanlineInput::new(
+        8,
+        4,
+        channels_rgba_float(),
+        &spp,
+        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        z,
+    );
     let bytes = encode_exr_deep_scanline(&input).unwrap();
     let dir = tempdir();
     let in_path = format!("{dir}/in.exr");
@@ -183,14 +177,14 @@ fn exrmetrics_decodes_our_deep_zips_multiline() {
         return;
     }
     let (spp, planes) = build_synthetic(12, 20);
-    let input = DeepScanlineInput {
-        width: 12,
-        height: 20,
-        channels: channels_rgba_float(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-        compression: Compression::Zips,
-    };
+    let input = DeepScanlineInput::new(
+        12,
+        20,
+        channels_rgba_float(),
+        &spp,
+        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        Compression::Zips,
+    );
     let bytes = encode_exr_deep_scanline(&input).unwrap();
     let dir = tempdir();
     let in_path = format!("{dir}/in.exr");
@@ -272,23 +266,23 @@ fn deep_multipart_two_parts_via_exrmultipart_combine() {
     let (spp_a, planes_a) = build_synthetic_seeded(8, 4, 0.0);
     let (spp_b, planes_b) = build_synthetic_seeded(8, 4, 0.5);
     let ch = channels_rgba_float();
-    let a_bytes = encode_exr_deep_scanline(&DeepScanlineInput {
-        width: 8,
-        height: 4,
-        channels: ch.clone(),
-        samples_per_pixel: &spp_a,
-        channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
-        compression: Compression::Zips,
-    })
+    let a_bytes = encode_exr_deep_scanline(&DeepScanlineInput::new(
+        8,
+        4,
+        ch.clone(),
+        &spp_a,
+        vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+        Compression::Zips,
+    ))
     .unwrap();
-    let b_bytes = encode_exr_deep_scanline(&DeepScanlineInput {
-        width: 8,
-        height: 4,
-        channels: ch,
-        samples_per_pixel: &spp_b,
-        channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
-        compression: Compression::None,
-    })
+    let b_bytes = encode_exr_deep_scanline(&DeepScanlineInput::new(
+        8,
+        4,
+        ch,
+        &spp_b,
+        vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+        Compression::None,
+    ))
     .unwrap();
 
     let dir = tempdir();
@@ -351,14 +345,14 @@ fn deep_multipart_three_parts_mixed_compressions() {
     let (spp_c, planes_c) = build_synthetic_seeded(6, 3, 2.0);
     let ch = channels_rgba_float();
     let mk_bytes = |spp: &[u32], planes: &[Vec<f32>; 4], z: Compression| -> Vec<u8> {
-        encode_exr_deep_scanline(&DeepScanlineInput {
-            width: 6,
-            height: 3,
-            channels: ch.clone(),
-            samples_per_pixel: spp,
-            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            compression: z,
-        })
+        encode_exr_deep_scanline(&DeepScanlineInput::new(
+            6,
+            3,
+            ch.clone(),
+            spp,
+            vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            z,
+        ))
         .unwrap()
     };
     let a_bytes = mk_bytes(&spp_a, &planes_a, Compression::Zips);
@@ -421,14 +415,14 @@ fn deep_multipart_multi_row_zips_via_combine() {
     let (spp_b, planes_b) = build_synthetic_seeded(12, 10, 0.25);
     let ch = channels_rgba_float();
     let mk_bytes = |spp: &[u32], planes: &[Vec<f32>; 4]| -> Vec<u8> {
-        encode_exr_deep_scanline(&DeepScanlineInput {
-            width: 12,
-            height: 10,
-            channels: ch.clone(),
-            samples_per_pixel: spp,
-            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            compression: Compression::Zips,
-        })
+        encode_exr_deep_scanline(&DeepScanlineInput::new(
+            12,
+            10,
+            ch.clone(),
+            spp,
+            vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            Compression::Zips,
+        ))
         .unwrap()
     };
     let a_bytes = mk_bytes(&spp_a, &planes_a);
@@ -501,14 +495,14 @@ fn parse_exr_multipart_rejects_deep_multipart() {
     let (spp_b, planes_b) = build_synthetic_seeded(4, 2, 0.5);
     let ch = channels_rgba_float();
     let mk = |spp: &[u32], planes: &[Vec<f32>; 4]| -> Vec<u8> {
-        encode_exr_deep_scanline(&DeepScanlineInput {
-            width: 4,
-            height: 2,
-            channels: ch.clone(),
-            samples_per_pixel: spp,
-            channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            compression: Compression::None,
-        })
+        encode_exr_deep_scanline(&DeepScanlineInput::new(
+            4,
+            2,
+            ch.clone(),
+            spp,
+            vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            Compression::None,
+        ))
         .unwrap()
     };
     let a_bytes = mk(&spp_a, &planes_a);
@@ -567,24 +561,24 @@ fn exrheader_accepts_our_multipart_deep_file() {
     let (spp_b, planes_b) = build_synthetic_seeded(8, 4, 0.5);
     let ch = channels_rgba_float();
     let parts = vec![
-        MultipartDeepScanlinePart {
-            name: "partA".to_string(),
-            width: 8,
-            height: 4,
-            channels: ch.clone(),
-            samples_per_pixel: &spp_a,
-            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
-            compression: Compression::Zips,
-        },
-        MultipartDeepScanlinePart {
-            name: "partB".to_string(),
-            width: 8,
-            height: 4,
-            channels: ch,
-            samples_per_pixel: &spp_b,
-            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
-            compression: Compression::None,
-        },
+        MultipartDeepScanlinePart::new(
+            "partA".to_string(),
+            8,
+            4,
+            ch.clone(),
+            &spp_a,
+            vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            Compression::Zips,
+        ),
+        MultipartDeepScanlinePart::new(
+            "partB".to_string(),
+            8,
+            4,
+            ch,
+            &spp_b,
+            vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            Compression::None,
+        ),
     ];
     let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
     let dir = tempdir();
@@ -624,24 +618,24 @@ fn exrmultipart_separate_splits_our_multipart_deep_two_parts() {
     let (spp_b, planes_b) = build_synthetic_seeded(8, 4, 0.5);
     let ch = channels_rgba_float();
     let parts = vec![
-        MultipartDeepScanlinePart {
-            name: "partA".to_string(),
-            width: 8,
-            height: 4,
-            channels: ch.clone(),
-            samples_per_pixel: &spp_a,
-            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
-            compression: Compression::Zips,
-        },
-        MultipartDeepScanlinePart {
-            name: "partB".to_string(),
-            width: 8,
-            height: 4,
-            channels: ch,
-            samples_per_pixel: &spp_b,
-            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
-            compression: Compression::None,
-        },
+        MultipartDeepScanlinePart::new(
+            "partA".to_string(),
+            8,
+            4,
+            ch.clone(),
+            &spp_a,
+            vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            Compression::Zips,
+        ),
+        MultipartDeepScanlinePart::new(
+            "partB".to_string(),
+            8,
+            4,
+            ch,
+            &spp_b,
+            vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            Compression::None,
+        ),
     ];
     let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
     let dir = tempdir();
@@ -696,33 +690,33 @@ fn exrmultipart_separate_splits_our_multipart_deep_three_parts() {
     let (spp_c, planes_c) = build_synthetic_seeded(6, 3, 1.0);
     let ch = channels_rgba_float();
     let parts = vec![
-        MultipartDeepScanlinePart {
-            name: "alpha".to_string(),
-            width: 6,
-            height: 3,
-            channels: ch.clone(),
-            samples_per_pixel: &spp_a,
-            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
-            compression: Compression::Zips,
-        },
-        MultipartDeepScanlinePart {
-            name: "beta".to_string(),
-            width: 6,
-            height: 3,
-            channels: ch.clone(),
-            samples_per_pixel: &spp_b,
-            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
-            compression: Compression::None,
-        },
-        MultipartDeepScanlinePart {
-            name: "gamma".to_string(),
-            width: 6,
-            height: 3,
-            channels: ch,
-            samples_per_pixel: &spp_c,
-            channel_samples: vec![&planes_c[0], &planes_c[1], &planes_c[2], &planes_c[3]],
-            compression: Compression::Rle,
-        },
+        MultipartDeepScanlinePart::new(
+            "alpha".to_string(),
+            6,
+            3,
+            ch.clone(),
+            &spp_a,
+            vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            Compression::Zips,
+        ),
+        MultipartDeepScanlinePart::new(
+            "beta".to_string(),
+            6,
+            3,
+            ch.clone(),
+            &spp_b,
+            vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            Compression::None,
+        ),
+        MultipartDeepScanlinePart::new(
+            "gamma".to_string(),
+            6,
+            3,
+            ch,
+            &spp_c,
+            vec![&planes_c[0], &planes_c[1], &planes_c[2], &planes_c[3]],
+            Compression::Rle,
+        ),
     ];
     let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
     let dir = tempdir();
@@ -795,16 +789,16 @@ fn exrheader_accepts_our_deep_tiled_file() {
         return;
     }
     let (spp, planes) = build_synthetic(16, 12);
-    let input = DeepTiledInput {
-        width: 16,
-        height: 12,
-        tile_x: 8,
-        tile_y: 4,
-        channels: channels_rgba_float(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-        compression: Compression::Zips,
-    };
+    let input = DeepTiledInput::new(
+        16,
+        12,
+        8,
+        4,
+        channels_rgba_float(),
+        &spp,
+        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        Compression::Zips,
+    );
     let bytes = encode_exr_deep_tiled(&input).unwrap();
     let dir = tempdir();
     let path = format!("{dir}/deep_tiled.exr");
@@ -834,16 +828,16 @@ fn deep_tiled_cross_roundtrip_via_exrmetrics(z: Compression, w: u32, h: u32, tx:
         return;
     }
     let (spp, planes) = build_synthetic(w, h);
-    let input = DeepTiledInput {
-        width: w,
-        height: h,
-        tile_x: tx,
-        tile_y: ty,
-        channels: channels_rgba_float(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-        compression: z,
-    };
+    let input = DeepTiledInput::new(
+        w,
+        h,
+        tx,
+        ty,
+        channels_rgba_float(),
+        &spp,
+        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        z,
+    );
     let bytes = encode_exr_deep_tiled(&input).unwrap();
     let dir = tempdir();
     let in_path = format!("{dir}/in.exr");
@@ -911,16 +905,16 @@ fn our_writer_and_reader_deep_tiled_full_roundtrip() {
     // pass that re-emits channel samples in pixel-scan order from the
     // per-tile sample slabs.
     let (spp, planes) = build_synthetic(23, 17);
-    let input = DeepTiledInput {
-        width: 23,
-        height: 17,
-        tile_x: 6,
-        tile_y: 5,
-        channels: channels_rgba_float(),
-        samples_per_pixel: &spp,
-        channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-        compression: Compression::Zips,
-    };
+    let input = DeepTiledInput::new(
+        23,
+        17,
+        6,
+        5,
+        channels_rgba_float(),
+        &spp,
+        vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+        Compression::Zips,
+    );
     let bytes = encode_exr_deep_tiled(&input).unwrap();
     let img = parse_exr_deep_tiled(&bytes).unwrap();
     assert_eq!(img.width(), 23);
@@ -941,24 +935,24 @@ fn our_writer_and_reader_multipart_deep_full_roundtrip() {
     let (spp_b, planes_b) = build_synthetic_seeded(10, 12, 0.25);
     let ch = channels_rgba_float();
     let parts = vec![
-        MultipartDeepScanlinePart {
-            name: "left".to_string(),
-            width: 10,
-            height: 12,
-            channels: ch.clone(),
-            samples_per_pixel: &spp_a,
-            channel_samples: vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
-            compression: Compression::Zips,
-        },
-        MultipartDeepScanlinePart {
-            name: "right".to_string(),
-            width: 10,
-            height: 12,
-            channels: ch,
-            samples_per_pixel: &spp_b,
-            channel_samples: vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
-            compression: Compression::Rle,
-        },
+        MultipartDeepScanlinePart::new(
+            "left".to_string(),
+            10,
+            12,
+            ch.clone(),
+            &spp_a,
+            vec![&planes_a[0], &planes_a[1], &planes_a[2], &planes_a[3]],
+            Compression::Zips,
+        ),
+        MultipartDeepScanlinePart::new(
+            "right".to_string(),
+            10,
+            12,
+            ch,
+            &spp_b,
+            vec![&planes_b[0], &planes_b[1], &planes_b[2], &planes_b[3]],
+            Compression::Rle,
+        ),
     ];
     let bytes = encode_exr_multipart_deep_scanline(&parts).unwrap();
     let got = parse_exr_deep_multipart(&bytes).unwrap();
@@ -1011,21 +1005,21 @@ fn exrheader_accepts_our_deep_tiled_mipmap_file() {
         .map(|(l, (spp, planes))| {
             let lw = (w0 >> l).max(1);
             let lh = (h0 >> l).max(1);
-            DeepMipmapTiledLevelInput {
-                width: lw,
-                height: lh,
-                samples_per_pixel: spp,
-                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            }
+            DeepMipmapTiledLevelInput::new(
+                lw,
+                lh,
+                spp,
+                vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            )
         })
         .collect();
-    let input = DeepMipmapTiledInput {
-        tile_x: 8,
-        tile_y: 8,
-        channels: channels_rgba_float(),
-        pyramid: pyramid_levels,
-        compression: Compression::Zips,
-    };
+    let input = DeepMipmapTiledInput::new(
+        8,
+        8,
+        channels_rgba_float(),
+        pyramid_levels,
+        Compression::Zips,
+    );
     let bytes = encode_exr_deep_tiled_mipmap(&input).unwrap();
     let dir = tempdir();
     let path = format!("{dir}/deep_tiled_mipmap.exr");
@@ -1065,21 +1059,21 @@ fn deep_tiled_mipmap_full_pure_rust_roundtrip_24x16() {
         .map(|(l, (spp, planes))| {
             let lw = (w0 >> l).max(1);
             let lh = (h0 >> l).max(1);
-            DeepMipmapTiledLevelInput {
-                width: lw,
-                height: lh,
-                samples_per_pixel: spp,
-                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            }
+            DeepMipmapTiledLevelInput::new(
+                lw,
+                lh,
+                spp,
+                vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            )
         })
         .collect();
-    let input = DeepMipmapTiledInput {
-        tile_x: 8,
-        tile_y: 4,
-        channels: channels_rgba_float(),
-        pyramid: pyramid_levels,
-        compression: Compression::Zips,
-    };
+    let input = DeepMipmapTiledInput::new(
+        8,
+        4,
+        channels_rgba_float(),
+        pyramid_levels,
+        Compression::Zips,
+    );
     let bytes = encode_exr_deep_tiled_mipmap(&input).unwrap();
     let img = parse_exr_deep_tiled_mipmap(&bytes).unwrap();
     assert_eq!(img.width(), w0);
@@ -1148,22 +1142,17 @@ fn exrheader_accepts_our_deep_tiled_ripmap_file() {
         let mut out_row: Vec<DeepRipmapTiledLevelInput> = Vec::with_capacity(row.len());
         for (lvlx, (spp, planes)) in row.iter().enumerate() {
             let lw = level_dim(w0, lvlx as u32);
-            out_row.push(DeepRipmapTiledLevelInput {
-                width: lw,
-                height: lh,
-                samples_per_pixel: spp,
-                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            });
+            out_row.push(DeepRipmapTiledLevelInput::new(
+                lw,
+                lh,
+                spp,
+                vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            ));
         }
         input_grid.push(out_row);
     }
-    let input = DeepRipmapTiledInput {
-        tile_x: 8,
-        tile_y: 8,
-        channels: channels_rgba_float(),
-        grid: input_grid,
-        compression: Compression::Zips,
-    };
+    let input =
+        DeepRipmapTiledInput::new(8, 8, channels_rgba_float(), input_grid, Compression::Zips);
     let bytes = encode_exr_deep_tiled_ripmap(&input).unwrap();
     let dir = tempdir();
     let path = format!("{dir}/deep_tiled_ripmap.exr");
@@ -1204,22 +1193,17 @@ fn deep_tiled_ripmap_full_pure_rust_roundtrip_24x16() {
         let mut out_row: Vec<DeepRipmapTiledLevelInput> = Vec::with_capacity(row.len());
         for (lvlx, (spp, planes)) in row.iter().enumerate() {
             let lw = level_dim(w0, lvlx as u32);
-            out_row.push(DeepRipmapTiledLevelInput {
-                width: lw,
-                height: lh,
-                samples_per_pixel: spp,
-                channel_samples: vec![&planes[0], &planes[1], &planes[2], &planes[3]],
-            });
+            out_row.push(DeepRipmapTiledLevelInput::new(
+                lw,
+                lh,
+                spp,
+                vec![&planes[0], &planes[1], &planes[2], &planes[3]],
+            ));
         }
         input_grid.push(out_row);
     }
-    let input = DeepRipmapTiledInput {
-        tile_x: 8,
-        tile_y: 4,
-        channels: channels_rgba_float(),
-        grid: input_grid,
-        compression: Compression::Zips,
-    };
+    let input =
+        DeepRipmapTiledInput::new(8, 4, channels_rgba_float(), input_grid, Compression::Zips);
     let bytes = encode_exr_deep_tiled_ripmap(&input).unwrap();
     let img = parse_exr_deep_tiled_ripmap(&bytes).unwrap();
     assert_eq!(img.width(), w0);

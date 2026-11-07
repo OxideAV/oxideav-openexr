@@ -53,6 +53,7 @@ use crate::types::{
 /// All channels must use 1×1 sampling (spec requirement for tiled files).
 /// Channels must be in alphabetical order and match each pyramid level's
 /// plane order.
+#[non_exhaustive]
 pub struct MultipartMipmapTiledPart {
     /// Unique non-empty part name.
     pub name: String,
@@ -71,6 +72,27 @@ pub struct MultipartMipmapTiledPart {
     /// Per-part compression (applied uniformly across the pyramid, per
     /// the single `compression` header attribute).
     pub compression: Compression,
+}
+
+impl MultipartMipmapTiledPart {
+    /// Build `MultipartMipmapTiledPart` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        pyramid: Vec<MipmapLevel>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            tile_x,
+            tile_y,
+            channels,
+            pyramid,
+            compression,
+        }
+    }
 }
 
 /// Encode a multi-part flat (non-deep) multi-level tiled EXR file. Each

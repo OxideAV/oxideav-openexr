@@ -284,47 +284,29 @@ fn minimal_scanline_with_extra_attrs(extra: Vec<Attribute>) -> Vec<u8> {
         x_max: (w - 1) as i32,
         y_max: (h - 1) as i32,
     };
-    let chs = vec![Channel {
-        name: "Y".to_string(),
-        pixel_type: PixelType::Half,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let chs = vec![Channel::new("Y".to_string(), PixelType::Half, false, 1, 1)];
     let plane: Vec<f32> = (0..(w * h)).map(|i| i as f32 * 0.125).collect();
     let mut attrs = vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.clone()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::None),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.clone()),
+        ),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::None),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ];
     attrs.extend(extra);
     encode_exr_scanline(w, h, &chs, &[&plane], Compression::None, attrs).unwrap()
@@ -348,53 +330,35 @@ fn full_header_roundtrip_all_typed_variants() {
     ];
 
     let extras = vec![
-        Attribute {
-            name: "chromaticities".to_string(),
-            value: AttributeValue::Chromaticities(chromat),
-        },
-        Attribute {
-            name: "exposure".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "name".to_string(),
-            value: AttributeValue::String("layer-0".to_string()),
-        },
-        Attribute {
-            name: "version".to_string(),
-            value: AttributeValue::Int(7),
-        },
-        Attribute {
-            name: "captureRate".to_string(),
-            value: AttributeValue::Double(23.976023976),
-        },
-        Attribute {
-            name: "tileOrigin".to_string(),
-            value: AttributeValue::V2i(-1, 2),
-        },
-        Attribute {
-            name: "voxelOrigin".to_string(),
-            value: AttributeValue::V3i(-1, 0, 1),
-        },
-        Attribute {
-            name: "cameraDirection".to_string(),
-            value: AttributeValue::V3f(0.0, 0.0, -1.0),
-        },
-        Attribute {
-            name: "colorMatrix".to_string(),
-            value: AttributeValue::M33f(m33),
-        },
-        Attribute {
-            name: "worldToCamera".to_string(),
-            value: AttributeValue::M44f(m44),
-        },
-        Attribute {
-            name: "colorMatrixD".to_string(),
-            value: AttributeValue::M33d([0.1, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.3]),
-        },
-        Attribute {
-            name: "worldToCameraD".to_string(),
-            value: AttributeValue::M44d([
+        Attribute::new(
+            "chromaticities".to_string(),
+            AttributeValue::Chromaticities(chromat),
+        ),
+        Attribute::new("exposure".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "name".to_string(),
+            AttributeValue::String("layer-0".to_string()),
+        ),
+        Attribute::new("version".to_string(), AttributeValue::Int(7)),
+        Attribute::new(
+            "captureRate".to_string(),
+            AttributeValue::Double(23.976023976),
+        ),
+        Attribute::new("tileOrigin".to_string(), AttributeValue::V2i(-1, 2)),
+        Attribute::new("voxelOrigin".to_string(), AttributeValue::V3i(-1, 0, 1)),
+        Attribute::new(
+            "cameraDirection".to_string(),
+            AttributeValue::V3f(0.0, 0.0, -1.0),
+        ),
+        Attribute::new("colorMatrix".to_string(), AttributeValue::M33f(m33)),
+        Attribute::new("worldToCamera".to_string(), AttributeValue::M44f(m44)),
+        Attribute::new(
+            "colorMatrixD".to_string(),
+            AttributeValue::M33d([0.1, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.3]),
+        ),
+        Attribute::new(
+            "worldToCameraD".to_string(),
+            AttributeValue::M44d([
                 std::f64::consts::PI,
                 0.0,
                 0.0,
@@ -412,7 +376,7 @@ fn full_header_roundtrip_all_typed_variants() {
                 0.0,
                 1.0,
             ]),
-        },
+        ),
     ];
 
     let bytes = minimal_scanline_with_extra_attrs(extras.clone());
@@ -480,9 +444,9 @@ fn exrheader_accepts_file_with_every_typed_attribute() {
     }
 
     let extras = vec![
-        Attribute {
-            name: "chromaticities".to_string(),
-            value: AttributeValue::Chromaticities(Chromaticities {
+        Attribute::new(
+            "chromaticities".to_string(),
+            AttributeValue::Chromaticities(Chromaticities {
                 red_x: 0.708,
                 red_y: 0.292,
                 green_x: 0.170,
@@ -492,61 +456,49 @@ fn exrheader_accepts_file_with_every_typed_attribute() {
                 white_x: 0.32168,
                 white_y: 0.33767,
             }),
-        },
-        Attribute {
-            name: "exposure".to_string(),
-            value: AttributeValue::Float(1.5),
-        },
-        Attribute {
-            name: "owner".to_string(),
-            value: AttributeValue::String("oxideav round 238b".to_string()),
-        },
-        Attribute {
-            name: "isoSpeed".to_string(),
-            value: AttributeValue::Int(800),
-        },
-        Attribute {
-            name: "captureRate".to_string(),
-            value: AttributeValue::Double(23.976023976),
-        },
-        Attribute {
-            name: "originXY".to_string(),
-            value: AttributeValue::V2i(-1, 2),
-        },
-        Attribute {
-            name: "originXYZ".to_string(),
-            value: AttributeValue::V3i(-1, 0, 1),
-        },
-        Attribute {
-            name: "lookVector".to_string(),
-            value: AttributeValue::V3f(0.0, 0.0, -1.0),
-        },
-        Attribute {
-            name: "colorTransform".to_string(),
-            value: AttributeValue::M33f([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
-        },
-        Attribute {
-            name: "worldToCamera".to_string(),
-            value: AttributeValue::M44f([
+        ),
+        Attribute::new("exposure".to_string(), AttributeValue::Float(1.5)),
+        Attribute::new(
+            "owner".to_string(),
+            AttributeValue::String("oxideav round 238b".to_string()),
+        ),
+        Attribute::new("isoSpeed".to_string(), AttributeValue::Int(800)),
+        Attribute::new(
+            "captureRate".to_string(),
+            AttributeValue::Double(23.976023976),
+        ),
+        Attribute::new("originXY".to_string(), AttributeValue::V2i(-1, 2)),
+        Attribute::new("originXYZ".to_string(), AttributeValue::V3i(-1, 0, 1)),
+        Attribute::new(
+            "lookVector".to_string(),
+            AttributeValue::V3f(0.0, 0.0, -1.0),
+        ),
+        Attribute::new(
+            "colorTransform".to_string(),
+            AttributeValue::M33f([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+        ),
+        Attribute::new(
+            "worldToCamera".to_string(),
+            AttributeValue::M44f([
                 1.0, 0.0, 0.0, 0.0, //
                 0.0, 1.0, 0.0, 0.0, //
                 0.0, 0.0, 1.0, 0.0, //
                 0.0, 0.0, 0.0, 1.0,
             ]),
-        },
-        Attribute {
-            name: "colorTransformD".to_string(),
-            value: AttributeValue::M33d([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
-        },
-        Attribute {
-            name: "worldToCameraD".to_string(),
-            value: AttributeValue::M44d([
+        ),
+        Attribute::new(
+            "colorTransformD".to_string(),
+            AttributeValue::M33d([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+        ),
+        Attribute::new(
+            "worldToCameraD".to_string(),
+            AttributeValue::M44d([
                 1.0, 0.0, 0.0, 0.0, //
                 0.0, 1.0, 0.0, 0.0, //
                 0.0, 0.0, 1.0, 0.0, //
                 0.0, 0.0, 0.0, 1.0,
             ]),
-        },
+        ),
     ];
 
     let bytes = minimal_scanline_with_extra_attrs(extras.clone());

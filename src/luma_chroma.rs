@@ -256,6 +256,7 @@ pub fn downsample_tent(
 
 /// One chroma plane with its sampling factors, as stored in the file.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ChromaPlane<'a> {
     /// `ceil(width / x_sampling) × ceil(height / y_sampling)` samples.
     pub samples: &'a [f32],
@@ -263,12 +264,31 @@ pub struct ChromaPlane<'a> {
     pub y_sampling: u32,
 }
 
+impl<'a> ChromaPlane<'a> {
+    /// Build `ChromaPlane` from every field, in declaration order.
+    pub fn new(samples: &'a [f32], x_sampling: u32, y_sampling: u32) -> Self {
+        Self {
+            samples,
+            x_sampling,
+            y_sampling,
+        }
+    }
+}
+
 /// Full-resolution RGB planes reconstructed from luminance/chroma.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RgbPlanes {
     pub r: Vec<f32>,
     pub g: Vec<f32>,
     pub b: Vec<f32>,
+}
+
+impl RgbPlanes {
+    /// Build `RgbPlanes` from every field, in declaration order.
+    pub fn new(r: Vec<f32>, g: Vec<f32>, b: Vec<f32>) -> Self {
+        Self { r, g, b }
+    }
 }
 
 /// Reconstruct full-resolution `R`, `G`, `B` planes from a
@@ -308,6 +328,7 @@ pub fn luma_chroma_to_rgb(
 
 /// Luminance/chroma planes produced from RGB.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct LumaChromaPlanes {
     /// Full-resolution luminance, `width × height`.
     pub y: Vec<f32>,
@@ -317,6 +338,19 @@ pub struct LumaChromaPlanes {
     pub by: Vec<f32>,
     pub x_sampling: u32,
     pub y_sampling: u32,
+}
+
+impl LumaChromaPlanes {
+    /// Build `LumaChromaPlanes` from every field, in declaration order.
+    pub fn new(y: Vec<f32>, ry: Vec<f32>, by: Vec<f32>, x_sampling: u32, y_sampling: u32) -> Self {
+        Self {
+            y,
+            ry,
+            by,
+            x_sampling,
+            y_sampling,
+        }
+    }
 }
 
 /// Convert full-resolution `rgb = [r, g, b]` planes to a full-resolution

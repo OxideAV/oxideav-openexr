@@ -16,13 +16,7 @@ fn main() {
     let h = 4u32;
     let chs: Vec<Channel> = ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: n.to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new(n.to_string(), PixelType::Half, false, 1, 1))
         .collect();
     let pixels = (w * h) as usize;
     let spp: Vec<u32> = (0..pixels as u32).map(|i| i % 4).collect();
@@ -32,14 +26,7 @@ fn main() {
     let b = mk(0.1);
     let g = mk(0.15);
     let r = mk(0.2);
-    let input = DeepScanlineInput {
-        width: w,
-        height: h,
-        channels: chs,
-        samples_per_pixel: &spp,
-        channel_samples: vec![&a, &b, &g, &r],
-        compression: Compression::Zips,
-    };
+    let input = DeepScanlineInput::new(w, h, chs, &spp, vec![&a, &b, &g, &r], Compression::Zips);
     let bytes = encode_exr_deep_scanline(&input).unwrap();
     std::fs::write(&path, &bytes).unwrap();
     eprintln!("wrote {} ({} bytes)", path, bytes.len());

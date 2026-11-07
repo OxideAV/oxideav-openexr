@@ -46,13 +46,7 @@ fn pxr24_reduce(f: f32) -> f32 {
 fn float_channels() -> Vec<Channel> {
     ["A", "B", "G", "R"]
         .iter()
-        .map(|n| Channel {
-            name: (*n).to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        })
+        .map(|n| Channel::new((*n).to_string(), PixelType::Float, false, 1, 1))
         .collect()
 }
 
@@ -65,13 +59,7 @@ fn half_channels(p_linear: bool) -> Vec<Channel> {
         ("R", p_linear),
     ]
     .iter()
-    .map(|(n, pl)| Channel {
-        name: n.to_string(),
-        pixel_type: PixelType::Half,
-        p_linear: *pl,
-        x_sampling: 1,
-        y_sampling: 1,
-    })
+    .map(|(n, pl)| Channel::new(n.to_string(), PixelType::Half, *pl, 1, 1))
     .collect()
 }
 

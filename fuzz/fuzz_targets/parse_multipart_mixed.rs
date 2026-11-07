@@ -44,20 +44,8 @@ use oxideav_openexr::types::{Channel, Compression, PixelType};
 
 fn mk_channels() -> Vec<Channel> {
     vec![
-        Channel {
-            name: "A".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "Z".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("A".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("Z".to_string(), PixelType::Half, false, 1, 1),
     ]
 }
 
@@ -93,12 +81,7 @@ fn base_file(compression: Compression) -> Option<Vec<u8>> {
         .collect();
     let pyramid: Vec<DeepMipmapTiledLevelInput> = levels_data
         .iter()
-        .map(|(lw, lh, spp, a, z)| DeepMipmapTiledLevelInput {
-            width: *lw,
-            height: *lh,
-            samples_per_pixel: spp,
-            channel_samples: vec![a, z],
-        })
+        .map(|(lw, lh, spp, a, z)| DeepMipmapTiledLevelInput::new(*lw, *lh, spp, vec![a, z]))
         .collect();
 
     encode_exr_multipart_mixed(&[

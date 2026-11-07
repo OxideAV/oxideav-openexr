@@ -23,6 +23,7 @@ use crate::types::{
 
 /// Decoded version field flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VersionField {
     pub raw: u32,
     pub format_version: u8,
@@ -30,6 +31,27 @@ pub struct VersionField {
     pub long_names: bool,
     pub non_image: bool,
     pub multipart: bool,
+}
+
+impl VersionField {
+    /// Build `VersionField` from every field, in declaration order.
+    pub fn new(
+        raw: u32,
+        format_version: u8,
+        single_tile: bool,
+        long_names: bool,
+        non_image: bool,
+        multipart: bool,
+    ) -> Self {
+        Self {
+            raw,
+            format_version,
+            single_tile,
+            long_names,
+            non_image,
+            multipart,
+        }
+    }
 }
 
 impl VersionField {
@@ -56,11 +78,23 @@ impl VersionField {
 /// in `bytes` immediately past the trailing null that terminates the
 /// attribute list (i.e. the start of the line/chunk offset table).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ParsedHeader {
     pub version: VersionField,
     pub attributes: Vec<Attribute>,
     /// Offset in the source slice past the header's terminating NUL.
     pub end_offset: usize,
+}
+
+impl ParsedHeader {
+    /// Build `ParsedHeader` from every field, in declaration order.
+    pub fn new(version: VersionField, attributes: Vec<Attribute>, end_offset: usize) -> Self {
+        Self {
+            version,
+            attributes,
+            end_offset,
+        }
+    }
 }
 
 /// Cursor walking a `&[u8]` left-to-right with bounds-checked little-endian

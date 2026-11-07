@@ -37,6 +37,7 @@ use crate::types::{
 /// One flat tiled part for [`encode_exr_multipart_tiled`]. Mirrors the
 /// shape of [`crate::MultipartScanlinePart`] plus the tile-size fields
 /// from the single-part tiled writer.
+#[non_exhaustive]
 pub struct MultipartTiledPart<'a> {
     /// Unique non-empty part name.
     pub name: String,
@@ -55,6 +56,32 @@ pub struct MultipartTiledPart<'a> {
     /// value rounded to nearest u32.
     pub planes: Vec<&'a [f32]>,
     pub compression: Compression,
+}
+
+impl<'a> MultipartTiledPart<'a> {
+    /// Build `MultipartTiledPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        width: u32,
+        height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        channels: Vec<Channel>,
+        planes: Vec<&'a [f32]>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            width,
+            height,
+            tile_x,
+            tile_y,
+            channels,
+            planes,
+            compression,
+        }
+    }
 }
 
 /// Encode a multi-part flat (non-deep) tiled EXR file. Each part is

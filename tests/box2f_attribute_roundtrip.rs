@@ -226,47 +226,29 @@ fn minimal_scanline_with_extra(extra: Vec<Attribute>) -> Vec<u8> {
         x_max: (w - 1) as i32,
         y_max: (h - 1) as i32,
     };
-    let chs = vec![Channel {
-        name: "Y".to_string(),
-        pixel_type: PixelType::Half,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let chs = vec![Channel::new("Y".to_string(), PixelType::Half, false, 1, 1)];
     let plane: Vec<f32> = (0..(w * h)).map(|i| i as f32 * 0.125).collect();
     let mut attrs = vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.clone()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::None),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.clone()),
+        ),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::None),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ];
     attrs.extend(extra);
     encode_exr_scanline(w, h, &chs, &[&plane], Compression::None, attrs).unwrap()
@@ -280,10 +262,10 @@ fn full_header_roundtrip_box2f_variant() {
         x_max: 3.5,
         y_max: 4.75,
     };
-    let extras = vec![Attribute {
-        name: "renderRegion".to_string(),
-        value: AttributeValue::Box2f(b),
-    }];
+    let extras = vec![Attribute::new(
+        "renderRegion".to_string(),
+        AttributeValue::Box2f(b),
+    )];
     let bytes = minimal_scanline_with_extra(extras);
     let img = parse_exr(&bytes).unwrap();
 
@@ -341,15 +323,15 @@ fn exrheader_accepts_file_with_box2f_attribute() {
         return;
     }
 
-    let extras = vec![Attribute {
-        name: "renderRegion".to_string(),
-        value: AttributeValue::Box2f(Box2f {
+    let extras = vec![Attribute::new(
+        "renderRegion".to_string(),
+        AttributeValue::Box2f(Box2f {
             x_min: -0.5,
             y_min: -0.25,
             x_max: 1920.5,
             y_max: 1080.25,
         }),
-    }];
+    )];
     let bytes = minimal_scanline_with_extra(extras);
 
     let dir = tempdir();

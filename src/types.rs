@@ -35,6 +35,7 @@ impl PixelType {
 
 /// `compression` attribute value. One byte on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Compression {
     /// No compression. 1 scanline per block.
     None = 0,
@@ -146,6 +147,7 @@ pub struct Box2f {
 
 /// One entry in the `channels` (`chlist`) attribute.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Channel {
     pub name: String,
     pub pixel_type: PixelType,
@@ -153,6 +155,25 @@ pub struct Channel {
     pub p_linear: bool,
     pub x_sampling: i32,
     pub y_sampling: i32,
+}
+
+impl Channel {
+    /// Build `Channel` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        pixel_type: PixelType,
+        p_linear: bool,
+        x_sampling: i32,
+        y_sampling: i32,
+    ) -> Self {
+        Self {
+            name,
+            pixel_type,
+            p_linear,
+            x_sampling,
+            y_sampling,
+        }
+    }
 }
 
 /// Chromaticities attribute payload: four CIE-xy primaries.
@@ -186,6 +207,7 @@ pub struct Chromaticities {
 /// verbatim as `Other { type_name, data }` so the header round-trips
 /// without losing metadata.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AttributeValue {
     Channels(Vec<Channel>),
     Compression(Compression),
@@ -382,6 +404,7 @@ impl EnvMap {
 /// whose payload byte count does not match the dimensions, which pins
 /// the `8 + 4·w·h` sizing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Preview {
     pub width: u32,
     pub height: u32,
@@ -389,11 +412,30 @@ pub struct Preview {
     pub rgba: Vec<u8>,
 }
 
+impl Preview {
+    /// Build `Preview` from every field, in declaration order.
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            rgba,
+        }
+    }
+}
+
 /// One header attribute (name + typed value).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Attribute {
     pub name: String,
     pub value: AttributeValue,
+}
+
+impl Attribute {
+    /// Build `Attribute` from every field, in declaration order.
+    pub fn new(name: String, value: AttributeValue) -> Self {
+        Self { name, value }
+    }
 }
 
 #[cfg(test)]

@@ -92,13 +92,7 @@ fn roundtrip_uint_pixel_type() {
     let plane: Vec<f32> = uints.iter().map(|&u| u as f32).collect();
 
     // Build a single-channel UINT image manually.
-    let chs = vec![Channel {
-        name: "Z".to_string(),
-        pixel_type: PixelType::Uint,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let chs = vec![Channel::new("Z".to_string(), PixelType::Uint, false, 1, 1)];
     let win = Box2i {
         x_min: 0,
         y_min: 0,
@@ -106,38 +100,26 @@ fn roundtrip_uint_pixel_type() {
         y_max: (h - 1) as i32,
     };
     let attrs = vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.clone()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::Zip),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.clone()),
+        ),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::Zip),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ];
     let bytes = encode_exr_scanline(w, h, &chs, &[&plane], Compression::Zip, attrs).unwrap();
     let img = parse_exr(&bytes).unwrap();
@@ -173,27 +155,9 @@ fn roundtrip_subsampled_chroma_yby_ry() {
     let ry_plane: Vec<f32> = (0..(sw * sh)).map(|i| 0.2 + (i as f32) * 0.03).collect();
 
     let chs = vec![
-        Channel {
-            name: "BY".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 2,
-            y_sampling: 2,
-        },
-        Channel {
-            name: "RY".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 2,
-            y_sampling: 2,
-        },
-        Channel {
-            name: "Y".to_string(),
-            pixel_type: PixelType::Float,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("BY".to_string(), PixelType::Float, false, 2, 2),
+        Channel::new("RY".to_string(), PixelType::Float, false, 2, 2),
+        Channel::new("Y".to_string(), PixelType::Float, false, 1, 1),
     ];
     let win = Box2i {
         x_min: 0,
@@ -202,38 +166,26 @@ fn roundtrip_subsampled_chroma_yby_ry() {
         y_max: (h - 1) as i32,
     };
     let attrs = vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.clone()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::None),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.clone()),
+        ),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::None),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ];
 
     // Build the file manually since our encoder rejects sub-sampled

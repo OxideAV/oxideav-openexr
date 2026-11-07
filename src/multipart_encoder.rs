@@ -32,6 +32,7 @@ use crate::types::{
 /// pixel planes in alphabetical-channel-name order plus a few
 /// per-part metadata bits; the standard required attributes are
 /// derived automatically.
+#[non_exhaustive]
 pub struct MultipartScanlinePart<'a> {
     /// The part name (must be unique across all parts in the file).
     pub name: String,
@@ -43,6 +44,27 @@ pub struct MultipartScanlinePart<'a> {
     /// alphabetical order as `channels`.
     pub planes: Vec<&'a [f32]>,
     pub compression: Compression,
+}
+
+impl<'a> MultipartScanlinePart<'a> {
+    /// Build `MultipartScanlinePart` from every field, in declaration order.
+    pub fn new(
+        name: String,
+        width: u32,
+        height: u32,
+        channels: Vec<Channel>,
+        planes: Vec<&'a [f32]>,
+        compression: Compression,
+    ) -> Self {
+        Self {
+            name,
+            width,
+            height,
+            channels,
+            planes,
+            compression,
+        }
+    }
 }
 
 /// Encode a multi-part EXR file from one or more

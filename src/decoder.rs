@@ -1377,6 +1377,7 @@ pub(crate) fn compute_total_tiles(
 /// Sample layout matches [`ExrPart::planes`]: row-major, alphabetical
 /// channel order, length `width * height` per channel.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TiledLevel {
     /// Mipmap x-level index (0 = full resolution).
     pub level_x: u32,
@@ -1392,9 +1393,23 @@ pub struct TiledLevel {
     pub planes: Vec<ExrPlane>,
 }
 
+impl TiledLevel {
+    /// Build `TiledLevel` from every field, in declaration order.
+    pub fn new(level_x: u32, level_y: u32, width: u32, height: u32, planes: Vec<ExrPlane>) -> Self {
+        Self {
+            level_x,
+            level_y,
+            width,
+            height,
+            planes,
+        }
+    }
+}
+
 /// Result of [`parse_exr_tiled_multilevel`]. Carries header-level
 /// metadata once plus every decoded pyramid level.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MultilevelTiledImage {
     /// `0 = ONE_LEVEL`, `1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS`.
     pub level_mode: u8,
@@ -1419,6 +1434,34 @@ pub struct MultilevelTiledImage {
     /// * RIPMAP_LEVELS: `level_y` outer, `level_x` inner — i.e.
     ///   `(0,0), (1,0), ..., (Nx-1, 0), (0, 1), (1, 1), ...`.
     pub levels: Vec<TiledLevel>,
+}
+
+impl MultilevelTiledImage {
+    /// Build `MultilevelTiledImage` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        level_mode: u8,
+        round_mode: u8,
+        tile_x: u32,
+        tile_y: u32,
+        data_window: Box2i,
+        display_window: Box2i,
+        channels: Vec<Channel>,
+        compression: Compression,
+        levels: Vec<TiledLevel>,
+    ) -> Self {
+        Self {
+            level_mode,
+            round_mode,
+            tile_x,
+            tile_y,
+            data_window,
+            display_window,
+            channels,
+            compression,
+            levels,
+        }
+    }
 }
 
 /// Parse a tiled single-part EXR file and return every decoded mipmap /
@@ -2299,6 +2342,7 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrPart>> {
 /// diagonal; RIPMAP_LEVELS produces the full 2-D grid in `lvly`-outer
 /// `lvlx`-inner order).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MultilevelTiledPart {
     /// `0 = ONE_LEVEL`, `1 = MIPMAP_LEVELS`, `2 = RIPMAP_LEVELS`.
     /// MIPMAP comes from [`encode_exr_multipart_tiled_mipmap`]; RIPMAP
@@ -2322,6 +2366,36 @@ pub struct MultilevelTiledPart {
     /// The full part attribute list (for callers that need access to
     /// optional attributes like `name`).
     pub attributes: Vec<Attribute>,
+}
+
+impl MultilevelTiledPart {
+    /// Build `MultilevelTiledPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        level_mode: u8,
+        round_mode: u8,
+        tile_x: u32,
+        tile_y: u32,
+        data_window: Box2i,
+        display_window: Box2i,
+        channels: Vec<Channel>,
+        compression: Compression,
+        levels: Vec<TiledLevel>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            level_mode,
+            round_mode,
+            tile_x,
+            tile_y,
+            data_window,
+            display_window,
+            channels,
+            compression,
+            levels,
+            attributes,
+        }
+    }
 }
 
 /// Parse a multi-part **multi-level** flat (non-deep) tiled EXR file

@@ -20,10 +20,18 @@ use crate::types::{Attribute, Box2i, Channel, Compression, LineOrder};
 
 /// One decoded channel: name + pixel data, always converted to `f32`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ExrPlane {
     pub name: String,
     /// Row-major pixel samples, `width * height` long.
     pub samples: Vec<f32>,
+}
+
+impl ExrPlane {
+    /// Build `ExrPlane` from every field, in declaration order.
+    pub fn new(name: String, samples: Vec<f32>) -> Self {
+        Self { name, samples }
+    }
 }
 
 /// One decoded flat EXR part: every channel as a named `f32` plane.
@@ -32,6 +40,7 @@ pub struct ExrPlane {
 /// is the file's `displayWindow`. `width()` / `height()` are the data
 /// window dimensions (which is what the pixel planes are sized for).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ExrPart {
     pub data_window: Box2i,
     pub display_window: Box2i,
@@ -47,6 +56,36 @@ pub struct ExrPart {
     /// All header attributes, in file order, including the typed ones.
     /// Useful for inspecting / round-tripping non-required attributes.
     pub attributes: Vec<Attribute>,
+}
+
+impl ExrPart {
+    /// Build `ExrPart` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        data_window: Box2i,
+        display_window: Box2i,
+        line_order: LineOrder,
+        compression: Compression,
+        pixel_aspect_ratio: f32,
+        screen_window_center: (f32, f32),
+        screen_window_width: f32,
+        channels: Vec<Channel>,
+        planes: Vec<ExrPlane>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            data_window,
+            display_window,
+            line_order,
+            compression,
+            pixel_aspect_ratio,
+            screen_window_center,
+            screen_window_width,
+            channels,
+            planes,
+            attributes,
+        }
+    }
 }
 
 impl ExrPart {

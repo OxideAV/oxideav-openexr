@@ -153,27 +153,9 @@ fn encode_with_chromaticities(z: Compression) -> Vec<u8> {
     let w = 8u32;
     let h = 8u32;
     let chs = vec![
-        Channel {
-            name: "B".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "G".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "R".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("B".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("G".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("R".to_string(), PixelType::Half, false, 1, 1),
     ];
     let win = Box2i {
         x_min: 0,
@@ -182,42 +164,27 @@ fn encode_with_chromaticities(z: Compression) -> Vec<u8> {
         y_max: (h - 1) as i32,
     };
     let attrs = vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.clone()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(z),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "chromaticities".to_string(),
-            value: AttributeValue::Chromaticities(TEST_CHROMA),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.clone()),
+        ),
+        Attribute::new("compression".to_string(), AttributeValue::Compression(z)),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "chromaticities".to_string(),
+            AttributeValue::Chromaticities(TEST_CHROMA),
+        ),
     ];
     let b: Vec<f32> = vec![0.25; (w * h) as usize];
     let g: Vec<f32> = vec![0.50; (w * h) as usize];
@@ -348,30 +315,24 @@ fn exrinfo_accepts_multipart_scanline() {
     let h1 = 6u32;
     let g0: Vec<f32> = (0..(w0 * h0) as usize).map(|i| i as f32 * 0.02).collect();
     let g1: Vec<f32> = (0..(w1 * h1) as usize).map(|i| i as f32 * 0.03).collect();
-    let ch = vec![Channel {
-        name: "Y".to_string(),
-        pixel_type: PixelType::Half,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }];
+    let ch = vec![Channel::new("Y".to_string(), PixelType::Half, false, 1, 1)];
     let parts = vec![
-        MultipartScanlinePart {
-            name: "left".to_string(),
-            width: w0,
-            height: h0,
-            channels: ch.clone(),
-            planes: vec![g0.as_slice()],
-            compression: Compression::Zip,
-        },
-        MultipartScanlinePart {
-            name: "right".to_string(),
-            width: w1,
-            height: h1,
-            channels: ch.clone(),
-            planes: vec![g1.as_slice()],
-            compression: Compression::Rle,
-        },
+        MultipartScanlinePart::new(
+            "left".to_string(),
+            w0,
+            h0,
+            ch.clone(),
+            vec![g0.as_slice()],
+            Compression::Zip,
+        ),
+        MultipartScanlinePart::new(
+            "right".to_string(),
+            w1,
+            h1,
+            ch.clone(),
+            vec![g1.as_slice()],
+            Compression::Rle,
+        ),
     ];
     let bytes = encode_exr_multipart(&parts).unwrap();
     exrinfo_accepts(&bytes, "multipart scanline");

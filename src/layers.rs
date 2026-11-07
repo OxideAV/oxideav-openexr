@@ -42,6 +42,7 @@ pub fn multi_view(attrs: &[Attribute]) -> Option<&[String]> {
 
 /// Colour shape of a layer, by the base channel names it contains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LayerKind {
     /// `R`, `G`, `B` and `A`.
     Rgba,
@@ -72,6 +73,7 @@ impl LayerKind {
 
 /// One layer of a channel list.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExrLayer {
     /// Layer prefix without the trailing `.`; `""` for the base layer.
     pub name: String,
@@ -85,6 +87,18 @@ pub struct ExrLayer {
     /// `right` layer and a `diffuse.right` layer both belong to
     /// `right`).
     pub view: Option<String>,
+}
+
+impl ExrLayer {
+    /// Build `ExrLayer` from every field, in declaration order.
+    pub fn new(name: String, channels: Vec<usize>, kind: LayerKind, view: Option<String>) -> Self {
+        Self {
+            name,
+            channels,
+            kind,
+            view,
+        }
+    }
 }
 
 impl ExrLayer {

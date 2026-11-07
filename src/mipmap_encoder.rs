@@ -40,12 +40,24 @@ use crate::types::{Attribute, AttributeValue, Box2i, Channel, Compression, LineO
 /// per channel (in the same alphabetical order as the file's channel list).
 /// Plane lengths must equal `level_w * level_h`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MipmapLevel {
     pub width: u32,
     pub height: u32,
     /// One `width * height` f32 plane per channel. Channels are in the
     /// same alphabetical order as the file-level `channels` list.
     pub planes: Vec<Vec<f32>>,
+}
+
+impl MipmapLevel {
+    /// Build `MipmapLevel` from every field, in declaration order.
+    pub fn new(width: u32, height: u32, planes: Vec<Vec<f32>>) -> Self {
+        Self {
+            width,
+            height,
+            planes,
+        }
+    }
 }
 
 /// Number of mipmap levels for ROUND_DOWN given `max(w,h)`. Matches
@@ -715,9 +727,17 @@ pub type RipmapLevel = MipmapLevel;
 /// (`mipmap_level_count(height)`) and every row has the same length, the
 /// x-level count (`mipmap_level_count(width)`).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RipmapPyramid {
     /// `grid[lvly][lvlx]`. Level `(lvlx, lvly)` is at `grid[lvly][lvlx]`.
     pub grid: Vec<Vec<RipmapLevel>>,
+}
+
+impl RipmapPyramid {
+    /// Build `RipmapPyramid` from every field, in declaration order.
+    pub fn new(grid: Vec<Vec<RipmapLevel>>) -> Self {
+        Self { grid }
+    }
 }
 
 /// Number of x-levels and y-levels (`(nx, ny)`) for a ROUND_DOWN ripmap of

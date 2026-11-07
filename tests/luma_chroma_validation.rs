@@ -74,13 +74,7 @@ fn exr2aces(input: &Path, output: &Path) -> bool {
 }
 
 fn ch(name: &str, pt: PixelType, sx: i32, sy: i32) -> Channel {
-    Channel {
-        name: name.to_string(),
-        pixel_type: pt,
-        p_linear: false,
-        x_sampling: sx,
-        y_sampling: sy,
-    }
+    Channel::new(name.to_string(), pt, false, sx, sy)
 }
 
 fn attrs(w: u32, h: u32, chs: &[Channel]) -> Vec<Attribute> {
@@ -91,38 +85,26 @@ fn attrs(w: u32, h: u32, chs: &[Channel]) -> Vec<Attribute> {
         y_max: (h - 1) as i32,
     };
     vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs.to_vec()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::None),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chs.to_vec()),
+        ),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::None),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ]
 }
 
@@ -252,16 +234,8 @@ fn reference_chroma_ratios_match_ours_for_constant_chroma() {
         w,
         h,
         y_ref,
-        ChromaPlane {
-            samples: ry_ref,
-            x_sampling: 2,
-            y_sampling: 2,
-        },
-        ChromaPlane {
-            samples: by_ref,
-            x_sampling: 2,
-            y_sampling: 2,
-        },
+        ChromaPlane::new(ry_ref, 2, 2),
+        ChromaPlane::new(by_ref, 2, 2),
         wa,
     )
     .unwrap();
@@ -314,16 +288,8 @@ fn smooth_gradient_reconstructs_within_colour_tolerance() {
         w,
         h,
         plane(&ya, "Y"),
-        ChromaPlane {
-            samples: plane(&ya, "RY"),
-            x_sampling: 2,
-            y_sampling: 2,
-        },
-        ChromaPlane {
-            samples: plane(&ya, "BY"),
-            x_sampling: 2,
-            y_sampling: 2,
-        },
+        ChromaPlane::new(plane(&ya, "RY"), 2, 2),
+        ChromaPlane::new(plane(&ya, "BY"), 2, 2),
         wa,
     )
     .unwrap();

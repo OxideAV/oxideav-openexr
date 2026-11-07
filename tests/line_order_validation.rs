@@ -388,13 +388,7 @@ fn tiled_line_orders_all_compressions_roundtrip() {
 // ---------------------------------------------------------------------
 
 fn gray_channel() -> Vec<Channel> {
-    vec![Channel {
-        name: "G".to_string(),
-        pixel_type: PixelType::Float,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }]
+    vec![Channel::new("G".to_string(), PixelType::Float, false, 1, 1)]
 }
 
 fn gray_plane(w: u32, h: u32) -> Vec<f32> {

@@ -173,68 +173,29 @@ fn base_attributes(w: u32, h: u32) -> Vec<Attribute> {
         y_max: (h - 1) as i32,
     };
     let chs = vec![
-        Channel {
-            name: "A".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "B".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "G".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
-        Channel {
-            name: "R".to_string(),
-            pixel_type: PixelType::Half,
-            p_linear: false,
-            x_sampling: 1,
-            y_sampling: 1,
-        },
+        Channel::new("A".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("B".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("G".to_string(), PixelType::Half, false, 1, 1),
+        Channel::new("R".to_string(), PixelType::Half, false, 1, 1),
     ];
     vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chs),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(Compression::None),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(LineOrder::IncreasingY),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new("channels".to_string(), AttributeValue::Channels(chs)),
+        Attribute::new(
+            "compression".to_string(),
+            AttributeValue::Compression(Compression::None),
+        ),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new(
+            "lineOrder".to_string(),
+            AttributeValue::LineOrder(LineOrder::IncreasingY),
+        ),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ]
 }
 
@@ -253,28 +214,22 @@ fn build_file(w: u32, h: u32, extra: Vec<Attribute>) -> Vec<u8> {
 #[test]
 fn full_header_roundtrip_through_parse_exr() {
     let extra = vec![
-        Attribute {
-            name: "worldToNDC".to_string(),
-            value: AttributeValue::V3d(1.0, 2.0, 3.0),
-        },
-        Attribute {
-            name: "originXY".to_string(),
-            value: AttributeValue::V2d(-4.0, 5.0),
-        },
-        Attribute {
-            name: "framesPerSecond".to_string(),
-            value: AttributeValue::Rational(24, 1),
-        },
-        Attribute {
-            name: "timeCode".to_string(),
-            value: AttributeValue::Timecode(Timecode {
+        Attribute::new("worldToNDC".to_string(), AttributeValue::V3d(1.0, 2.0, 3.0)),
+        Attribute::new("originXY".to_string(), AttributeValue::V2d(-4.0, 5.0)),
+        Attribute::new(
+            "framesPerSecond".to_string(),
+            AttributeValue::Rational(24, 1),
+        ),
+        Attribute::new(
+            "timeCode".to_string(),
+            AttributeValue::Timecode(Timecode {
                 time_and_flags: 0x0102_0304,
                 user_data: 0,
             }),
-        },
-        Attribute {
-            name: "keyCode".to_string(),
-            value: AttributeValue::Keycode(Keycode {
+        ),
+        Attribute::new(
+            "keyCode".to_string(),
+            AttributeValue::Keycode(Keycode {
                 film_mfc_code: 1,
                 film_type: 2,
                 prefix: 3,
@@ -283,14 +238,11 @@ fn full_header_roundtrip_through_parse_exr() {
                 perfs_per_frame: 4,
                 perfs_per_count: 64,
             }),
-        },
-        Attribute {
-            name: "channelTags".to_string(),
-            value: AttributeValue::StringVector(vec![
-                "diffuse".to_string(),
-                "specular".to_string(),
-            ]),
-        },
+        ),
+        Attribute::new(
+            "channelTags".to_string(),
+            AttributeValue::StringVector(vec!["diffuse".to_string(), "specular".to_string()]),
+        ),
     ];
     let bytes = build_file(4, 4, extra.clone());
     let img = parse_exr(&bytes).unwrap();
@@ -349,20 +301,20 @@ fn exrheader_text(bytes: &[u8]) -> Option<String> {
 #[test]
 fn exrheader_renders_optional_attributes() {
     let extra = vec![
-        Attribute {
-            name: "framesPerSecond".to_string(),
-            value: AttributeValue::Rational(24, 1),
-        },
-        Attribute {
-            name: "timeCode".to_string(),
-            value: AttributeValue::Timecode(Timecode {
+        Attribute::new(
+            "framesPerSecond".to_string(),
+            AttributeValue::Rational(24, 1),
+        ),
+        Attribute::new(
+            "timeCode".to_string(),
+            AttributeValue::Timecode(Timecode {
                 time_and_flags: 0x0102_0304,
                 user_data: 0,
             }),
-        },
-        Attribute {
-            name: "keyCode".to_string(),
-            value: AttributeValue::Keycode(Keycode {
+        ),
+        Attribute::new(
+            "keyCode".to_string(),
+            AttributeValue::Keycode(Keycode {
                 film_mfc_code: 10,
                 film_type: 5,
                 prefix: 123456,
@@ -371,11 +323,11 @@ fn exrheader_renders_optional_attributes() {
                 perfs_per_frame: 4,
                 perfs_per_count: 60,
             }),
-        },
-        Attribute {
-            name: "layerNames".to_string(),
-            value: AttributeValue::StringVector(vec!["alpha".to_string(), "beta".to_string()]),
-        },
+        ),
+        Attribute::new(
+            "layerNames".to_string(),
+            AttributeValue::StringVector(vec!["alpha".to_string(), "beta".to_string()]),
+        ),
     ];
     let bytes = build_file(2, 2, extra);
     let Some(text) = exrheader_text(&bytes) else {

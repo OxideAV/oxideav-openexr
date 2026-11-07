@@ -49,23 +49,11 @@ fn rgba(w: u32, h: u32) -> Vec<f32> {
 }
 
 fn gray_channel(pt: PixelType) -> Vec<Channel> {
-    vec![Channel {
-        name: "G".to_string(),
-        pixel_type: pt,
-        p_linear: false,
-        x_sampling: 1,
-        y_sampling: 1,
-    }]
+    vec![Channel::new("G".to_string(), pt, false, 1, 1)]
 }
 
 fn ch(name: &str, pt: PixelType, p_linear: bool, sx: i32, sy: i32) -> Channel {
-    Channel {
-        name: name.to_string(),
-        pixel_type: pt,
-        p_linear,
-        x_sampling: sx,
-        y_sampling: sy,
-    }
+    Channel::new(name.to_string(), pt, p_linear, sx, sy)
 }
 
 /// The seven required header attributes for the general scanline
@@ -84,38 +72,20 @@ fn required_attrs(
         y_max: (h - 1) as i32,
     };
     vec![
-        Attribute {
-            name: "channels".to_string(),
-            value: AttributeValue::Channels(chans.to_vec()),
-        },
-        Attribute {
-            name: "compression".to_string(),
-            value: AttributeValue::Compression(comp),
-        },
-        Attribute {
-            name: "dataWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "displayWindow".to_string(),
-            value: AttributeValue::Box2i(win),
-        },
-        Attribute {
-            name: "lineOrder".to_string(),
-            value: AttributeValue::LineOrder(lo),
-        },
-        Attribute {
-            name: "pixelAspectRatio".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
-        Attribute {
-            name: "screenWindowCenter".to_string(),
-            value: AttributeValue::V2f(0.0, 0.0),
-        },
-        Attribute {
-            name: "screenWindowWidth".to_string(),
-            value: AttributeValue::Float(1.0),
-        },
+        Attribute::new(
+            "channels".to_string(),
+            AttributeValue::Channels(chans.to_vec()),
+        ),
+        Attribute::new("compression".to_string(), AttributeValue::Compression(comp)),
+        Attribute::new("dataWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("displayWindow".to_string(), AttributeValue::Box2i(win)),
+        Attribute::new("lineOrder".to_string(), AttributeValue::LineOrder(lo)),
+        Attribute::new("pixelAspectRatio".to_string(), AttributeValue::Float(1.0)),
+        Attribute::new(
+            "screenWindowCenter".to_string(),
+            AttributeValue::V2f(0.0, 0.0),
+        ),
+        Attribute::new("screenWindowWidth".to_string(), AttributeValue::Float(1.0)),
     ]
 }
 
