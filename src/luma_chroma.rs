@@ -208,18 +208,35 @@ pub fn luminance_weights_of(attrs: &[Attribute]) -> [f32; 3] {
     luminance_weights(&chromaticities_of(attrs).unwrap_or(BT709_CHROMATICITIES))
 }
 
+/// The reconstruction taps in ascending-offset order (−13, −11, …, 13).
+const RECON_ASCENDING: [f32; 14] = {
+    let t = RECONSTRUCTION_TAPS;
+    [
+        t[6], t[5], t[4], t[3], t[2], t[1], t[0], t[0], t[1], t[2], t[3], t[4], t[5], t[6],
+    ]
+};
+
 /// One reconstruction pass value at full-resolution position `x` (may
 /// be `-1`) of a line of chroma samples `c` (module docs, step 1),
-/// before rounding.
+/// before rounding. For odd `x` the samples at offsets −13, −11, …, 13
+/// are the 14 consecutive chroma indices from `(x − 13) / 2`.
+#[inline]
 fn reconstruct_at(c: &[f32], x: isize) -> f32 {
     let last = c.len() as isize - 1;
     if x.rem_euclid(2) == 0 {
         return c[(x / 2).clamp(0, last) as usize];
     }
+    let first = (x - 13).div_euclid(2);
     let mut sum = 0.0f32;
-    for o in (-13isize..=13).step_by(2) {
-        let idx = (x + o).div_euclid(2).clamp(0, last) as usize;
-        sum += c[idx] * RECONSTRUCTION_TAPS[(o.unsigned_abs() - 1) / 2];
+    if first >= 0 && first + 13 <= last {
+        let win = &c[first as usize..first as usize + 14];
+        for (v, t) in win.iter().zip(RECON_ASCENDING) {
+            sum += v * t;
+        }
+    } else {
+        for (k, t) in RECON_ASCENDING.iter().enumerate() {
+            sum += c[(first + k as isize).clamp(0, last) as usize] * t;
+        }
     }
     sum
 }
@@ -233,21 +250,33 @@ fn reconstruct_2x2_with_ring(sub: &[f32], width: usize, height: usize) -> Vec<f3
     let ph = height.div_ceil(2);
     // Horizontal pass: every chroma row → `width` values, binary16.
     let mut horiz = vec![0.0f32; ph * width];
-    for j in 0..ph {
-        let row = &sub[j * pw..(j + 1) * pw];
-        for x in 0..width {
-            horiz[j * width + x] = h(reconstruct_at(row, x as isize));
+    for (row, dst) in sub.chunks_exact(pw).zip(horiz.chunks_exact_mut(width)) {
+        for (x, d) in dst.iter_mut().enumerate() {
+            *d = h(reconstruct_at(row, x as isize));
         }
     }
-    // Vertical pass over every column, rows -1 ..= height - 1.
+    // Vertical pass, rows -1 ..= height - 1, a whole row at a time (each
+    // sample still sums its 14 terms in ascending-offset order).
+    let last = ph as isize - 1;
     let mut out = vec![0.0f32; (height + 1) * width];
-    let mut col = vec![0.0f32; ph];
-    for x in 0..width {
-        for (j, c) in col.iter_mut().enumerate() {
-            *c = horiz[j * width + x];
+    let mut acc = vec![0.0f32; width];
+    for (ring_row, dst) in out.chunks_exact_mut(width).enumerate() {
+        let y = ring_row as isize - 1;
+        if y.rem_euclid(2) == 0 {
+            let j = (y / 2).clamp(0, last) as usize;
+            dst.copy_from_slice(&horiz[j * width..(j + 1) * width]);
+            continue;
         }
-        for y in -1..height as isize {
-            out[(y + 1) as usize * width + x] = h(reconstruct_at(&col, y));
+        let first = (y - 13).div_euclid(2);
+        acc.fill(0.0);
+        for (k, t) in RECON_ASCENDING.iter().enumerate() {
+            let j = (first + k as isize).clamp(0, last) as usize;
+            for (a, v) in acc.iter_mut().zip(&horiz[j * width..(j + 1) * width]) {
+                *a += v * t;
+            }
+        }
+        for (d, a) in dst.iter_mut().zip(&acc) {
+            *d = h(*a);
         }
     }
     out
@@ -296,45 +325,71 @@ pub fn decimate_chroma_2x2(full: &[f32], width: u32, height: u32) -> Result<Vec<
     let (pw, ph) = (w.div_ceil(2), hgt.div_ceil(2));
     // Index rule: below the start → 0, past the end → n − 2 (n − 1 for
     // a one-sample line).
-    let filter = |line: &dyn Fn(usize) -> f32, n: usize, pos: usize| -> f32 {
-        let last = n as isize - 1;
-        let past = (n as isize - 2).max(0);
-        let at = |k: isize| -> f32 {
-            let k = if k < 0 {
-                0
-            } else if k > last {
-                past
-            } else {
-                k
-            };
-            line(k as usize)
-        };
-        let mut sum = 0.0f32;
-        for o in -13isize..=13 {
-            let tap = match o.unsigned_abs() {
-                0 => DECIMATION_TAPS[0],
-                a if a % 2 == 1 => DECIMATION_TAPS[a.div_ceil(2)],
-                _ => continue,
-            };
-            sum += at(pos as isize + o) * tap;
+    let index = |k: isize, n: usize| -> usize {
+        if k < 0 {
+            0
+        } else if k >= n as isize {
+            n.saturating_sub(2)
+        } else {
+            k as usize
         }
-        sum
     };
     let mut horiz = vec![0.0f32; hgt * pw];
-    for y in 0..hgt {
-        let row = &full[y * w..(y + 1) * w];
-        for i in 0..pw {
-            horiz[y * pw + i] = h(filter(&|k| row[k], w, 2 * i));
+    for (row, dst) in full.chunks_exact(w).zip(horiz.chunks_exact_mut(pw)) {
+        for (i, d) in dst.iter_mut().enumerate() {
+            let pos = 2 * i as isize;
+            let mut sum = 0.0f32;
+            if pos >= 13 && pos + 13 < w as isize {
+                for (o, t) in DECIM_ASCENDING {
+                    sum += row[(pos + o) as usize] * t;
+                }
+            } else {
+                for (o, t) in DECIM_ASCENDING {
+                    sum += row[index(pos + o, w)] * t;
+                }
+            }
+            *d = h(sum);
         }
     }
+    // Vertical pass a whole output row at a time (each sample still sums
+    // its terms in ascending-offset order).
     let mut out = vec![0.0f32; ph * pw];
-    for i in 0..pw {
-        for j in 0..ph {
-            out[j * pw + i] = h(filter(&|k| horiz[k * pw + i], hgt, 2 * j));
+    for (j, dst) in out.chunks_exact_mut(pw).enumerate() {
+        let pos = 2 * j as isize;
+        for (o, t) in DECIM_ASCENDING {
+            let r = index(pos + o, hgt);
+            for (d, v) in dst.iter_mut().zip(&horiz[r * pw..(r + 1) * pw]) {
+                *d += v * t;
+            }
+        }
+        for d in dst.iter_mut() {
+            *d = h(*d);
         }
     }
     Ok(out)
 }
+
+/// The decimation taps as `(offset, tap)` in ascending-offset order.
+const DECIM_ASCENDING: [(isize, f32); 15] = {
+    let t = DECIMATION_TAPS;
+    [
+        (-13, t[7]),
+        (-11, t[6]),
+        (-9, t[5]),
+        (-7, t[4]),
+        (-5, t[3]),
+        (-3, t[2]),
+        (-1, t[1]),
+        (0, t[0]),
+        (1, t[1]),
+        (3, t[2]),
+        (5, t[3]),
+        (7, t[4]),
+        (9, t[5]),
+        (11, t[6]),
+        (13, t[7]),
+    ]
+};
 
 /// Reconstruct a full-resolution plane from a sub-sampled one by
 /// bilinear interpolation between sample positions (the fallback for

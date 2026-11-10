@@ -15,8 +15,9 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use oxideav_openexr::{
-    Attribute, AttributeValue, Box2i, Channel, Compression, LineOrder, PixelType,
-    encode_exr_scanline, parse_exr,
+    Attribute, AttributeValue, BT709_CHROMATICITIES, Box2i, Channel, ChromaPlane, Compression,
+    LineOrder, PixelType, encode_exr_scanline, luma_chroma_to_rgb, luminance_weights, parse_exr,
+    rgb_to_luma_chroma,
 };
 
 const W: u32 = 256;
@@ -197,8 +198,47 @@ fn bench_decode_tiled(c: &mut Criterion) {
     }
 }
 
+fn bench_luma_chroma(c: &mut Criterion) {
+    // The Y RY BY colour path alone (no container): 2×2 reconstruction +
+    // conversion + saturation limiting, and the writer's conversion +
+    // decimation + mantissa rounding.
+    let (w, h) = (W, H);
+    let n = (w * h) as usize;
+    let rgb: Vec<Vec<f32>> = (0..3)
+        .map(|c| {
+            (0..n)
+                .map(|i| 0.1 + ((i * (7 + 3 * c)) % 97) as f32 / 120.0)
+                .collect()
+        })
+        .collect();
+    let wts = luminance_weights(&BT709_CHROMATICITIES);
+    let yc = rgb_to_luma_chroma(w, h, [&rgb[0], &rgb[1], &rgb[2]], wts, (2, 2)).unwrap();
+    let mut group = c.benchmark_group("luma_chroma");
+    group.throughput(Throughput::Elements(n as u64));
+    group.bench_function("decode_2x2", |b| {
+        b.iter(|| {
+            luma_chroma_to_rgb(
+                w,
+                h,
+                black_box(&yc.y),
+                ChromaPlane::new(&yc.ry, 2, 2),
+                ChromaPlane::new(&yc.by, 2, 2),
+                wts,
+            )
+            .unwrap()
+        })
+    });
+    group.bench_function("encode_2x2", |b| {
+        b.iter(|| {
+            rgb_to_luma_chroma(w, h, [black_box(&rgb[0]), &rgb[1], &rgb[2]], wts, (2, 2)).unwrap()
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_luma_chroma,
     bench_decode,
     bench_decode_tiled,
     bench_encode,

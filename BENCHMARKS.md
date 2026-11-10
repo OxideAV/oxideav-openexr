@@ -177,3 +177,20 @@ the incremental scan only when the whole code is not yet available, so
 the exhaustion errors are unchanged), builds its per-length symbol
 ranges in one flat allocation, and the PIZ range-compaction LUTs skip
 empty bitmap bytes.
+
+## Luminance/chroma colour path (`luma_chroma_to_rgb` / `rgb_to_luma_chroma`)
+
+256×256, 2×2 chroma, colour conversion only (no container); throughput
+in pixels:
+
+| Path | Throughput |
+| ---- | ---------- |
+| decode (27-tap reconstruction + conversion + saturation limiting) | 69 Mpx/s |
+| encode (conversion + 27-tap decimation + mantissa rounding) | 41 Mpx/s |
+
+The first bit-exact implementation ran at 26.5 / 19.7 Mpx/s; the
+vertical passes now accumulate a whole output row at a time and
+interior samples index their 14 / 15-tap window directly (edge
+positions keep the clamped index rule). Every sample still sums its
+terms in ascending-offset order, so the output is unchanged — the
+traced fixtures stay bit-exact.
