@@ -787,3 +787,114 @@ fn hostile_counts_are_refused_before_any_table_is_sized() {
         Err(ExrError::Layout(LayoutViolation::MissingName { part: 0 }))
     ));
 }
+
+/// `encode_all` writes every frame as `encode` would and combines the
+/// results, so each single-part layout is available per part. Black-box
+/// readers read the headers and the pixels of every variant, and of
+/// single-part tiled files whose windows sit off the origin.
+#[test]
+fn contract_writer_layouts_are_read_by_black_box_readers() {
+    use oxideav_openexr::{
+        ColourLayout, EncodeOptions, ExrImage, ExrPixelFormat, Frame, LevelMode, decode,
+        decode_all, encode, encode_all,
+    };
+    let image = |w: u32, h: u32, format: ExrPixelFormat, seed: u64| {
+        let mut rng = Rng(seed);
+        let n = (w * h) as usize * format.components();
+        let samples: Vec<f32> = (0..n).map(|_| rng.sample().abs()).collect();
+        ExrImage::from_f32(w, h, format, &samples).unwrap()
+    };
+    let placed = Box2i {
+        x_min: -6,
+        y_min: 4,
+        x_max: 6,
+        y_max: 12,
+    };
+    let frames = vec![
+        Frame::new(
+            image(13, 9, ExrPixelFormat::RgbaF32Le, 11)
+                .with_data_window(placed)
+                .unwrap(),
+            0,
+        )
+        .with_name("beauty".to_string()),
+        Frame::new(image(8, 6, ExrPixelFormat::RgbF32Le, 12), 1).with_name("left".to_string()),
+        Frame::new(image(5, 17, ExrPixelFormat::GrayF32Le, 13), 2),
+    ];
+    let variants = [
+        EncodeOptions::default(),
+        EncodeOptions::default()
+            .with_tile_size(4)
+            .with_compression(Compression::Piz),
+        EncodeOptions::default()
+            .with_tile_size(5)
+            .with_levels(LevelMode::Mipmap),
+        EncodeOptions::default()
+            .with_tile_size(4)
+            .with_levels(LevelMode::Ripmap)
+            .with_line_order(LineOrder::DecreasingY)
+            .with_compression(Compression::Rle),
+        EncodeOptions::default()
+            .with_line_order(LineOrder::DecreasingY)
+            .with_compression(Compression::Zips),
+    ];
+    for (v, opts) in variants.iter().enumerate() {
+        let label = format!("encode_all variant {v}");
+        let bytes = encode_all(&frames, opts).unwrap();
+        let layout = check_layout(&bytes, true).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(layout.parts.len(), 3, "{label}");
+        assert_eq!(layout.parts[2].name.as_deref(), Some("part2"), "{label}");
+        let ours = decode_all(&bytes).unwrap();
+        for (f, want) in ours.iter().zip(&frames) {
+            assert_eq!(f.image.planes, want.image.planes, "{label}");
+            assert_eq!(f.image.data_window, want.image.data_window, "{label}");
+        }
+        // combine(split) restores it, and each part decodes alone.
+        let singles = split_parts(&bytes).unwrap();
+        assert_eq!(combine_parts(&singles).unwrap(), bytes, "{label}");
+        for (single, want) in singles.iter().zip(&frames) {
+            assert_eq!(decode(single).unwrap().planes, want.image.planes, "{label}");
+            header_reader_accepts(single, &label);
+        }
+        header_reader_accepts(&bytes, &label);
+        if let Some(copy) = pixel_reader_copy(&bytes, &label) {
+            let theirs = decode_all(&copy).unwrap_or_else(|e| panic!("{label} copy: {e}"));
+            assert_eq!(theirs.len(), 3, "{label}");
+            for (f, want) in theirs.iter().zip(&frames) {
+                assert_eq!(f.image.planes, want.image.planes, "{label} copy");
+                assert_eq!(f.image.data_window, want.image.data_window, "{label} copy");
+            }
+        }
+    }
+
+    // Luminance/chroma parts (sub-sampled chroma, scanline).
+    let luma = EncodeOptions::default().with_colour(ColourLayout::LumaChroma);
+    let even = vec![
+        Frame::new(image(8, 6, ExrPixelFormat::RgbF32Le, 21), 0),
+        Frame::new(image(4, 10, ExrPixelFormat::RgbaF32Le, 22), 1),
+    ];
+    let bytes = encode_all(&even, &luma).unwrap();
+    check_layout(&bytes, true).unwrap();
+    assert_eq!(decode_all(&bytes).unwrap().len(), 2);
+    header_reader_accepts(&bytes, "luminance/chroma parts");
+    assert!(pixel_reader_copy(&bytes, "luminance/chroma parts").is_none_or(|c| !c.is_empty()));
+
+    // Single-part tiled files off the origin.
+    for levels in [LevelMode::One, LevelMode::Mipmap, LevelMode::Ripmap] {
+        let label = format!("tiled {levels:?} off origin");
+        let opts = EncodeOptions::default()
+            .with_tile_size(4)
+            .with_levels(levels);
+        let bytes = encode(&frames[0].image, &opts).unwrap();
+        assert_eq!(parse_header(&bytes).unwrap().version.raw, 2 | 0x200);
+        assert_eq!(decode(&bytes).unwrap(), frames[0].image, "{label}");
+        header_reader_accepts(&bytes, &label);
+        if let Some(copy) = pixel_reader_copy(&bytes, &label) {
+            // (`pixel_reader_copy` hands a one-part file back as a
+            // one-part multi-part file.)
+            let theirs = decode_all(&copy).unwrap_or_else(|e| panic!("{label} copy: {e}"));
+            assert_eq!(theirs[0].image.planes, frames[0].image.planes, "{label}");
+            assert_eq!(theirs[0].image.data_window, placed, "{label}");
+        }
+    }
+}

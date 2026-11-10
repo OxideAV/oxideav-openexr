@@ -16,7 +16,6 @@ use crate::mipmap_encoder::{
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap_with_attributes,
     encode_exr_tiled_ripmap_with_attributes,
 };
-use crate::multipart_encoder::{MultipartScanlinePart, encode_exr_multipart_with_attributes};
 use crate::multipart_mixed_encoder::{MultipartMixedImage, parse_exr_multipart_mixed};
 use crate::options::{DecodeOptions, EncodeOptions, LevelMode};
 use crate::tile_encoder::encode_exr_tiled_with_attributes;
@@ -470,8 +469,7 @@ fn effective_windows(image: &ExrImage, opts: &EncodeOptions) -> Result<(Box2i, B
 ///
 /// Every native layout encodes as given (a plane with row padding is
 /// repacked); nothing is converted silently. [`ExrError::Unsupported`]
-/// for UINT output, and for tiled output with a data window off the
-/// origin; [`ExrError::InvalidData`] for inconsistent options (see
+/// for UINT output; [`ExrError::InvalidData`] for inconsistent options (see
 /// [`EncodeOptions`]). ICC / Exif / XMP metadata cannot be carried and is
 /// ignored.
 pub fn encode(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
@@ -503,19 +501,6 @@ pub fn encode(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
             attrs,
         );
     }
-    let origin = Box2i {
-        x_min: 0,
-        y_min: 0,
-        x_max: (width - 1) as i32,
-        y_max: (height - 1) as i32,
-    };
-    if data_window != origin || display_window != origin {
-        return Err(ExrError::unsupported(
-            "OpenEXR encoder: tiled output needs the data and display windows at the origin \
-             ([0, width) x [0, height)); write a scanline file (tile_size = 0) to keep the \
-             window position",
-        ));
-    }
     if channels
         .iter()
         .any(|c| c.x_sampling != 1 || c.y_sampling != 1)
@@ -526,7 +511,10 @@ pub fn encode(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
         ));
     }
     let extra = &image.attributes;
-    match opts.levels {
+    // The tile writers lay the image out at the origin. Tile chunks are
+    // addressed by tile index relative to the data window's corner, so
+    // placing the image is a matter of the two window attributes.
+    let tiled = match opts.levels {
         LevelMode::One => encode_exr_tiled_with_attributes(
             width,
             height,
@@ -562,7 +550,8 @@ pub fn encode(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
                 extra,
             )
         }
-    }
+    }?;
+    crate::layout::place_windows(tiled, data_window, display_window)
 }
 
 /// Encode tightly packed 8-bit RGB (`3 × width × height` bytes) as an
@@ -603,16 +592,20 @@ pub fn encode_to<W: Write>(image: &ExrImage, opts: &EncodeOptions, mut w: W) -> 
     Ok(())
 }
 
-/// The mirror of [`decode_all`]: write `frames` as one multi-part
-/// scanline file, one part per frame in order. Each part is named by
-/// its frame's `name` (`part<index>` when `None`; names must be unique),
-/// carries the frame image's non-structural attributes, and is written
-/// with the option's pixel type, compression and channel layout
-/// (`tile_size`, `levels`, `line_order` and the window overrides are
-/// not available for multi-part output — [`ExrError::Unsupported`] when
-/// set). Part data windows sit at the origin; the shared display window
-/// is the largest part extent. An empty slice is
-/// [`ExrError::InvalidData`].
+/// The mirror of [`decode_all`]: write `frames` as one multi-part file,
+/// one part per frame in order. Each frame is written exactly as
+/// [`encode`] writes it under `opts` — scanline or tiled, any level
+/// mode and storage order, RGB or luminance/chroma, with its own data
+/// window — and the results are combined byte for byte
+/// ([`crate::combine_parts_with`]). Each part is named by its frame's
+/// `name` (`part<index>` when `None`) and carries the frame image's
+/// non-structural attributes; the display window, which all parts of a
+/// file share, is the union of the frames' display windows.
+///
+/// Errors: an empty slice is [`ExrError::InvalidData`]; two frames with
+/// the same name, or frames that disagree on `pixelAspectRatio` or
+/// carry `chromaticities` the first frame lacks (both shared by all
+/// parts), are [`ExrError::Layout`].
 pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
     opts.validate()?;
     if frames.is_empty() {
@@ -620,39 +613,21 @@ pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
             "OpenEXR encoder: encode_all needs at least one frame",
         ));
     }
-    if opts.tile_size != 0 || opts.line_order != crate::types::LineOrder::IncreasingY {
-        return Err(ExrError::unsupported(
-            "OpenEXR encoder: multi-part output is scanline INCREASING_Y only (tile_size = 0)",
-        ));
-    }
-    if opts.data_window.is_some() || opts.display_window.is_some() {
-        return Err(ExrError::unsupported(
-            "OpenEXR encoder: multi-part output places every part at the origin (no window \
-             overrides)",
-        ));
-    }
-    let mut planes_per_part = Vec::with_capacity(frames.len());
-    let mut channels_per_part = Vec::with_capacity(frames.len());
-    let mut extras = Vec::with_capacity(frames.len());
-    for f in frames {
-        let (channels, planes) = image_to_channels(&f.image, opts)?;
-        channels_per_part.push(channels);
-        planes_per_part.push(planes);
-        extras.push(f.image.attributes.clone());
-    }
-    let parts: Vec<MultipartScanlinePart> = frames
+    // Each frame is written exactly as `encode` writes it, then the
+    // single-part files are combined byte for byte.
+    let files = frames
         .iter()
-        .enumerate()
-        .map(|(i, f)| MultipartScanlinePart {
-            name: f.name.clone().unwrap_or_else(|| format!("part{}", f.index)),
-            width: f.image.width,
-            height: f.image.height,
-            channels: channels_per_part[i].clone(),
-            planes: planes_per_part[i].iter().map(|p| p.as_slice()).collect(),
-            compression: opts.compression,
-        })
-        .collect();
-    encode_exr_multipart_with_attributes(&parts, &extras)
+        .map(|f| encode(&f.image, opts))
+        .collect::<Result<Vec<_>>>()?;
+    let names = frames
+        .iter()
+        .map(|f| f.name.clone().unwrap_or_else(|| format!("part{}", f.index)));
+    crate::layout::combine_parts_with(
+        &files,
+        &crate::layout::CombineOptions::new()
+            .with_names(names)
+            .with_unify_display_window(true),
+    )
 }
 
 #[cfg(test)]
@@ -660,6 +635,7 @@ mod tests {
     use super::*;
     use crate::header::parse_header;
     use crate::image::{ColorInfo, PixelFormat, Plane};
+    use crate::multipart_encoder::MultipartScanlinePart;
     use crate::options::ColourLayout;
     use crate::types::{Compression, PixelType};
 
@@ -832,11 +808,29 @@ mod tests {
             ),
             Err(ExrError::InvalidData(_))
         ));
-        // Tiled output refuses an off-origin window but keeps extras.
-        assert!(matches!(
-            encode(&img, &EncodeOptions::default().with_tile_size(4)),
-            Err(ExrError::Unsupported(_))
-        ));
+        // Tiled output keeps the windows too (tile chunks are indexed
+        // from the data window's corner) — every level mode, the
+        // storage orders, and a tile size that leaves edge tiles.
+        for levels in [LevelMode::One, LevelMode::Mipmap, LevelMode::Ripmap] {
+            for order in [
+                crate::types::LineOrder::IncreasingY,
+                crate::types::LineOrder::DecreasingY,
+            ] {
+                let opts = EncodeOptions::default()
+                    .with_tile_size(3)
+                    .with_levels(levels)
+                    .with_line_order(order);
+                let bytes = encode(&img, &opts).unwrap();
+                crate::layout::check_layout(&bytes, true).unwrap();
+                assert_eq!(decode(&bytes).unwrap(), img, "{levels:?} {order:?}");
+                let i = info(&bytes).unwrap();
+                assert!(i.tiled);
+                assert_eq!(
+                    (i.data_window, i.display_window),
+                    (img.data_window, img.display_window)
+                );
+            }
+        }
         let origin = ramp(5, 4, PixelFormat::RgbF32Le)
             .with_chromaticities(crate::image::ColorInfo::chromaticities_for(12).unwrap());
         for levels in [LevelMode::One, LevelMode::Mipmap, LevelMode::Ripmap] {
@@ -1084,10 +1078,50 @@ mod tests {
             encode_all(&[], &EncodeOptions::default()),
             Err(ExrError::InvalidData(_))
         ));
-        assert!(matches!(
-            encode_all(&frames, &EncodeOptions::default().with_tile_size(8)),
-            Err(ExrError::Unsupported(_))
-        ));
+        // Every single-part layout is a part layout: tiles, levels,
+        // storage order, luminance/chroma, windows off the origin.
+        let placed = Box2i {
+            x_min: -3,
+            y_min: 5,
+            x_max: 0,
+            y_max: 6,
+        };
+        let moved = vec![
+            Frame::new(a.clone().with_data_window(placed).unwrap(), 0),
+            Frame::new(b.clone(), 1).with_name("b".to_string()),
+            Frame::new(c.clone(), 2),
+        ];
+        for opts in [
+            EncodeOptions::default().with_tile_size(2),
+            EncodeOptions::default()
+                .with_tile_size(3)
+                .with_levels(LevelMode::Mipmap)
+                .with_compression(Compression::Piz),
+            EncodeOptions::default()
+                .with_tile_size(2)
+                .with_levels(LevelMode::Ripmap)
+                .with_line_order(crate::types::LineOrder::DecreasingY),
+            EncodeOptions::default()
+                .with_line_order(crate::types::LineOrder::DecreasingY)
+                .with_compression(Compression::Rle),
+        ] {
+            let bytes = encode_all(&moved, &opts).unwrap();
+            let layout = crate::layout::check_layout(&bytes, true).unwrap();
+            assert_eq!(layout.parts.len(), 3);
+            assert!(
+                layout
+                    .parts
+                    .iter()
+                    .all(|p| p.kind.is_tiled() == (opts.tile_size != 0))
+            );
+            let all = decode_all(&bytes).unwrap();
+            for (f, want) in all.iter().zip(&moved) {
+                assert_eq!(f.image.planes, want.image.planes);
+                assert_eq!(f.image.data_window, want.image.data_window);
+                assert_eq!(f.image.display_window, all[0].image.display_window);
+            }
+            assert_eq!(all[0].image.data_window, placed);
+        }
     }
 
     #[test]

@@ -1337,6 +1337,46 @@ pub(crate) fn finish_written(mut out: Vec<u8>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Rewrite the `dataWindow` and `displayWindow` of a single-part file
+/// in place (both are fixed-size `box2i` values, so nothing moves).
+/// The data window must keep its size: chunk coordinates of a tiled
+/// part are tile indices relative to the window's corner and stay
+/// valid; scanline chunks carry absolute `y` values and are not
+/// handled here.
+pub(crate) fn place_windows(mut file: Vec<u8>, data: Box2i, display: Box2i) -> Result<Vec<u8>> {
+    let list = parse_header_list(&file)?;
+    for (name, window) in [("dataWindow", data), ("displayWindow", display)] {
+        let attr = find(&list.headers[0], name).ok_or_else(|| {
+            ExrError::invalid(format!("OpenEXR encoder: written header has no '{name}'"))
+        })?;
+        match attr.attribute.value {
+            AttributeValue::Box2i(old) if old == window => {}
+            AttributeValue::Box2i(old) => {
+                if name == "dataWindow"
+                    && (old.width() != window.width() || old.height() != window.height())
+                {
+                    return Err(ExrError::invalid(
+                        "OpenEXR encoder: a data window can be moved, not resized",
+                    ));
+                }
+                let at = attr.span.end - 16;
+                for (i, v) in [window.x_min, window.y_min, window.x_max, window.y_max]
+                    .into_iter()
+                    .enumerate()
+                {
+                    file[at + i * 4..at + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            _ => {
+                return Err(ExrError::invalid(format!(
+                    "OpenEXR encoder: '{name}' is not a box2i"
+                )));
+            }
+        }
+    }
+    Ok(file)
+}
+
 // ---------------------------------------------------------------------------
 // Repack
 // ---------------------------------------------------------------------------

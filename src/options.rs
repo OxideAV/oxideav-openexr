@@ -213,8 +213,7 @@ pub enum LevelMode {
 /// 255`), `Some(g)` linearises colour bytes as `(b / 255) ^ g`.
 ///
 /// Tiled output (`tile_size > 0`) requires full-resolution channels
-/// (`chroma_sampling = 1` under `LumaChroma`) and a data window at the
-/// origin.
+/// (`chroma_sampling = 1` under `LumaChroma`).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct EncodeOptions {

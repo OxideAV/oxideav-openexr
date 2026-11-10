@@ -226,9 +226,12 @@ scanline; else `N × N` tiles), `levels: LevelMode` (`One` / `Mipmap` /
 (`IncreasingY` / `DecreasingY` / tiled `RandomY`), `data_window` /
 `display_window: Option<Box2i>` (overrides; `None` writes the image's),
 `input_gamma: Option<f32>` (8-bit paths). Tiled output needs
-full-resolution channels and windows at the origin (`Unsupported`
-otherwise); `encode_all` is scanline / INCREASING_Y with parts at the
-origin and a shared display window.
+full-resolution channels (`chroma_sampling = 1` under `LumaChroma`) and
+keeps the image's data / display windows like scanline output does.
+`encode_all` writes each frame exactly as `encode` would — tiles,
+levels, storage order, luminance/chroma, windows — and combines the
+results into one multi-part file with a shared display window (the
+union of the frames').
 
 `DecodeOptions` (`#[non_exhaustive]`, `Default`, `with_*`): `max_width`
 / `max_height` (`Some(65_535)`), `max_pixels` (`None`), `max_bytes`
@@ -404,8 +407,6 @@ files combine into the staged multi-part files.
   layered and multi-view files are decoded one layer at a time with
   `DecodeOptions::layer` (enumerate them with `enumerate_layers` /
   `ExrPart::layers`).
-* Tiled contract output keeps the data and display windows at the
-  origin; `encode_all` writes scanline INCREASING_Y parts at the origin.
 * Luminance/chroma channels are modelled on HALF data; FLOAT `Y` /
   `RY` / `BY` go through the same binary16 model (the reference RGBA
   interface's output type). A layer name that selects no channel is a
