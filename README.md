@@ -249,7 +249,7 @@ the three required viewing attributes at their defaults
 (`ExrImage::default_attributes()`); `encode` writes them all back
 verbatim (scanline, tiled and multi-part). The structural facts are on
 `ImageInfo` (`data_window`, `display_window`, `channels`, `compression`,
-`tiled`, `deep`, `multipart`, `part_name`, `part_type`, `frames` =
+`tiled`, `deep`, `multipart`, `part_name`, `part_type`, `layers`, `views`, `frames` =
 part count) and `Frame` (`index`, `name`, `part_type`).
 
 `ColorInfo { range, primaries, transfer, matrix }` (H.273 code points):

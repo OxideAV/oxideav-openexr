@@ -500,12 +500,19 @@ pub struct ImageInfo {
     /// The part's `type` attribute (`scanlineimage`, `tiledimage`,
     /// `deepscanline`, `deeptile`), when present.
     pub part_type: Option<String>,
+    /// The part's layers ([`crate::layers::enumerate_layers`]): every
+    /// name `DecodeOptions::layer` accepts, with its colour shape and
+    /// view.
+    pub layers: Vec<crate::layers::ExrLayer>,
+    /// The `multiView` view names (first = default view); empty when
+    /// the part lists none.
+    pub views: Vec<String>,
 }
 
 impl ImageInfo {
     /// Assemble a description. `color` derives from `attributes`
-    /// ([`ColorInfo::from_attributes`]); `part_name` / `part_type`
-    /// are read from them too.
+    /// ([`ColorInfo::from_attributes`]); `part_name` / `part_type` /
+    /// `views` are read from them too, and `layers` from `channels`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_window: Box2i,
@@ -531,6 +538,10 @@ impl ImageInfo {
             has_xmp: false,
             data_window,
             display_window,
+            layers: crate::layers::enumerate_layers(&channels, attributes),
+            views: crate::layers::multi_view(attributes)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
             channels,
             compression,
             tiled,

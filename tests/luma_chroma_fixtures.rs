@@ -329,6 +329,14 @@ fn multiview_channel_views_match_the_reference_classification() {
         checked += 1;
     }
     assert_eq!(checked, part.channels.len());
+    assert_eq!(part.views(), ["left", "right"]);
+    let right_y = part.channels.iter().position(|c| c.name == "right.Y");
+    assert_eq!(part.channel_view(right_y.unwrap()), Some("right"));
+    assert_eq!(part.channel_view(999), None);
+    // The header-only description carries the same layers and views.
+    let info = oxideav_openexr::info(&read(name, "input.exr")).unwrap();
+    assert_eq!(info.views, ["left", "right"]);
+    assert_eq!(info.layers, part.layers());
     // The enumerated layers carry the same views.
     let layers = enumerate_layers(&part.channels, &part.attributes);
     let summary: Vec<(&str, Option<&str>, LayerKind)> = layers

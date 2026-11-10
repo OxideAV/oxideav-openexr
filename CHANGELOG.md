@@ -10,8 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Luminance/chroma (`Y` / `RY` / `BY`) decode reproducing the reference RGBA interface bit-exactly: luminance weights solved from `chromaticities` in binary64 and rounded to binary32, the separable 27-tap chroma reconstruction filter (`reconstruct_chroma_2x2`, `RECONSTRUCTION_TAPS`; horizontal first, binary16 between passes, edge replication), the ratio conversion, and the diagonal-neighbour saturation limiter. Nine traced fixtures (`tests/fixtures/ryby/`) decode bit-exactly, 11 776 / 11 776 samples.
+- Black-box closed loop through reference tools (`tests/luma_chroma_reference_loop.rs`, skip-if-absent): the reference's decode + re-write of our luminance/chroma files reproduces our `encode(decode(..))` luminance plane bit-for-bit (2×2 … 40×30, smooth and noisy) and every plane for constant-chroma images; a reference read + re-write of our files keeps every stored plane bit-identical across NONE … B44A.
 - Luminance/chroma encode matching the reference writer: binary16 `Y`, per-pixel binary16 ratios, separable 27-tap decimation (`decimate_chroma_2x2`, `DECIMATION_TAPS`), 7-bit `Y` / 5-bit ratio mantissa rounding (`round_half_mantissa`, `Y_MANTISSA_BITS`, `CHROMA_MANTISSA_BITS`); the traced writer fixture's stored planes reproduced 384 / 384. `EncodeOptions::luma_chroma_rounding` / `with_luma_chroma_rounding` (registry option `luma_chroma_rounding`) and `rgb_to_luma_chroma_with` turn the mantissa rounding off.
 - `channel_view` / `default_view`: per-channel `multiView` classification (the view is the last prefix component when listed).
+- `ImageInfo::layers` / `ImageInfo::views` (header-only: every decodable layer name with its shape and view, and the `multiView` list), `ExrPart::views` / `ExrPart::channel_view`.
 - `LayerKind::PartialRgb`: one or two of `R` / `G` / `B`, decoded with the missing components as `0`.
 - `new(..)` (every field, in declaration order) on every newly `#[non_exhaustive]` record listed below, so callers keep a way to build them.
 

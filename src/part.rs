@@ -101,4 +101,16 @@ impl ExrPart {
     pub fn layers(&self) -> Vec<crate::layers::ExrLayer> {
         crate::layers::enumerate_layers(&self.channels, &self.attributes)
     }
+    /// The `multiView` view names (first = default view); empty when
+    /// the header lists none.
+    pub fn views(&self) -> &[String] {
+        crate::layers::multi_view(&self.attributes).unwrap_or(&[])
+    }
+    /// The view channel `index` belongs to ([`crate::layers::channel_view`]);
+    /// `None` without views, for a channel in no view, or for an
+    /// out-of-range index.
+    pub fn channel_view(&self, index: usize) -> Option<&str> {
+        let ch = self.channels.get(index)?;
+        crate::layers::channel_view(&ch.name, &self.attributes)
+    }
 }
