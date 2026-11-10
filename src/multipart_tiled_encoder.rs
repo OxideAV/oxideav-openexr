@@ -107,10 +107,12 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate multi-part tiled part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if p.width == 0 || p.height == 0 {
@@ -335,7 +337,7 @@ pub fn encode_exr_multipart_tiled(parts: &[MultipartTiledPart]) -> Result<Vec<u8
         out.extend_from_slice(&c.payload);
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Per-part attribute set for a multi-part flat tiled part: standard

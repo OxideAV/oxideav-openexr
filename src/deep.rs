@@ -55,7 +55,7 @@ use crate::decoder::{
     apply_zip_interleave, apply_zip_predictor, apply_zip_uninterleave, apply_zip_unpredictor,
 };
 use crate::error::{ExrError, Result};
-use crate::header::{VersionField, encode_attribute_value, parse_header};
+use crate::header::{VersionField, encode_attribute_value};
 use crate::rle::{rle_compress, rle_decompress};
 use crate::tiled::tiledesc_raw_from_attribute;
 use crate::types::{
@@ -350,6 +350,8 @@ impl DeepScanlinePart {
 /// [`parse_exr_deep_scanline`] and the reference `exrinfo`'s rejection
 /// of deep ZIP).
 pub fn parse_exr_deep_multipart(bytes: &[u8]) -> Result<Vec<DeepScanlinePart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers_allow_deep(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -967,29 +969,109 @@ pub fn parse_exr_deep_scanline(bytes: &[u8]) -> Result<DeepExrImage> {
 /// Same as [`parse_header`] but tolerates the deep / non-image version
 /// bit (which [`parse_header`] rejects).
 pub(crate) fn parse_header_allow_deep(bytes: &[u8]) -> Result<crate::header::ParsedHeader> {
-    // Quick check first: if the non_image bit isn't set, just delegate
-    // (avoids duplicating header walker code).
-    if bytes.len() >= 8 {
-        let v = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let vf = VersionField::from_u32(v);
-        if !vf.non_image {
-            return parse_header(bytes);
+    crate::header::parse_single_header(bytes)
+}
+
+/// Sum of samples in each row of a deep tile, read off its cumulative
+/// sample-count table (one running total per row, `row_stride` entries
+/// per stored row, the first `tw` of them valid).
+pub(crate) fn deep_tile_row_totals(
+    cumulative: &[i32],
+    row_stride: usize,
+    tw: usize,
+    th: usize,
+) -> Vec<u64> {
+    (0..th)
+        .map(|r| {
+            (r * row_stride + tw)
+                .checked_sub(1)
+                .and_then(|i| cumulative.get(i))
+                .map_or(0, |&v| v.max(0) as u64)
+        })
+        .collect()
+}
+
+/// Byte offset of each channel's run inside a buffer holding `samples`
+/// samples per channel, plus the total.
+fn deep_plane_offsets(channels: &[Channel], samples: usize) -> (Vec<usize>, usize) {
+    let mut at = 0usize;
+    let mut offsets = Vec::with_capacity(channels.len());
+    for ch in channels {
+        offsets.push(at);
+        at = at.saturating_add(samples.saturating_mul(ch.pixel_type.bytes_per_sample()));
+    }
+    (offsets, at)
+}
+
+/// The sample data of a deep tile is stored scanline by scanline; inside
+/// a scanline each channel's samples are contiguous (the layout of a deep
+/// scanline chunk, repeated per tile row — observed in the staged deep
+/// tiled fixture). Regroup it as one contiguous run per channel over the
+/// whole tile, the shape the tile decoders consume. A buffer whose size
+/// does not match the row totals is returned unchanged (the caller's
+/// size checks reject it).
+pub(crate) fn deep_tile_rows_to_planes(
+    rows: Vec<u8>,
+    channels: &[Channel],
+    row_totals: &[u64],
+) -> Vec<u8> {
+    regroup_deep_tile(rows, channels, row_totals, true)
+}
+
+/// Inverse of [`deep_tile_rows_to_planes`]: per-channel runs over the
+/// tile (`tile_spp` = samples per pixel, row-major, `tw` pixels per row)
+/// to the stored scanline-by-scanline order.
+pub(crate) fn deep_tile_planes_to_rows(
+    planes: Vec<u8>,
+    channels: &[Channel],
+    tile_spp: &[u32],
+    tw: usize,
+) -> Vec<u8> {
+    if tw == 0 {
+        return planes;
+    }
+    let row_totals: Vec<u64> = tile_spp
+        .chunks(tw)
+        .map(|row| row.iter().map(|&n| n as u64).sum())
+        .collect();
+    regroup_deep_tile(planes, channels, &row_totals, false)
+}
+
+fn regroup_deep_tile(
+    src: Vec<u8>,
+    channels: &[Channel],
+    row_totals: &[u64],
+    rows_to_planes: bool,
+) -> Vec<u8> {
+    if row_totals.len() <= 1 {
+        return src;
+    }
+    let Ok(total) = usize::try_from(row_totals.iter().sum::<u64>()) else {
+        return src;
+    };
+    let (plane_at, len) = deep_plane_offsets(channels, total);
+    if len != src.len() {
+        return src;
+    }
+    let mut dst = vec![0u8; len];
+    let mut row_at = 0usize; // byte position in the row-ordered buffer
+    let mut done = 0usize; // samples in the rows above
+    for &n in row_totals {
+        let n = n as usize;
+        for (c, ch) in channels.iter().enumerate() {
+            let bps = ch.pixel_type.bytes_per_sample();
+            let run = n * bps;
+            let plane = plane_at[c] + done * bps;
+            if rows_to_planes {
+                dst[plane..plane + run].copy_from_slice(&src[row_at..row_at + run]);
+            } else {
+                dst[row_at..row_at + run].copy_from_slice(&src[plane..plane + run]);
+            }
+            row_at += run;
         }
+        done += n;
     }
-    // Non-image bit is set. Temporarily clear it, parse, then restore.
-    let mut tmp = bytes.to_vec();
-    if tmp.len() < 8 {
-        return parse_header(&tmp); // will fail with magic/version error
-    }
-    let v = u32::from_le_bytes(tmp[4..8].try_into().unwrap());
-    let cleared = v & !0x800;
-    tmp[4..8].copy_from_slice(&cleared.to_le_bytes());
-    let mut parsed = parse_header(&tmp)?;
-    // Re-apply the bit on the returned VersionField so callers see the
-    // real flags.
-    let real_vf = VersionField::from_u32(v);
-    parsed.version = real_vf;
-    Ok(parsed)
+    dst
 }
 
 pub(crate) fn find_string_attr(attrs: &[Attribute], name: &str) -> Option<String> {
@@ -1370,7 +1452,7 @@ pub fn encode_exr_deep_scanline(input: &DeepScanlineInput) -> Result<Vec<u8>> {
         out.extend_from_slice(&c.packed_table);
         out.extend_from_slice(&c.packed_data);
     }
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 // ---------------------------------------------------------------------
@@ -1468,10 +1550,12 @@ pub fn encode_exr_multipart_deep_scanline(parts: &[MultipartDeepScanlinePart]) -
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate deep part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if !matches!(
@@ -1715,7 +1799,7 @@ pub fn encode_exr_multipart_deep_scanline(parts: &[MultipartDeepScanlinePart]) -
         }
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Per-part attribute set for a deep scanline multipart part — strict
@@ -2246,6 +2330,8 @@ pub fn encode_exr_deep_tiled(input: &DeepTiledInput) -> Result<Vec<u8>> {
             }
 
             let packed_table = compress_buffer(&table_bytes, input.compression)?;
+            let sample_bytes =
+                deep_tile_planes_to_rows(sample_bytes, &input.channels, &tile_spp, tw);
             let packed_data = compress_buffer(&sample_bytes, input.compression)?;
             chunks.push(ChunkBlob {
                 tx,
@@ -2284,7 +2370,7 @@ pub fn encode_exr_deep_tiled(input: &DeepTiledInput) -> Result<Vec<u8>> {
         out.extend_from_slice(&c.packed_table);
         out.extend_from_slice(&c.packed_data);
     }
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Parse a single-part `type="deeptile"` ONE_LEVEL deep-tiled EXR back
@@ -2502,20 +2588,18 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
         let th = y1 - y0;
         let full_tw = tile_x as usize;
         let full_th = tile_y as usize;
-        // The per-tile pixel-offset table is `tw * th * 4` bytes for
-        // ZIPS/RLE compression (the canonical encoded size). The
-        // reference encoder's NONE-compression path happens to
-        // round up to `tile_x * tile_y * 4` bytes on disk because its
-        // in-memory buffer is full-tile-sized; accept both sizes so we
-        // can round-trip files produced by `exrmetrics --convert -z
-        // none` as well as our own. Padding rows/columns repeat the
-        // last valid cumulative so trimming to (tw, th) recovers the
-        // valid pixel data either way.
-        let entries = (tw * th) as usize;
-        let full_entries = full_tw * full_th;
+        // The per-tile sample-count table holds `tw * th` entries, row
+        // by row over the tile's valid rectangle. An uncompressed table
+        // may be stored padded to `tile_x * tile_y` entries: the valid
+        // entries come first (same order, no per-row padding) and the
+        // tail is unspecified. Observed black-box on an edge tile
+        // narrower than the tile width; exercised by
+        // `tests/multipart_layout_roundtrip.rs`.
+        let entries = (tw as usize) * (th as usize);
+        let full_entries = full_tw.saturating_mul(full_th);
         let (unpacked_table_size, row_stride) =
-            if compression == Compression::None && packed_table == full_entries * 4 {
-                (full_entries * 4, full_tw)
+            if compression == Compression::None && packed_table == full_entries.saturating_mul(4) {
+                (full_entries.saturating_mul(4), tw as usize)
             } else {
                 (entries * 4, tw as usize)
             };
@@ -2571,8 +2655,11 @@ pub fn parse_exr_deep_tiled(bytes: &[u8]) -> Result<DeepTiledImage> {
                  disagrees with header unpacked_data={unpacked_data}"
             )));
         }
-        let sample_bytes =
-            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?;
+        let sample_bytes = deep_tile_rows_to_planes(
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?,
+            &sorted_channels,
+            &deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+        );
 
         // Decode each channel's slice of the tile into a Vec<f32> in
         // pixel-scan order within the tile (row-major). We store this
@@ -2901,10 +2988,12 @@ pub fn encode_exr_multipart_deep_tiled(parts: &[MultipartDeepTiledPart]) -> Resu
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate deep tiled part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if !matches!(
@@ -3138,6 +3227,8 @@ pub fn encode_exr_multipart_deep_tiled(parts: &[MultipartDeepTiledPart]) -> Resu
                 }
 
                 let packed_table = compress_buffer(&table_bytes, p.compression)?;
+                let sample_bytes =
+                    deep_tile_planes_to_rows(sample_bytes, &p.channels, &tile_spp, tw);
                 let packed_data = compress_buffer(&sample_bytes, p.compression)?;
                 part_tiles.push(TileBlob {
                     part_idx: part_idx as u32,
@@ -3194,7 +3285,7 @@ pub fn encode_exr_multipart_deep_tiled(parts: &[MultipartDeepTiledPart]) -> Resu
         }
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Per-part attribute set for a deep tiled multipart part — strict
@@ -3309,6 +3400,8 @@ fn build_deep_tiled_part_attrs(
 ///
 /// Compression: NONE / RLE / ZIPS only.
 pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers_allow_deep(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -3570,14 +3663,15 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
         let full_tw = ps.tile_x as usize;
         let full_th = ps.tile_y as usize;
         // Same NONE-padding accommodation as the single-part reader.
-        let entries = (tw * th) as usize;
-        let full_entries = full_tw * full_th;
-        let (unpacked_table_size, row_stride) =
-            if ps.compression == Compression::None && packed_table == full_entries * 4 {
-                (full_entries * 4, full_tw)
-            } else {
-                (entries * 4, tw as usize)
-            };
+        let entries = (tw as usize) * (th as usize);
+        let full_entries = full_tw.saturating_mul(full_th);
+        let (unpacked_table_size, row_stride) = if ps.compression == Compression::None
+            && packed_table == full_entries.saturating_mul(4)
+        {
+            (full_entries.saturating_mul(4), tw as usize)
+        } else {
+            (entries * 4, tw as usize)
+        };
 
         let table_start = scan_pos + 44;
         let (table_end, data_end) =
@@ -3636,8 +3730,11 @@ pub fn parse_exr_multipart_deep_tiled(bytes: &[u8]) -> Result<Vec<DeepTiledPart>
                 ps.name
             )));
         }
-        let sample_bytes =
-            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?;
+        let sample_bytes = deep_tile_rows_to_planes(
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?,
+            &ps.channels,
+            &deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+        );
 
         // Channel-major per-tile decode (matching single-part reader).
         let mut p = 0usize;
@@ -4285,6 +4382,8 @@ pub fn encode_exr_deep_tiled_mipmap(input: &DeepMipmapTiledInput) -> Result<Vec<
                 }
 
                 let packed_table = compress_buffer(&table_bytes, input.compression)?;
+                let sample_bytes =
+                    deep_tile_planes_to_rows(sample_bytes, &input.channels, &tile_spp, tw);
                 let packed_data = compress_buffer(&sample_bytes, input.compression)?;
                 chunks.push(ChunkBlob {
                     tx,
@@ -4325,7 +4424,7 @@ pub fn encode_exr_deep_tiled_mipmap(input: &DeepMipmapTiledInput) -> Result<Vec<
         out.extend_from_slice(&c.packed_table);
         out.extend_from_slice(&c.packed_data);
     }
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Parse a single-part `type="deeptile"` MIPMAP_LEVELS deep-tiled EXR
@@ -4585,11 +4684,11 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
         let th = y1 - y0;
         let full_tw = tile_x as usize;
         let full_th = tile_y as usize;
-        let entries = (tw * th) as usize;
-        let full_entries = full_tw * full_th;
+        let entries = (tw as usize) * (th as usize);
+        let full_entries = full_tw.saturating_mul(full_th);
         let (unpacked_table_size, row_stride) =
-            if compression == Compression::None && packed_table == full_entries * 4 {
-                (full_entries * 4, full_tw)
+            if compression == Compression::None && packed_table == full_entries.saturating_mul(4) {
+                (full_entries.saturating_mul(4), tw as usize)
             } else {
                 (entries * 4, tw as usize)
             };
@@ -4645,8 +4744,11 @@ pub fn parse_exr_deep_tiled_mipmap(bytes: &[u8]) -> Result<DeepMipmapTiledImage>
                  disagrees with header unpacked_data={unpacked_data}"
             )));
         }
-        let sample_bytes =
-            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?;
+        let sample_bytes = deep_tile_rows_to_planes(
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?,
+            &sorted_channels,
+            &deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+        );
 
         let mut p = 0usize;
         let mut per_channel: Vec<Vec<f32>> =
@@ -5335,6 +5437,8 @@ pub fn encode_exr_deep_tiled_ripmap(input: &DeepRipmapTiledInput) -> Result<Vec<
                     }
 
                     let packed_table = compress_buffer(&table_bytes, input.compression)?;
+                    let sample_bytes =
+                        deep_tile_planes_to_rows(sample_bytes, &input.channels, &tile_spp, tw);
                     let packed_data = compress_buffer(&sample_bytes, input.compression)?;
                     chunks.push(ChunkBlob {
                         tx,
@@ -5377,7 +5481,7 @@ pub fn encode_exr_deep_tiled_ripmap(input: &DeepRipmapTiledInput) -> Result<Vec<
         out.extend_from_slice(&c.packed_table);
         out.extend_from_slice(&c.packed_data);
     }
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Parse a single-part `type="deeptile"` RIPMAP_LEVELS deep-tiled EXR
@@ -5649,11 +5753,11 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
         let th = y1 - y0;
         let full_tw = tile_x as usize;
         let full_th = tile_y as usize;
-        let entries = (tw * th) as usize;
-        let full_entries = full_tw * full_th;
+        let entries = (tw as usize) * (th as usize);
+        let full_entries = full_tw.saturating_mul(full_th);
         let (unpacked_table_size, row_stride) =
-            if compression == Compression::None && packed_table == full_entries * 4 {
-                (full_entries * 4, full_tw)
+            if compression == Compression::None && packed_table == full_entries.saturating_mul(4) {
+                (full_entries.saturating_mul(4), tw as usize)
             } else {
                 (entries * 4, tw as usize)
             };
@@ -5709,8 +5813,11 @@ pub fn parse_exr_deep_tiled_ripmap(bytes: &[u8]) -> Result<DeepRipmapTiledImage>
                  disagrees with header unpacked_data={unpacked_data}"
             )));
         }
-        let sample_bytes =
-            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?;
+        let sample_bytes = deep_tile_rows_to_planes(
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, compression)?,
+            &sorted_channels,
+            &deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+        );
 
         let mut p = 0usize;
         let mut per_channel: Vec<Vec<f32>> =
@@ -6051,10 +6158,12 @@ pub fn encode_exr_multipart_deep_tiled_mipmap(
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate deep mipmap tiled part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if !matches!(
@@ -6328,6 +6437,8 @@ pub fn encode_exr_multipart_deep_tiled_mipmap(
                     }
 
                     let packed_table = compress_buffer(&table_bytes, p.compression)?;
+                    let sample_bytes =
+                        deep_tile_planes_to_rows(sample_bytes, &p.channels, &tile_spp, tw);
                     let packed_data = compress_buffer(&sample_bytes, p.compression)?;
                     part_tiles.push(TileBlob {
                         part_idx: part_idx as u32,
@@ -6384,7 +6495,7 @@ pub fn encode_exr_multipart_deep_tiled_mipmap(
         }
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Per-part attribute set for a multipart deep-tiled MIPMAP part.
@@ -6499,6 +6610,8 @@ fn build_deep_mipmap_tiled_part_attrs(
 /// robustness against zero-filled offset tables produced by
 /// `exrmultipart -combine`.
 pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMipmapTiledPart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers_allow_deep(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -6797,14 +6910,15 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
         let th = y1 - y0;
         let full_tw = ps.tile_x as usize;
         let full_th = ps.tile_y as usize;
-        let entries = (tw * th) as usize;
-        let full_entries = full_tw * full_th;
-        let (unpacked_table_size, row_stride) =
-            if ps.compression == Compression::None && packed_table == full_entries * 4 {
-                (full_entries * 4, full_tw)
-            } else {
-                (entries * 4, tw as usize)
-            };
+        let entries = (tw as usize) * (th as usize);
+        let full_entries = full_tw.saturating_mul(full_th);
+        let (unpacked_table_size, row_stride) = if ps.compression == Compression::None
+            && packed_table == full_entries.saturating_mul(4)
+        {
+            (full_entries.saturating_mul(4), tw as usize)
+        } else {
+            (entries * 4, tw as usize)
+        };
 
         let table_start = scan_pos + 44;
         let (table_end, data_end) =
@@ -6867,8 +6981,11 @@ pub fn parse_exr_multipart_deep_tiled_mipmap(bytes: &[u8]) -> Result<Vec<DeepMip
                 ps.name
             )));
         }
-        let sample_bytes =
-            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?;
+        let sample_bytes = deep_tile_rows_to_planes(
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?,
+            &ps.channels,
+            &deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+        );
 
         let mut p = 0usize;
         let channel_types: Vec<(PixelType, String)> = ps
@@ -7196,10 +7313,12 @@ pub fn encode_exr_multipart_deep_tiled_ripmap(
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate deep ripmap tiled part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if !matches!(
@@ -7496,6 +7615,8 @@ pub fn encode_exr_multipart_deep_tiled_ripmap(
                         }
 
                         let packed_table = compress_buffer(&table_bytes, p.compression)?;
+                        let sample_bytes =
+                            deep_tile_planes_to_rows(sample_bytes, &p.channels, &tile_spp, tw);
                         let packed_data = compress_buffer(&sample_bytes, p.compression)?;
                         part_tiles.push(TileBlob {
                             part_idx: part_idx as u32,
@@ -7554,7 +7675,7 @@ pub fn encode_exr_multipart_deep_tiled_ripmap(
         }
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Per-part attribute set for a multipart deep-tiled RIPMAP part.
@@ -7669,6 +7790,8 @@ fn build_deep_ripmap_tiled_part_attrs(
 /// for robustness against zero-filled offset tables produced by
 /// `exrmultipart -combine`.
 pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRipmapTiledPart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers_allow_deep(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -7977,14 +8100,15 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
         let th = y1 - y0;
         let full_tw = ps.tile_x as usize;
         let full_th = ps.tile_y as usize;
-        let entries = (tw * th) as usize;
-        let full_entries = full_tw * full_th;
-        let (unpacked_table_size, row_stride) =
-            if ps.compression == Compression::None && packed_table == full_entries * 4 {
-                (full_entries * 4, full_tw)
-            } else {
-                (entries * 4, tw as usize)
-            };
+        let entries = (tw as usize) * (th as usize);
+        let full_entries = full_tw.saturating_mul(full_th);
+        let (unpacked_table_size, row_stride) = if ps.compression == Compression::None
+            && packed_table == full_entries.saturating_mul(4)
+        {
+            (full_entries.saturating_mul(4), tw as usize)
+        } else {
+            (entries * 4, tw as usize)
+        };
 
         let table_start = scan_pos + 44;
         let (table_end, data_end) =
@@ -8047,8 +8171,11 @@ pub fn parse_exr_multipart_deep_tiled_ripmap(bytes: &[u8]) -> Result<Vec<DeepRip
                 ps.name
             )));
         }
-        let sample_bytes =
-            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?;
+        let sample_bytes = deep_tile_rows_to_planes(
+            decompress_buffer(&bytes[data_start..data_end], unpacked_data, ps.compression)?,
+            &ps.channels,
+            &deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+        );
 
         let mut p = 0usize;
         let channel_types: Vec<(PixelType, String)> = ps

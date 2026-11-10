@@ -34,6 +34,12 @@ pub enum ExrError {
     /// allocated. The string carries the dimension that tripped the
     /// limit and the limit value.
     LimitExceeded(String),
+    /// The file breaks a rule of the file layout — version flags, the
+    /// header list, the per-part `name` / `type` / `chunkCount`
+    /// attributes, the attributes every part must share, the offset
+    /// tables or the part-number prefix of a chunk. The payload says
+    /// which rule and which part.
+    Layout(crate::layout::LayoutViolation),
     /// A read ([`crate::decode_from`]) or write ([`crate::encode_to`])
     /// failed.
     Io(std::io::Error),
@@ -60,6 +66,7 @@ impl fmt::Display for ExrError {
             Self::InvalidData(s) => write!(f, "invalid data: {s}"),
             Self::Unsupported(s) => write!(f, "unsupported: {s}"),
             Self::LimitExceeded(s) => write!(f, "limit exceeded: {s}"),
+            Self::Layout(v) => write!(f, "invalid file layout: {v}"),
             Self::Io(e) => write!(f, "io error: {e}"),
         }
     }
@@ -71,6 +78,12 @@ impl std::error::Error for ExrError {
             Self::Io(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<crate::layout::LayoutViolation> for ExrError {
+    fn from(v: crate::layout::LayoutViolation) -> Self {
+        Self::Layout(v)
     }
 }
 

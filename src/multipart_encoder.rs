@@ -97,10 +97,12 @@ pub(crate) fn encode_exr_multipart_with_attributes(
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if p.channels.len() != p.planes.len() {
@@ -351,7 +353,7 @@ pub(crate) fn encode_exr_multipart_with_attributes(
         out.extend_from_slice(&payload);
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Convenience entry point: encode a single-part RGBA float multipart

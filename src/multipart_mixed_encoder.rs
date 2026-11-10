@@ -703,6 +703,14 @@ fn build_deep_tile_payload(
         }
     }
     let unpacked_len = sample_bytes.len() as u64;
+    // Stored order: scanline by scanline within the tile.
+    let tile_spp: Vec<u32> = (0..th)
+        .flat_map(|r| {
+            let base = (y0 as usize + r) * w + x0 as usize;
+            samples_per_pixel[base..base + tw].iter().copied()
+        })
+        .collect();
+    let sample_bytes = crate::deep::deep_tile_planes_to_rows(sample_bytes, channels, &tile_spp, tw);
     let packed_table = compress_buffer(&table_bytes, compression)?;
     let packed_data = compress_buffer(&sample_bytes, compression)?;
     Ok((packed_table, packed_data, unpacked_len))
@@ -748,9 +756,12 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name() == name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate mixed multi-part name '{name}' (parts {i} and {j})"
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: name.to_string(),
+                }
+                .into());
             }
         }
         match p {
@@ -2029,7 +2040,7 @@ pub fn encode_exr_multipart_mixed(parts: &[MultipartMixedPart]) -> Result<Vec<u8
         }
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Overflow-safe end offsets for a deep chunk's (offset-table, sample
@@ -2172,6 +2183,8 @@ enum PartState {
 /// are expected in increasing-Y order per part (the order every writer
 /// in this crate emits).
 pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -2735,8 +2748,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                          out of grid {tx_count}×{ty_count}"
                     )));
                 }
-                let x0 = tx * *tile_x;
-                let y0 = ty * *tile_y;
+                let x0 = tx.saturating_mul(*tile_x);
+                let y0 = ty.saturating_mul(*tile_y);
                 let x1 = (x0 + *tile_x).min(width);
                 let y1 = (y0 + *tile_y).min(height);
                 let tw = (x1 - x0) as usize;
@@ -2806,8 +2819,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                     })?;
                 let tx = h_tx as u32;
                 let ty = h_ty as u32;
-                let x0 = tx * *tile_x;
-                let y0 = ty * *tile_y;
+                let x0 = tx.saturating_mul(*tile_x);
+                let y0 = ty.saturating_mul(*tile_y);
                 if x0 >= level.width || y0 >= level.height {
                     return Err(ExrError::invalid(format!(
                         "mixed multi-part multi-level tiled chunk at {scan_pos}: tile \
@@ -2998,8 +3011,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                 let ty = h_ty as u32;
                 let width = req.data_window.width();
                 let height = req.data_window.height();
-                let x0 = tx * *tile_x;
-                let y0 = ty * *tile_y;
+                let x0 = tx.saturating_mul(*tile_x);
+                let y0 = ty.saturating_mul(*tile_y);
                 let x1 = (x0 + *tile_x).min(width);
                 let y1 = (y0 + *tile_y).min(height);
                 let tw = x1 - x0;
@@ -3096,8 +3109,8 @@ pub fn parse_exr_multipart_mixed(bytes: &[u8]) -> Result<Vec<MultipartMixedImage
                         level.tx_count, level.ty_count
                     )));
                 }
-                let x0 = tx * *tile_x;
-                let y0 = ty * *tile_y;
+                let x0 = tx.saturating_mul(*tile_x);
+                let y0 = ty.saturating_mul(*tile_y);
                 let x1 = (x0 + *tile_x).min(level.width);
                 let y1 = (y0 + *tile_y).min(level.height);
                 let tw = x1 - x0;
@@ -3537,14 +3550,15 @@ fn decode_deep_tile_body(
     let width = lvl_w as usize;
     // NONE-padding accommodation: some writers pad the per-tile offset
     // table to the full tile rectangle.
-    let entries = (tw * th) as usize;
-    let full_entries = (tile_x as usize) * (tile_y as usize);
-    let (unpacked_table_size, row_stride) =
-        if compression == Compression::None && table_payload.len() == full_entries * 4 {
-            (full_entries * 4, tile_x as usize)
-        } else {
-            (entries * 4, tw as usize)
-        };
+    let entries = (tw as usize) * (th as usize);
+    let full_entries = (tile_x as usize).saturating_mul(tile_y as usize);
+    let (unpacked_table_size, row_stride) = if compression == Compression::None
+        && table_payload.len() == full_entries.saturating_mul(4)
+    {
+        (full_entries.saturating_mul(4), tw as usize)
+    } else {
+        (entries * 4, tw as usize)
+    };
     let table_bytes = decompress_buffer(table_payload, unpacked_table_size, compression)?;
     let mut cumulative_flat: Vec<i32> = Vec::with_capacity(unpacked_table_size / 4);
     for ch in table_bytes.as_chunks::<4>().0 {
@@ -3572,7 +3586,11 @@ fn decode_deep_tile_body(
              header unpacked_data={unpacked_data}"
         )));
     }
-    let sample_bytes = decompress_buffer(data_payload, unpacked_data, compression)?;
+    let sample_bytes = crate::deep::deep_tile_rows_to_planes(
+        decompress_buffer(data_payload, unpacked_data, compression)?,
+        sorted_channels,
+        &crate::deep::deep_tile_row_totals(&cumulative_flat, row_stride, tw as usize, th as usize),
+    );
     let mut per_channel: Vec<Vec<f32>> = (0..sorted_channels.len()).map(|_| Vec::new()).collect();
     decode_deep_sample_block(
         &sample_bytes,

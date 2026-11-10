@@ -622,7 +622,7 @@ pub(crate) fn encode_exr_tiled_with_attributes(
         out.extend_from_slice(&(p.len() as i32).to_le_bytes());
         out.extend_from_slice(p);
     }
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Build the full attribute list for a tiled file, including channels

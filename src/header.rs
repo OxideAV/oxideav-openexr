@@ -15,6 +15,7 @@
 //! a 4-byte signed int holding the payload length in bytes.
 
 use crate::error::{ExrError, Result};
+use crate::layout::LayoutViolation;
 use crate::tiled::TileDesc;
 use crate::types::{
     Attribute, AttributeValue, Box2f, Box2i, Channel, Chromaticities, Compression, EXR_MAGIC,
@@ -161,12 +162,104 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Parse the magic, version, and attribute table of a single-part EXR file.
+/// Longest attribute / channel name the format carries (with or
+/// without the long-name flag; the flag only announces names above
+/// [`SHORT_NAME_MAX`]).
+pub(crate) const LONG_NAME_MAX: usize = 255;
+/// Longest name a file may carry without the long-name flag (`0x400`).
+pub(crate) const SHORT_NAME_MAX: usize = 31;
+
+/// Version-field flag bits (bits above the format-version byte).
+pub(crate) const FLAG_SINGLE_TILE: u32 = 0x200;
+pub(crate) const FLAG_LONG_NAMES: u32 = 0x400;
+pub(crate) const FLAG_DEEP: u32 = 0x800;
+pub(crate) const FLAG_MULTIPART: u32 = 0x1000;
+const KNOWN_FLAGS: u32 = FLAG_SINGLE_TILE | FLAG_LONG_NAMES | FLAG_DEEP | FLAG_MULTIPART;
+
+/// One attribute as found in the file: its parsed form plus the byte
+/// span (name through the last value byte) it occupies, so a repack can
+/// copy it verbatim.
+#[derive(Debug, Clone)]
+pub(crate) struct SpannedAttribute {
+    pub(crate) attribute: Attribute,
+    pub(crate) span: core::ops::Range<usize>,
+}
+
+/// Every header of a file (one for a single-part file) with attribute
+/// byte spans, and the offset of the first offset table.
+#[derive(Debug, Clone)]
+pub(crate) struct HeaderList {
+    pub(crate) version: VersionField,
+    pub(crate) headers: Vec<Vec<SpannedAttribute>>,
+    /// First byte after the header region (the single header's `00`, or
+    /// the empty header that ends a multi-part list).
+    pub(crate) tables_start: usize,
+}
+
+/// Check the version field against the rules every reader enforces:
+/// format version 2, no unassigned flag bit, and the single-part-tiled
+/// flag never together with the deep or multi-part flag.
+pub(crate) fn check_version(raw: u32) -> Result<VersionField> {
+    let version = VersionField::from_u32(raw);
+    if version.format_version != 2 {
+        return Err(LayoutViolation::FormatVersion {
+            found: version.format_version,
+        }
+        .into());
+    }
+    let flags = raw & !0xFF;
+    if flags & !KNOWN_FLAGS != 0 {
+        return Err(LayoutViolation::UnknownVersionFlags { flags }.into());
+    }
+    if flags & FLAG_SINGLE_TILE != 0 && flags & (FLAG_DEEP | FLAG_MULTIPART) != 0 {
+        return Err(LayoutViolation::ConflictingVersionFlags { flags }.into());
+    }
+    Ok(version)
+}
+
+/// Read one attribute table (up to and including its `00` terminator).
+fn read_attribute_table(c: &mut Cursor<'_>) -> Result<Vec<SpannedAttribute>> {
+    let mut attributes = Vec::new();
+    loop {
+        if c.pos >= c.buf.len() {
+            return Err(ExrError::invalid(
+                "EOF before header NUL terminator".to_string(),
+            ));
+        }
+        if c.buf[c.pos] == 0 {
+            c.pos += 1;
+            return Ok(attributes);
+        }
+        let start = c.pos;
+        let name = c.null_string(LONG_NAME_MAX)?;
+        let type_name = c.null_string(LONG_NAME_MAX)?;
+        if type_name.is_empty() {
+            return Err(ExrError::invalid(format!(
+                "attribute {name:?} at offset {start} has an empty type name"
+            )));
+        }
+        let size = c.i32()?;
+        if size < 0 {
+            return Err(ExrError::invalid(format!(
+                "attribute {name} has negative size {size}"
+            )));
+        }
+        let payload = c.bytes(size as usize)?;
+        let value = parse_attribute_value(&type_name, payload)?;
+        attributes.push(SpannedAttribute {
+            attribute: Attribute { name, value },
+            span: start..c.pos,
+        });
+    }
+}
+
+/// Parse the magic, the version field and every header of `bytes`,
+/// single-part or multi-part, flat or deep.
 ///
-/// Returns the version field, the attribute list, and the offset of the
-/// next byte past the terminating NUL — i.e. where the line offset
-/// table begins for a single-part scanline file.
-pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
+/// Names up to 255 bytes are read whether or not the long-name flag is
+/// set (conforming readers do the same; the flag mismatch is reported
+/// by [`crate::layout`] as a tolerated irregularity).
+pub(crate) fn parse_header_list(bytes: &[u8]) -> Result<HeaderList> {
     let mut c = Cursor::new(bytes);
     let magic = c.u32()?;
     if magic != EXR_MAGIC {
@@ -174,51 +267,87 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
             "bad magic 0x{magic:08x}, expected 0x{EXR_MAGIC:08x}"
         )));
     }
-    let version = VersionField::from_u32(c.u32()?);
-    if version.multipart {
-        return Err(ExrError::unsupported(
-            "multipart EXR: use parse_exr_multipart()".to_string(),
-        ));
+    let version = check_version(c.u32()?)?;
+    if !version.multipart {
+        let attrs = read_attribute_table(&mut c)?;
+        return Ok(HeaderList {
+            version,
+            headers: vec![attrs],
+            tables_start: c.pos,
+        });
     }
-    if version.non_image {
+    let mut headers: Vec<Vec<SpannedAttribute>> = Vec::new();
+    loop {
+        if c.pos >= bytes.len() {
+            return Err(LayoutViolation::HeaderListNotTerminated {
+                parts_read: headers.len() as u32,
+                detail: "end of file".to_string(),
+            }
+            .into());
+        }
+        if bytes[c.pos] == 0 {
+            c.pos += 1; // the empty header
+            break;
+        }
+        match read_attribute_table(&mut c) {
+            Ok(attrs) => headers.push(attrs),
+            // Whatever follows the last complete header is neither the
+            // empty header nor a readable one.
+            Err(ExrError::InvalidData(detail)) if !headers.is_empty() => {
+                return Err(LayoutViolation::HeaderListNotTerminated {
+                    parts_read: headers.len() as u32,
+                    detail,
+                }
+                .into());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(HeaderList {
+        version,
+        headers,
+        tables_start: c.pos,
+    })
+}
+
+fn plain(attrs: Vec<SpannedAttribute>) -> Vec<Attribute> {
+    attrs.into_iter().map(|a| a.attribute).collect()
+}
+
+/// Parse the magic, version, and attribute table of a single-part EXR file.
+///
+/// Returns the version field, the attribute list, and the offset of the
+/// next byte past the terminating NUL — i.e. where the line offset
+/// table begins for a single-part scanline file.
+///
+/// The version field is validated (format version 2, no unassigned
+/// flag, no single-part-tiled flag next to the deep flag):
+/// [`ExrError::Layout`] otherwise.
+pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
+    let parsed = parse_single_header(bytes)?;
+    if parsed.version.non_image {
         return Err(ExrError::unsupported(
             "non-image / deep-data EXR files (deferred)".to_string(),
         ));
     }
-    // single_tile is supported (ONE_LEVEL + MIPMAP + RIPMAP in round 3);
-    // the per-file tile-decode path verifies the tiledesc attribute and
-    // offset table further along.
+    Ok(parsed)
+}
 
-    let max_name = if version.long_names { 255 } else { 31 };
-
-    let mut attributes = Vec::new();
-    loop {
-        // Empty name (immediate NUL) terminates the attribute table.
-        if c.pos >= bytes.len() {
-            return Err(ExrError::invalid(
-                "EOF before header NUL terminator".to_string(),
+/// [`parse_header`] that also accepts a single-part deep file.
+pub(crate) fn parse_single_header(bytes: &[u8]) -> Result<ParsedHeader> {
+    if bytes.len() >= 8 && bytes[..4] == EXR_MAGIC.to_le_bytes() {
+        let raw = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if raw & FLAG_MULTIPART != 0 && check_version(raw).is_ok() {
+            return Err(ExrError::unsupported(
+                "multipart EXR: use parse_exr_multipart()".to_string(),
             ));
         }
-        if bytes[c.pos] == 0 {
-            c.pos += 1;
-            break;
-        }
-        let name = c.null_string(max_name)?;
-        let type_name = c.null_string(max_name)?;
-        let size = c.i32()?;
-        if size < 0 {
-            return Err(ExrError::invalid(format!(
-                "attribute {name} has negative size {size}"
-            )));
-        }
-        let payload = c.bytes(size as usize)?.to_vec();
-        let value = parse_attribute_value(&type_name, &payload)?;
-        attributes.push(Attribute { name, value });
     }
+    let mut list = parse_header_list(bytes)?;
     Ok(ParsedHeader {
-        version,
-        attributes,
-        end_offset: c.pos,
+        version: list.version,
+        attributes: plain(list.headers.swap_remove(0)),
+        end_offset: list.tables_start,
     })
 }
 
@@ -230,94 +359,37 @@ pub fn parse_header(bytes: &[u8]) -> Result<ParsedHeader> {
 /// | header_0 ... NUL   (NUL = empty-name attribute terminator)
 /// | header_1 ... NUL
 /// | ...
-/// | NUL                (extra NUL = end of all headers)
+/// | NUL                (the empty header = end of all headers)
 /// | offset_table_0 | offset_table_1 | ...
 /// ```
-/// The `end_offset` of the LAST returned header points to where the
-/// first offset table begins (the position right after the double-NUL).
+/// Every returned header's `end_offset` is where the first offset table
+/// begins (the position right after the empty header).
 ///
 /// Returns `Err` if the magic is bad, the `multipart` bit is NOT set,
-/// or the stream is truncated.
-///
-/// The `non_image` (deep) bit is accepted — multi-part deep files set
-/// `version` to `0x1800` (bits 11 + 12) per the OpenEXR spec.
-/// Per-part `type` discrimination ("scanlineimage" vs "deepscanline"
-/// vs "tiledimage" vs "deeptile") is left to the caller.
+/// the version field is invalid or the header list is not terminated
+/// by an empty header ([`ExrError::Layout`]), or the stream is
+/// truncated. Per-part rules (`name`, `type`, shared attributes) are
+/// checked by [`crate::layout::FileLayout::read`], not here.
 pub fn parse_multipart_headers(bytes: &[u8]) -> Result<Vec<ParsedHeader>> {
-    let mut c = Cursor::new(bytes);
-    let magic = c.u32()?;
-    if magic != EXR_MAGIC {
-        return Err(ExrError::invalid(format!(
-            "bad magic 0x{magic:08x}, expected 0x{EXR_MAGIC:08x}"
-        )));
-    }
-    let version = VersionField::from_u32(c.u32()?);
-    if !version.multipart {
-        return Err(ExrError::invalid(
-            "parse_multipart_headers called on a non-multipart EXR file".to_string(),
-        ));
-    }
-    // non_image (deep) is now permitted — the caller dispatches per-part
-    // by reading the `type` attribute. parse_exr_multipart still rejects
-    // any deep part (with a clear pointer to parse_exr_deep_multipart);
-    // parse_exr_deep_multipart accepts only deep parts.
-
-    let max_name = if version.long_names { 255 } else { 31 };
-    let mut parts: Vec<ParsedHeader> = Vec::new();
-
-    loop {
-        // A NUL byte at the start of a header terminates the multi-part
-        // header list (the "extra NUL" after all per-part headers).
-        if c.pos >= bytes.len() {
+    if bytes.len() >= 8 && bytes[..4] == EXR_MAGIC.to_le_bytes() {
+        let raw = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if raw & FLAG_MULTIPART == 0 {
             return Err(ExrError::invalid(
-                "EOF before multi-part header double-NUL terminator".to_string(),
+                "parse_multipart_headers called on a non-multipart EXR file".to_string(),
             ));
         }
-        if bytes[c.pos] == 0 {
-            c.pos += 1; // consume the final NUL
-            break;
-        }
-
-        // Parse one per-part header.
-        let part_start_version = version;
-        let mut attributes = Vec::new();
-        loop {
-            if c.pos >= bytes.len() {
-                return Err(ExrError::invalid(
-                    "EOF inside multi-part header".to_string(),
-                ));
-            }
-            if bytes[c.pos] == 0 {
-                c.pos += 1; // per-part header terminator
-                break;
-            }
-            let name = c.null_string(max_name)?;
-            let type_name = c.null_string(max_name)?;
-            let size = c.i32()?;
-            if size < 0 {
-                return Err(ExrError::invalid(format!(
-                    "attribute {name} has negative size {size}"
-                )));
-            }
-            let payload = c.bytes(size as usize)?.to_vec();
-            let value = parse_attribute_value(&type_name, &payload)?;
-            attributes.push(Attribute { name, value });
-        }
-        parts.push(ParsedHeader {
-            version: part_start_version,
-            attributes,
-            end_offset: c.pos,
-        });
     }
-
-    // Fix up end_offset: all parts share the same post-all-headers offset
-    // (the position right after the final NUL). Only the last part's
-    // end_offset correctly reflects this; update all parts for consistency.
-    for part in &mut parts {
-        part.end_offset = c.pos;
-    }
-
-    Ok(parts)
+    let list = parse_header_list(bytes)?;
+    let (version, end_offset) = (list.version, list.tables_start);
+    Ok(list
+        .headers
+        .into_iter()
+        .map(|attrs| ParsedHeader {
+            version,
+            attributes: plain(attrs),
+            end_offset,
+        })
+        .collect())
 }
 
 /// Decode an attribute payload according to its declared type name. For

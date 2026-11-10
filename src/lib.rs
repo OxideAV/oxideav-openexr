@@ -82,6 +82,7 @@ pub mod header;
 pub(crate) mod huf;
 pub mod image;
 pub mod layers;
+pub mod layout;
 pub mod luma_chroma;
 pub mod mipmap_encoder;
 pub mod multipart_encoder;
@@ -145,6 +146,10 @@ pub use image::{
 pub use layers::{
     ExrLayer, LayerKind, channel_view, default_view, enumerate_layers, find_layer, multi_view,
     split_channel_name,
+};
+pub use layout::{
+    ChunkMap, CombineOptions, FileLayout, LayoutViolation, PartKind, PartLayout, SplitOptions,
+    check_layout, chunk_count, combine_parts, combine_parts_with, split_parts, split_parts_with,
 };
 pub use luma_chroma::{
     BT709_CHROMATICITIES, CHROMA_MANTISSA_BITS, ChromaPlane, DECIMATION_TAPS, LumaChromaPlanes,

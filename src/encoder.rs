@@ -847,7 +847,7 @@ pub fn encode_exr_scanline(
         out.extend_from_slice(p);
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Splice caller-supplied non-structural attributes into a writer's

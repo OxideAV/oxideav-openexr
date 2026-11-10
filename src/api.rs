@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use crate::decoder::{extract_required, parse_exr};
 use crate::encoder::{encode_exr_scanline, merge_extra_attributes};
 use crate::error::{ExrError, Result};
-use crate::header::{ParsedHeader, VersionField, parse_multipart_headers};
+use crate::header::{ParsedHeader, VersionField};
 use crate::image::{ExrImage, Frame, ImageInfo, RgbImage, RgbaImage, string_attribute};
 use crate::mipmap_encoder::{
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap_with_attributes,
@@ -41,16 +41,27 @@ fn headers(bytes: &[u8]) -> Result<(VersionField, Vec<ParsedHeader>)> {
             "OpenEXR: file shorter than the magic + version field",
         ));
     }
-    let version = VersionField::from_u32(u32::from_le_bytes(bytes[4..8].try_into().unwrap()));
-    let headers = if version.multipart {
-        parse_multipart_headers(bytes)?
-    } else {
-        vec![crate::deep::parse_header_allow_deep(bytes)?]
-    };
-    if headers.is_empty() {
-        return Err(ExrError::invalid("OpenEXR: file declares no parts"));
-    }
+    // Header rules only: the buffer may stop after the headers.
+    let layout = crate::layout::FileLayout::read_headers(bytes)?;
+    let (version, end_offset) = (layout.version, layout.tables_start);
+    let headers = layout
+        .parts
+        .into_iter()
+        .map(|p| ParsedHeader::new(version, p.attributes, end_offset))
+        .collect();
     Ok((version, headers))
+}
+
+/// The layout gate of a decode, run after the limit checks: strict
+/// follows the offset tables and refuses every tolerated irregularity
+/// (a missing or wrong `chunkCount`, zeroed tables, duplicate part
+/// names, an unannounced long name, a deep flag that does not match
+/// the parts); lenient leaves the tables to the part readers.
+fn layout_gate(bytes: &[u8], opts: &DecodeOptions) -> Result<()> {
+    if opts.strict {
+        crate::layout::check_layout(bytes, true)?;
+    }
+    Ok(())
 }
 
 /// Resolve the part `opts` selects: by `part_name` when non-empty
@@ -302,6 +313,7 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<ExrImage> {
     // Plan before decoding so an unviewable channel set costs nothing.
     plan_view(&req.channels, &hdr.attributes, &opts.layer)?;
     check_limits(&headers, opts, Some(idx))?;
+    layout_gate(bytes, opts)?;
     let flat = decode_flat(bytes, version, idx)?;
     flat_to_image(&flat, &opts.layer)
 }
@@ -337,6 +349,7 @@ pub fn decode_all(bytes: &[u8]) -> Result<Vec<Frame>> {
 pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>> {
     let (version, headers) = headers(bytes)?;
     check_limits(&headers, opts, None)?;
+    layout_gate(bytes, opts)?;
     let frame = |img: ExrImage, idx: usize, attrs: &[Attribute]| {
         Frame::new(img, idx as u32)
             .with_name(string_attribute(attrs, "name"))
@@ -1002,9 +1015,11 @@ mod tests {
 
     #[test]
     fn multipart_decode_all_and_encode_all() {
-        let a = ramp(4, 2, PixelFormat::RgbF32Le);
-        let b = ramp(2, 3, PixelFormat::RgbaF32Le)
-            .with_chromaticities(crate::image::ColorInfo::chromaticities_for(9).unwrap());
+        // `chromaticities` is shared by all parts: part 0 carries it,
+        // later parts carry the same value or none.
+        let bt2020 = crate::image::ColorInfo::chromaticities_for(9).unwrap();
+        let a = ramp(4, 2, PixelFormat::RgbF32Le).with_chromaticities(bt2020);
+        let b = ramp(2, 3, PixelFormat::RgbaF32Le).with_chromaticities(bt2020);
         let c = ramp(3, 3, PixelFormat::GrayF32Le);
         let frames = vec![
             Frame::new(a.clone(), 0).with_name("left".to_string()),
@@ -1053,6 +1068,17 @@ mod tests {
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].image, a);
         assert!(one[0].name.is_none());
+        // A later part cannot carry chromaticities part 0 lacks.
+        let odd = vec![
+            Frame::new(c.clone(), 0),
+            Frame::new(b.clone(), 1).with_name("right".to_string()),
+        ];
+        assert!(matches!(
+            encode_all(&odd, &EncodeOptions::default()),
+            Err(ExrError::Layout(
+                crate::layout::LayoutViolation::SharedAttributeMismatch { part: 1, .. }
+            ))
+        ));
         // encode_all refuses what multi-part output cannot express.
         assert!(matches!(
             encode_all(&[], &EncodeOptions::default()),

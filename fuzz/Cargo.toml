@@ -114,3 +114,16 @@ name = "demux"
 path = "fuzz_targets/demux.rs"
 test = false
 doc = false
+
+# `layout` drives the file-layout module: the header list and version
+# flags, chunk counts from the part geometry, the offset tables and
+# part-number prefixes, and the byte-level split / combine repack —
+# raw, with fuzz bytes over the tables of a writer-built mixed file
+# (flat scanline + flat tiles + deep scanline + deep mip-mapped tiles),
+# and with short patches inside its header region. Files the strict
+# check accepts must split and recombine.
+[[bin]]
+name = "layout"
+path = "fuzz_targets/layout.rs"
+test = false
+doc = false

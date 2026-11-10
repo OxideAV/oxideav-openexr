@@ -437,7 +437,7 @@ pub(crate) fn encode_exr_tiled_mipmap_with_attributes(
     }
 
     let storage_order = multilevel_storage_order(&tile_chunks, line_order);
-    Ok(emit_tiled_chunks(
+    crate::layout::finish_written(emit_tiled_chunks(
         &header_bytes,
         &tile_chunks,
         &storage_order,
@@ -1152,7 +1152,7 @@ pub(crate) fn encode_exr_tiled_ripmap_with_attributes(
     }
 
     let storage_order = multilevel_storage_order(&tile_chunks, line_order);
-    Ok(emit_tiled_chunks(
+    crate::layout::finish_written(emit_tiled_chunks(
         &header_bytes,
         &tile_chunks,
         &storage_order,

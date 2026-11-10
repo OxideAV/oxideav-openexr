@@ -123,10 +123,12 @@ pub fn encode_exr_multipart_tiled_mipmap(parts: &[MultipartMipmapTiledPart]) -> 
         }
         for (j, other) in parts.iter().enumerate() {
             if j != i && other.name == p.name {
-                return Err(ExrError::invalid(format!(
-                    "duplicate multi-part mipmap tiled part name '{}' (parts {i} and {j})",
-                    p.name
-                )));
+                return Err(crate::layout::LayoutViolation::DuplicatePartName {
+                    part: i.max(j) as u32,
+                    first: i.min(j) as u32,
+                    name: p.name.to_string(),
+                }
+                .into());
             }
         }
         if p.tile_x == 0 || p.tile_y == 0 {
@@ -392,7 +394,7 @@ pub fn encode_exr_multipart_tiled_mipmap(parts: &[MultipartMipmapTiledPart]) -> 
         out.extend_from_slice(&c.payload);
     }
 
-    Ok(out)
+    crate::layout::finish_written(out)
 }
 
 /// Per-part attribute set for a multi-part multi-level flat tiled part:

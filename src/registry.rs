@@ -69,6 +69,9 @@ impl From<ExrError> for oxideav_core::Error {
             ExrError::InvalidData(s) => oxideav_core::Error::InvalidData(s),
             ExrError::Unsupported(s) => oxideav_core::Error::Unsupported(s),
             ExrError::LimitExceeded(s) => oxideav_core::Error::ResourceExhausted(s),
+            ExrError::Layout(v) => {
+                oxideav_core::Error::InvalidData(format!("invalid file layout: {v}"))
+            }
             ExrError::Io(e) => oxideav_core::Error::Io(e),
         }
     }

@@ -842,15 +842,29 @@ fn hostile_inputs_never_panic() {
             }
         }
     }
-    // Multi-part header claiming a gigantic chunkCount: refused before
-    // any allocation.
+    // A gigantic `chunkCount` sizes nothing: offset tables are sized
+    // from the part geometry, so the file opens as if the count were
+    // right (conforming readers read through a wrong count).
     let mut huge = multi.clone();
     let needle = b"chunkCount\0int\0";
-    if let Some(p) = huge.windows(needle.len()).position(|w| w == needle) {
-        let at = p + needle.len() + 4;
-        huge[at..at + 4].copy_from_slice(&i32::MAX.to_le_bytes());
-        assert!(open(&huge).is_err());
-    }
+    let p = huge
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("chunkCount attribute");
+    let at = p + needle.len() + 4;
+    huge[at..at + 4].copy_from_slice(&i32::MAX.to_le_bytes());
+    assert!(open(&huge).is_ok());
+    // A gigantic data window would need an offset table the file does
+    // not hold: refused before anything is sized from it.
+    let mut tall = multi.clone();
+    let needle = b"dataWindow\0box2i\0";
+    let p = tall
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("dataWindow attribute");
+    let at = p + needle.len() + 4;
+    tall[at + 12..at + 16].copy_from_slice(&i32::MAX.to_le_bytes());
+    assert!(open(&tall).is_err());
 }
 
 // ---- per-layout streams ---------------------------------------------------

@@ -58,7 +58,7 @@ metadata, data_window, display_window, attributes }`, `Plane`,
 `ImageInfo`, `Frame { image, delay, index, name, part_type }`,
 `PixelFormat` (= `ExrPixelFormat`: `GrayF32Le`, `RgbF32Le`,
 `RgbaF32Le`), `ExrError` (= `Error`: `InvalidData`, `Unsupported`,
-`LimitExceeded`, `Io`). OpenEXR has no palette, so there is no `palette`
+`LimitExceeded`, `Layout(LayoutViolation)`, `Io`). OpenEXR has no palette, so there is no `palette`
 field.
 
 `ExrImage` is built with the fallible constructors `new` / `packed` /
@@ -159,9 +159,10 @@ stream index. The demuxer never touches pixels:
 - a **single-part file** is one packet holding the whole file;
 - a **multi-part file** yields one packet per part that has a colour
   view, in file order, each a valid single-part file repacked byte for
-  byte from the part's header and chunks (multi-part bit cleared, tiled
-  bit set for `tiledimage` parts, offset table recomputed, part-number
-  prefixes stripped; compressed payloads untouched). Deep parts and
+  byte from the part's header and chunks (`split_parts`: multi-part bit
+  cleared, tiled bit set for `tiledimage` parts, offset table rewritten,
+  chunks found through the tables and stripped of their part number;
+  compressed payloads untouched). Deep parts and
   parts without a view are skipped exactly as `decode_all` skips them;
   a file with no viewable part is `Unsupported`;
 - `pts` = the part's zero-based index in the file (gaps where parts were
@@ -175,11 +176,13 @@ The muxer (`container::open_muxer`) accepts one or more video streams
 and takes the encoder's packets: one packet in total is written
 verbatim; several (on any streams, in arrival order) are combined into a
 multi-part file
-(the inverse repack — `name`, `type`, `chunkCount` added, part names
-taken from the packets or `part<i>`, duplicates suffixed `.<i>`; every
-part receives the shared `displayWindow`, the union of the packets'
-windows, the rule `encode_all` applies, because a multi-part file
-carries one display window for all its parts). Only flat scanline /
+(`combine_parts_with`, the inverse repack — `name`, `type`, `chunkCount`
+added, part names taken from the packets or `part<i>`, duplicates
+suffixed `.<i>`; every part receives the shared `displayWindow`, the
+union of the packets' windows, the rule `encode_all` applies, because a
+multi-part file carries one display window for all its parts; packets
+that disagree on `pixelAspectRatio` or `chromaticities`, the other two
+shared attributes, are refused). Only flat scanline /
 tiled single-part packets combine (what the encoder emits); a deep
 packet is `Unsupported`. `decode_all` and `parse_exr_multipart*` read
 the result, the registry round trip `demux(mux(frames)) == frames` is
@@ -279,7 +282,14 @@ is total and allocation-free. `strict` rejects a sub-sampled channel
 whose data window is not aligned to and divisible by its sampling
 factors (the lenient path reads ceil-sized planes, as before) and makes
 `decode_all` fail on a part without a colour view instead of skipping
-it. Below the contract layer the chunk readers keep their own hostile
+it, and refuses the layout irregularities listed under *Multi-part
+layout* below. Below the contract layer nothing is sized from a header the file does
+not back: offset tables are sized from the part geometry and must fit
+in the file (a huge `chunkCount`, data window, tile grid or part count
+costs nothing), and a part declaring more sample data than its chunks
+could hold at the best ratio of its compression scheme is refused
+before a plane is allocated (`LayoutViolation::PixelDataNotBacked`).
+The chunk readers keep their own hostile
 input guards — bounds-checked offset tables, size-bounded inflate, the
 DWA / PIZ reservation caps — exercised by the fuzz targets below.
 
@@ -305,17 +315,75 @@ DWA / PIZ reservation caps — exercised by the fuzz targets below.
 | Single-part tiled (`ONE_LEVEL`)     | parse + write                                    |
 | Tiled `MIPMAP_LEVELS`               | parse + write — full pyramid via `parse_exr_tiled_multilevel`; NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A (r410: the single-part writer now carries the lossy schemes too, reference-validated incl. bit-exact reference-decode vs our-decode). `parse_exr` returns level-0 only |
 | Tiled `RIPMAP_LEVELS`               | parse + write — full 2-D reduction grid; NONE / ZIP / ZIPS / RLE / PXR24 / B44 / B44A (r410: single-part writer incl. lossy) |
+| Multi-part layout rules             | **read + write, per the staged multi-part note** — version flags, header list, `name` / `type` / `chunkCount`, shared attributes, per-part offset tables, part-number prefixes; typed `LayoutViolation` errors, lenient / strict; byte-level `split_parts` / `combine_parts` (see *Multi-part layout*) |
 | Multi-part EXR (scanline parts)     | parse + write                                    |
 | Multi-part EXR (flat tiled parts)   | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware |
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write — lossless AND lossy (PXR24 / B44 / B44A) scanline paths; luminance/chroma (`Y` + 2×2 `BY`/`RY`) layouts validated bit-exact against a reference EXR validator binary. Note: the reference reader requires sub-sampled data-window extents divisible by the sampling factor; our reader additionally accepts ceil-sized odd extents |
 | Layered / multi-view channel names (`diffuse.R`, `right.R`, `spec.left.Y`, `a.b.c.Y` …) | **typed enumeration + framework mapping** — `layers` module groups the channel list by prefix (arbitrary depth, base = text after the last `.`), classifies each layer by the colour view's rules and tags views from `multiView`: a channel's view is the last prefix component when listed (`channel_view`; un-prefixed = the default view, `right.spec.G` = none). `DecodeOptions::layer` (and the registry `layer` option) matches the full prefix literally, except that the default view's name selects the un-prefixed set; `EncodeOptions::layer` writes prefixed names. The traced multi-view fixture decodes bit-exactly under every layer name and the per-channel view classification matches the reference's |
 | Luminance/chroma colour (`Y` + `RY` + `BY` ↔ RGB) | **decode + encode, bit-exact to the reference RGBA interface** (`luma_chroma` module + the colour view) — decode: chromaticities-derived weights, 27-tap reconstruction, conversion, diagonal-neighbour saturation limiting (9/9 traced fixtures bit-exact). Encode (`ColourLayout::LumaChroma`): binary16 `Y`, per-pixel binary16 ratios, separable 27-tap decimation at even positions, 7-bit `Y` / 5-bit ratio mantissas — the reference-written fixture's stored `Y` / `RY` / `BY` planes reproduced 384 / 384. Sampling factors other than 1×1 / 2×2 fall back to bilinear / tent filters. Raw planes stay reachable as stored through `parse_exr` |
 | Deep scanline (`deepscanline`)      | parse + write — NONE / RLE / ZIPS; single- and multi-part |
-| Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part |
+| Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part. Tile sample data in the stored order (scanline by scanline within the tile, each channel contiguous per scanline) — the staged reference-written deep-tiled fixture decodes sample for sample equal to its deep-scanline twin |
 | Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL / MIPMAP / RIPMAP) in any order. Multi-level flat **and deep** tiled parts now carry their full pyramid/grid inline (`MultipartMixedPart::DeepTiledMipmap` / `DeepTiledRipmap`, surfaced as `MultipartMixedImage::DeepTiledMipmap` / `DeepTiledRipmap`). Flat `scanlineimage` and `tiledimage` parts (ONE_LEVEL, MIPMAP, RIPMAP) also carry `PXR24` / `B44` / `B44A` (alongside NONE / ZIP / ZIPS / RLE), reusing the shared block builders + decoders; **deep** parts (scanline, ONE_LEVEL / MIPMAP / RIPMAP tiled) stay NONE / ZIPS / RLE |
 | `HALF` (binary16)                   | round-trips every representable pattern (65 536) |
 | `UINT` pixel type                   | parse + write (f32 view, bit-exact `< 2^24`)     |
 
+
+### Multi-part layout
+
+The `layout` module implements the staged multi-part observer note
+end to end, without looking inside a chunk payload.
+
+**Reading.** `FileLayout::read(bytes)` lays a file out — version flags,
+one `PartLayout` per header (name, `PartKind`, the chunk count computed
+from the part geometry, table offset, attributes) — and
+`FileLayout::chunks` locates every chunk through the offset tables.
+What a conforming reader refuses is an `ExrError::Layout(LayoutViolation)`
+in every reader of this crate:
+
+| Rule | Violation |
+|---|---|
+| format version 2; only flags `0x200` / `0x400` / `0x800` / `0x1000`; `0x200` never with `0x800` or `0x1000`, and only with a `tiles` attribute | `FormatVersion`, `UnknownVersionFlags`, `ConflictingVersionFlags`, `TiledFlagWithoutTiles` |
+| the header list of a multi-part file ends in an empty header | `HeaderListNotTerminated` |
+| every part of a multi-part file has a string `name` and a `type` (also required in a deep file) out of `scanlineimage` / `tiledimage` / `deepscanline` / `deeptile` | `MissingName`, `NameNotString`, `MissingType`, `UnknownPartType` |
+| a tiled part has `tiles`, a scanline part of a multi-part file has none; deep data version 1 | `MissingTiles`, `UnexpectedTiles`, `DeepDataVersion` |
+| `displayWindow`, `pixelAspectRatio` (absent = 1.0) and `chromaticities` (may be absent from a later part, not present there without being identical in part 0) agree with part 0 | `SharedAttributeMismatch { part, attribute }` |
+| the offset tables (sized by the note's formulas) fit in the file; every entry points at a chunk inside the file | `OffsetTableTruncated`, `ChunkOutOfBounds`, `ChunksMissing` |
+| a chunk carries the number of the part whose table led to it | `ChunkPartNumber` |
+
+Chunks are found through the tables, never by position: any physical
+order, interleaving between parts and bytes between tables and chunks
+are fine. What a conforming reader tolerates decodes as well, and is
+listed in `FileLayout::irregularities` — `ChunkCountMissing`,
+`ChunkCountMismatch` (the count is never trusted), `OffsetTableZero`
+(the tables are rebuilt from the chunks' part numbers and coordinates),
+`DuplicatePartName`, `LongNameFlagClear`, `DeepFlagWithoutDeepPart`,
+`DeepPartWithoutDeepFlag`. `DecodeOptions::strict` and
+`check_layout(bytes, true)` turn the first of them into the error.
+
+The eleven staged rejected files fail with the rule their edit breaks,
+the eleven staged tolerated files decode to the unmodified pixels, and
+every part of every staged fixture decodes to the SHA-1 pixel hash its
+producer reported (`tests/multipart_fixtures.rs`).
+
+**Writing.** Every writer's output is held to the strict rules before
+it is returned: exact `chunkCount` in every part, filled tables in
+geometry order, unique part names, shared attributes that agree, the
+long-name flag whenever a name exceeds 31 bytes, the deep flag exactly
+when a part is deep, and never the single-part-tiled flag on a
+multi-part file. `encode_exr_multipart_mixed` mixes `scanlineimage`,
+`tiledimage`, `deepscanline` and `deeptile` parts freely; black-box
+readers read the headers and the pixels of every such file in the
+property test (`tests/multipart_layout_roundtrip.rs`).
+
+**Repacking.** `split_parts(bytes)` returns every part as a single-part
+file (flat or deep, scanline or tiled; `SplitOptions::strip_part_attributes`
+drops `name` / `type` / `chunkCount` to give the file a single-part
+writer produces); `combine_parts(&files)` is the inverse for any mix of
+single-part files (`CombineOptions`: explicit part names, renaming
+duplicates, unifying the display window). No payload byte is touched,
+and the staged fixtures are reproduced byte for byte both ways: the
+split parts equal the staged single-part files, and the single-part
+files combine into the staged multi-part files.
 
 ### Not covered
 
@@ -355,7 +423,7 @@ pass, on Apple Silicon).
 
 ## Fuzzing
 
-Five coverage-guided `cargo-fuzz` targets live under `fuzz/`:
+Coverage-guided `cargo-fuzz` targets live under `fuzz/`:
 
 ```sh
 cargo +nightly fuzz run contract_api
@@ -363,6 +431,8 @@ cargo +nightly fuzz run parse_flat
 cargo +nightly fuzz run parse_deep_scanline
 cargo +nightly fuzz run parse_multipart_mixed
 cargo +nightly fuzz run decode_chunk
+cargo +nightly fuzz run demux
+cargo +nightly fuzz run layout
 ```
 
 `contract_api` attacks the contract root — `probe`, `info`, `decode` /
@@ -395,6 +465,13 @@ per-part chunk-shape dispatch (flat scanline / flat + deep tiled at
 every level mode), the concatenated offset tables, the i32 tile/level
 coordinates, and the u64 deep chunk sizes — both raw and by splicing
 fuzz bytes over the chunk region of a writer-produced two-part file.
+
+`layout` attacks the file-layout module — header list, version flags,
+geometry-derived chunk counts, offset tables, part numbers, and the
+split / combine repack — raw, with fuzz bytes over the tables of a
+writer-built four-kind mixed file, and with short patches inside its
+header region; a file the strict check accepts must split, recombine
+and reach a fixed point.
 
 The decode contract is that every byte slice returns `Ok` or `Err`,
 never panicking, integer-overflowing (debug build), indexing out of

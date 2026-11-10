@@ -640,6 +640,9 @@ pub(crate) fn scatter_b44_block_into_planes(
 /// function returns an error if the multi-part bit is set.
 pub fn parse_exr(bytes: &[u8]) -> Result<ExrPart> {
     let header = parse_header(bytes)?;
+    // Version flags, table bounds and a header the chunks can back,
+    // before any plane is sized from it.
+    crate::layout::FileLayout::read(bytes)?.chunks(bytes)?;
     // parse_header already rejects multipart; also reject here explicitly
     // so callers get a clear message pointing at parse_exr_multipart.
     if header.version.multipart {
@@ -1275,8 +1278,8 @@ fn parse_tiled(
             )));
         }
 
-        let x0 = tx * tdesc.x_size;
-        let y0 = ty * tdesc.y_size;
+        let x0 = tx.saturating_mul(tdesc.x_size);
+        let y0 = ty.saturating_mul(tdesc.y_size);
         let x1 = (x0 + tdesc.x_size).min(width);
         let y1 = (y0 + tdesc.y_size).min(height);
         let tw = (x1 - x0) as usize;
@@ -1478,6 +1481,9 @@ impl MultilevelTiledImage {
 /// function.
 pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> {
     let header = parse_header(bytes)?;
+    // Version flags, table bounds and a header the chunks can back,
+    // before any plane is sized from it.
+    crate::layout::FileLayout::read(bytes)?.chunks(bytes)?;
     if header.version.multipart {
         return Err(ExrError::unsupported(
             "multi-part EXR: parse_exr_tiled_multilevel is single-part only".to_string(),
@@ -1757,6 +1763,8 @@ fn alloc_planes(channels: &[Channel], width: u32, height: u32) -> Vec<ExrPlane> 
 ///
 /// Only `scanlineimage` part type is supported in this round.
 pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrPart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -2067,6 +2075,8 @@ pub fn parse_exr_multipart(bytes: &[u8]) -> Result<Vec<ExrPart>> {
 ///
 /// Companion to [`crate::encode_exr_multipart_tiled`].
 pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrPart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -2287,8 +2297,8 @@ pub fn parse_exr_multipart_tiled(bytes: &[u8]) -> Result<Vec<ExrPart>> {
                 ps.tx_count, ps.ty_count
             )));
         }
-        let x0 = tx * ps.tile_x;
-        let y0 = ty * ps.tile_y;
+        let x0 = tx.saturating_mul(ps.tile_x);
+        let y0 = ty.saturating_mul(ps.tile_y);
         let x1 = (x0 + ps.tile_x).min(width);
         let y1 = (y0 + ps.tile_y).min(height);
         let tw = (x1 - x0) as usize;
@@ -2432,6 +2442,8 @@ impl MultilevelTiledPart {
 /// `lvly`-outer / `lvlx`-inner order with INCREASING_Y row-major within
 /// each cell (the encoder companion writes them in the same order).
 pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<MultilevelTiledPart>> {
+    let regular = crate::layout::regular_multipart(bytes)?;
+    let bytes: &[u8] = &regular;
     let parts = parse_multipart_headers(bytes)?;
     if parts.is_empty() {
         return Err(ExrError::invalid(
@@ -2689,8 +2701,8 @@ pub fn parse_exr_multipart_tiled_multilevel(bytes: &[u8]) -> Result<Vec<Multilev
             })?;
         let tx = h_tx as u32;
         let ty = h_ty as u32;
-        let x0 = tx * ps.tile_x;
-        let y0 = ty * ps.tile_y;
+        let x0 = tx.saturating_mul(ps.tile_x);
+        let y0 = ty.saturating_mul(ps.tile_y);
         if x0 >= level.width || y0 >= level.height {
             return Err(ExrError::invalid(format!(
                 "multi-part tiled multilevel chunk at {scan_pos}: tile ({tx},{ty}) outside \

@@ -10,8 +10,8 @@
 #![allow(clippy::type_complexity)]
 
 use oxideav_openexr::{
-    Channel, Compression, DeepMipmapTiledLevelInput, MultipartMixedPart, PixelType,
-    encode_exr_multipart_mixed, parse_exr_multipart_mixed,
+    Channel, Compression, DeepMipmapTiledLevelInput, ExrError, LayoutViolation, MultipartMixedPart,
+    PixelType, encode_exr_multipart_mixed, parse_exr_multipart_mixed,
 };
 
 fn channels_rgba_float() -> Vec<Channel> {
@@ -121,19 +121,31 @@ fn attr_value_offset(bytes: &[u8], name: &str, type_name: &str) -> Option<usize>
         .map(|p| p + pat.len() + 4)
 }
 
-/// A chunkCount that disagrees with the level-grid math must be
-/// rejected with an error (not mis-walk the chunk list).
+/// A `chunkCount` that disagrees with the level-grid math is an
+/// irregularity conforming readers read through (the table length comes
+/// from the part geometry): the lenient reader decodes the file as if
+/// the count were right, the strict layout check names the part.
 #[test]
-fn corrupt_chunk_count_is_rejected() {
+fn corrupt_chunk_count_is_tolerated_and_diagnosed() {
     let bytes = fixture();
+    let want = format!("{:?}", parse_exr_multipart_mixed(&bytes).unwrap());
     let off = attr_value_offset(&bytes, "chunkCount", "int").expect("chunkCount attr");
     for bad in [0i32, 1, 999, -5] {
         let mut m = bytes.clone();
         m[off..off + 4].copy_from_slice(&bad.to_le_bytes());
-        assert!(
-            parse_exr_multipart_mixed(&m).is_err(),
-            "chunkCount={bad} must be rejected"
-        );
+        let got = parse_exr_multipart_mixed(&m).expect("wrong chunkCount is read through");
+        // The reader hands the part readers the count the geometry
+        // gives, so the result is the original's, attribute included.
+        assert_eq!(format!("{got:?}"), want, "chunkCount={bad}");
+        assert!(oxideav_openexr::check_layout(&m, false).is_ok());
+        match oxideav_openexr::check_layout(&m, true) {
+            Err(ExrError::Layout(LayoutViolation::ChunkCountMismatch {
+                part: 0,
+                declared,
+                ..
+            })) => assert_eq!(declared, bad as i64),
+            other => panic!("chunkCount={bad}: {other:?}"),
+        }
     }
 }
 
@@ -150,14 +162,21 @@ fn corrupt_level_mode_is_rejected() {
         parse_exr_multipart_mixed(&m).is_err(),
         "level_mode=3 must be rejected"
     );
-    // Demoting the MIPMAP part to ONE_LEVEL makes the declared
-    // chunkCount disagree with the ONE_LEVEL grid math → reject.
+    // Demoting the MIPMAP part to ONE_LEVEL shortens its offset table
+    // to the level-0 tiles (the remaining entries become bytes between
+    // the tables and the first chunk): the file reads as a one-level
+    // part, and strict mode reports the stale chunkCount.
     let mut m = bytes.clone();
     m[mode_off] = 0;
-    assert!(
-        parse_exr_multipart_mixed(&m).is_err(),
-        "MIPMAP part relabelled ONE_LEVEL must fail the chunk-count check"
-    );
+    let parts = parse_exr_multipart_mixed(&m).expect("reads as ONE_LEVEL");
+    assert!(parts[1].is_deep_tiled());
+    assert!(matches!(
+        oxideav_openexr::check_layout(&m, true),
+        Err(ExrError::Layout(LayoutViolation::ChunkCountMismatch {
+            part: 1,
+            ..
+        }))
+    ));
 }
 
 /// Find the absolute offset of the chunk area by locating the offset
