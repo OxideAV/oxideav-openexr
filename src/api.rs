@@ -465,6 +465,17 @@ pub fn encode(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     opts.validate()?;
     let (data_window, display_window) = effective_windows(image, opts)?;
     let (channels, planes) = image_to_channels(image, opts)?;
+    for ch in &channels {
+        if (ch.x_sampling > 1 && data_window.x_min.rem_euclid(ch.x_sampling) != 0)
+            || (ch.y_sampling > 1 && data_window.y_min.rem_euclid(ch.y_sampling) != 0)
+        {
+            return Err(ExrError::invalid(format!(
+                "OpenEXR encoder: channel '{}' is sub-sampled {}x{} but the dataWindow origin \
+                 ({}, {}) is not a multiple of it",
+                ch.name, ch.x_sampling, ch.y_sampling, data_window.x_min, data_window.y_min
+            )));
+        }
+    }
     let plane_refs: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
     let (width, height) = (image.width, image.height);
     let tile = opts.tile_size;
@@ -833,20 +844,31 @@ mod tests {
 
     #[test]
     fn luma_chroma_layout_round_trips_at_full_chroma() {
-        let img = ramp(8, 4, PixelFormat::RgbaF32Le);
-        let opts = EncodeOptions::default()
-            .with_colour(ColourLayout::LumaChroma)
-            .with_chroma_sampling(1)
-            .with_compression(Compression::None);
-        let bytes = encode(&img, &opts).unwrap();
-        let i = info(&bytes).unwrap();
-        let names: Vec<&str> = i.channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["A", "BY", "RY", "Y"]);
-        assert_eq!(i.format, PixelFormat::RgbaF32Le);
-        let back = decode(&bytes).unwrap();
-        assert_eq!(back.format, PixelFormat::RgbaF32Le);
-        for (a, b) in back.pixels().iter().zip(img.pixels()) {
-            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        // Colour components in [0.25, 0.75]: saturation stays below the
+        // decoder's limiting threshold, so the round trip is bounded by
+        // the binary16 storage (and, with it on, the mantissa rounding).
+        let samples: Vec<f32> = (0..8 * 4 * 4)
+            .map(|i| ((i as f32 * 0.37) % 1.0) * 0.5 + 0.25)
+            .collect();
+        let img = ExrImage::from_f32(8, 4, PixelFormat::RgbaF32Le, &samples).unwrap();
+        for (rounding, tol) in [(false, 2e-3f32), (true, 3e-2)] {
+            let opts = EncodeOptions::default()
+                .with_colour(ColourLayout::LumaChroma)
+                .with_chroma_sampling(1)
+                .with_luma_chroma_rounding(rounding)
+                .with_compression(Compression::None);
+            let bytes = encode(&img, &opts).unwrap();
+            let i = info(&bytes).unwrap();
+            let names: Vec<&str> = i.channels.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["A", "BY", "RY", "Y"]);
+            assert_eq!(i.format, PixelFormat::RgbaF32Le);
+            let back = decode(&bytes).unwrap();
+            assert_eq!(back.format, PixelFormat::RgbaF32Le);
+            for (k, (a, b)) in back.pixels().iter().zip(img.pixels()).enumerate() {
+                // Alpha is stored as given.
+                let tol = if k % 4 == 3 { 0.0 } else { tol };
+                assert!((a - b).abs() <= tol, "rounding={rounding} [{k}] {a} vs {b}");
+            }
         }
         // 2x2 chroma needs even extents.
         assert!(matches!(
@@ -1126,19 +1148,36 @@ mod tests {
         .unwrap();
         assert!(decode(&bytes).is_ok());
         assert!(decode_with(&bytes, &DecodeOptions::default().with_strict(true)).is_ok());
-        let odd = img
-            .with_data_window(Box2i {
-                x_min: 1,
-                y_min: 0,
-                x_max: 6,
-                y_max: 3,
-            })
-            .unwrap();
-        let bytes = encode(
-            &odd,
+        let odd_window = Box2i {
+            x_min: 1,
+            y_min: 0,
+            x_max: 6,
+            y_max: 3,
+        };
+        let odd = img.clone().with_data_window(odd_window).unwrap();
+        // The high-level encoder refuses to write one …
+        assert!(matches!(
+            encode(
+                &odd,
+                &EncodeOptions::default().with_colour(ColourLayout::LumaChroma),
+            ),
+            Err(ExrError::InvalidData(_))
+        ));
+        // … so build it through the channel-level writer.
+        let (channels, planes) = image_to_channels(
+            &img,
             &EncodeOptions::default().with_colour(ColourLayout::LumaChroma),
         )
         .unwrap();
+        let refs: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
+        let attrs = scanline_attributes(
+            &odd,
+            &channels,
+            &EncodeOptions::default().with_compression(Compression::None),
+            odd_window,
+            odd_window,
+        );
+        let bytes = encode_exr_scanline(6, 4, &channels, &refs, Compression::None, attrs).unwrap();
         assert!(decode(&bytes).is_ok());
         assert!(matches!(
             decode_with(&bytes, &DecodeOptions::default().with_strict(true)),

@@ -5,30 +5,31 @@
 //!
 //! # Decode mapping
 //!
-//! The selected layer's channels (see [`crate::layers`]) are matched in
-//! this order:
+//! The selected layer's channels (see [`crate::layers`]) are matched by
+//! the channel-presence rules of the reference RGBA interface:
 //!
-//! 1. `R`, `G`, `B` and `A` all present → `RgbaF32Le`.
-//! 2. `R`, `G`, `B` present, no `A` → `RgbF32Le` (a missing alpha is
-//!    *not* synthesised).
-//! 3. `Y`, `RY` and `BY` present (no `R`/`G`/`B`) → luminance/chroma:
-//!    RGB is reconstructed with the part's luminance weights (its
-//!    `chromaticities` attribute, else BT.709) and the chroma planes are
-//!    interpolated up from their declared sampling
-//!    ([`crate::luma_chroma`]); `RgbF32Le`, or `RgbaF32Le` with an `A`.
-//! 4. `Y` present alone → `GrayF32Le`; `Y` + `A` → `RgbaF32Le` with `Y`
-//!    replicated into R, G and B so the alpha is not dropped.
-//! 5. Anything else is [`ExrError::Unsupported`] naming the channels.
+//! 1. Any of `RY` / `BY` present → luminance/chroma: RGB is
+//!    reconstructed by [`crate::luma_chroma::luma_chroma_to_rgb`] with
+//!    the part's luminance weights (its `chromaticities` attribute, else
+//!    BT.709). A missing `RY` or `BY` reads as `0`, a missing `Y` as
+//!    `0.5`. `RgbF32Le`, or `RgbaF32Le` with an `A`.
+//! 2. `Y` without chroma → `GrayF32Le`; `Y` + `A` → `RgbaF32Le` with `Y`
+//!    copied into R, G and B. Luminance channels win over `R` / `G` /
+//!    `B` in the same layer (those are then ignored).
+//! 3. Otherwise `R`, `G`, `B` → `RgbF32Le`, `RgbaF32Le` with `A`; when
+//!    only one or two of them exist the missing ones read as `0`.
+//! 4. Anything else is [`ExrError::Unsupported`] naming the channels.
 //!
 //! Every directly-mapped channel must be at 1×1 sampling; only `RY` /
 //! `BY` may be sub-sampled. Channels outside the view are ignored
-//! (reachable through [`crate::ExrPart`]).
+//! (reachable through [`crate::ExrPart`], which always carries the
+//! planes as stored).
 
 use crate::error::{ExrError, Result};
 use crate::image::{ColorInfo, ExrImage, Metadata, PixelFormat, Plane};
 use crate::layers::{ExrLayer, enumerate_layers, find_layer};
 use crate::luma_chroma::{
-    ChromaPlane, luma_chroma_to_rgb, luminance_weights_of, rgb_to_luma_chroma,
+    ChromaPlane, luma_chroma_to_rgb, luminance_weights_of, rgb_to_luma_chroma_with,
 };
 use crate::options::{ColourLayout, EncodeOptions};
 use crate::part::{ExrPart, ExrPlane};
@@ -72,10 +73,16 @@ pub(crate) enum ViewPlan {
         g: usize,
         b: usize,
     },
+    PartialRgb {
+        r: Option<usize>,
+        g: Option<usize>,
+        b: Option<usize>,
+        a: Option<usize>,
+    },
     LumaChroma {
-        y: usize,
-        ry: usize,
-        by: usize,
+        y: Option<usize>,
+        ry: Option<usize>,
+        by: Option<usize>,
         a: Option<usize>,
     },
     GrayAlpha {
@@ -91,8 +98,12 @@ impl ViewPlan {
     pub(crate) fn format(&self) -> PixelFormat {
         match self {
             Self::Rgba { .. } | Self::GrayAlpha { .. } => PixelFormat::RgbaF32Le,
-            Self::LumaChroma { a: Some(_), .. } => PixelFormat::RgbaF32Le,
-            Self::Rgb { .. } | Self::LumaChroma { a: None, .. } => PixelFormat::RgbF32Le,
+            Self::LumaChroma { a: Some(_), .. } | Self::PartialRgb { a: Some(_), .. } => {
+                PixelFormat::RgbaF32Le
+            }
+            Self::Rgb { .. }
+            | Self::LumaChroma { a: None, .. }
+            | Self::PartialRgb { a: None, .. } => PixelFormat::RgbF32Le,
             Self::Gray { .. } => PixelFormat::GrayF32Le,
         }
     }
@@ -150,11 +161,14 @@ pub(crate) fn plan_view(
     let (r, g, b, a, y) = (find("R"), find("G"), find("B"), find("A"), find("Y"));
     let (ry, by) = (find("RY"), find("BY"));
     let plan = match (r, g, b, a, y, ry, by) {
+        (.., y, ry, by) if ry.is_some() || by.is_some() => ViewPlan::LumaChroma { y, ry, by, a },
+        (_, _, _, Some(a), Some(y), ..) => ViewPlan::GrayAlpha { y, a },
+        (_, _, _, None, Some(y), ..) => ViewPlan::Gray { y },
         (Some(r), Some(g), Some(b), Some(a), ..) => ViewPlan::Rgba { r, g, b, a },
         (Some(r), Some(g), Some(b), None, ..) => ViewPlan::Rgb { r, g, b },
-        (None, None, None, a, Some(y), Some(ry), Some(by)) => ViewPlan::LumaChroma { y, ry, by, a },
-        (None, None, None, Some(a), Some(y), None, None) => ViewPlan::GrayAlpha { y, a },
-        (None, None, None, None, Some(y), None, None) => ViewPlan::Gray { y },
+        (r, g, b, a, ..) if r.is_some() || g.is_some() || b.is_some() => {
+            ViewPlan::PartialRgb { r, g, b, a }
+        }
         _ => {
             let names: Vec<&str> = sel
                 .channels
@@ -172,7 +186,10 @@ pub(crate) fn plan_view(
     let direct: Vec<usize> = match &plan {
         ViewPlan::Rgba { r, g, b, a } => vec![*r, *g, *b, *a],
         ViewPlan::Rgb { r, g, b } => vec![*r, *g, *b],
-        ViewPlan::LumaChroma { y, a, .. } => a.iter().copied().chain([*y]).collect(),
+        ViewPlan::PartialRgb { r, g, b, a } => {
+            [r, g, b, a].into_iter().flatten().copied().collect()
+        }
+        ViewPlan::LumaChroma { y, a, .. } => [y, a].into_iter().flatten().copied().collect(),
         ViewPlan::GrayAlpha { y, a } => vec![*y, *a],
         ViewPlan::Gray { y } => vec![*y],
     };
@@ -187,7 +204,7 @@ pub(crate) fn plan_view(
         }
     }
     if let ViewPlan::LumaChroma { ry, by, .. } = &plan {
-        for idx in [*ry, *by] {
+        for idx in [ry, by].into_iter().flatten().copied() {
             let ch = &channels[idx];
             if ch.x_sampling <= 0 || ch.y_sampling <= 0 {
                 return Err(ExrError::invalid(format!(
@@ -228,14 +245,44 @@ pub(crate) fn flat_to_image(img: &FlatPixels, layer: &str) -> Result<ExrImage> {
     };
 
     let converted;
+    let zeros;
     let sources: Vec<&[f32]> = match &plan {
         ViewPlan::Rgba { r, g, b, a } => {
             vec![full_res(*r)?, full_res(*g)?, full_res(*b)?, full_res(*a)?]
         }
         ViewPlan::Rgb { r, g, b } => vec![full_res(*r)?, full_res(*g)?, full_res(*b)?],
+        ViewPlan::PartialRgb { r, g, b, a } => {
+            zeros = vec![0.0f32; pixels];
+            let mut v = Vec::with_capacity(4);
+            for c in [r, g, b] {
+                v.push(match c {
+                    Some(c) => full_res(*c)?,
+                    None => zeros.as_slice(),
+                });
+            }
+            if let Some(a) = a {
+                v.push(full_res(*a)?);
+            }
+            v
+        }
         ViewPlan::LumaChroma { y, ry, by, a } => {
             let weights = luminance_weights_of(&img.attributes);
-            converted = luma_chroma_to_rgb(w, h, full_res(*y)?, chroma(*ry), chroma(*by), weights)?;
+            // Missing chroma reads as 0 (a 1×1 zero plane), a missing
+            // luminance as 0.5.
+            zeros = vec![0.0f32; pixels];
+            let half_grey;
+            let y_plane = match y {
+                Some(y) => full_res(*y)?,
+                None => {
+                    half_grey = vec![0.5f32; pixels];
+                    half_grey.as_slice()
+                }
+            };
+            let pick = |c: &Option<usize>| match c {
+                Some(c) => chroma(*c),
+                None => ChromaPlane::new(&zeros, 1, 1),
+            };
+            converted = luma_chroma_to_rgb(w, h, y_plane, pick(ry), pick(by), weights)?;
             match a {
                 Some(a) => vec![&converted.r, &converted.g, &converted.b, full_res(*a)?],
                 None => vec![&converted.r, &converted.g, &converted.b],
@@ -305,12 +352,13 @@ pub(crate) fn image_to_channels(
             // attribute is written back, so readers reconstruct with
             // the same weights); BT.709 when it has none.
             let weights = luminance_weights_of(&image.attributes);
-            let yc = rgb_to_luma_chroma(
+            let yc = rgb_to_luma_chroma_with(
                 width,
                 height,
                 [&comps[0], &comps[1], &comps[2]],
                 weights,
                 (s, s),
+                opts.luma_chroma_rounding,
             )?;
             let mut chs = Vec::with_capacity(4);
             let mut pls = Vec::with_capacity(4);
@@ -372,8 +420,19 @@ mod tests {
         assert_eq!(p(&["BY", "RY", "Y"]).unwrap(), PixelFormat::RgbF32Le);
         assert_eq!(p(&["A", "BY", "RY", "Y"]).unwrap(), PixelFormat::RgbaF32Le);
         assert!(matches!(p(&["Z"]), Err(ExrError::Unsupported(_))));
-        assert!(matches!(p(&["G", "R"]), Err(ExrError::Unsupported(_))));
-        assert!(matches!(p(&["RY", "Y"]), Err(ExrError::Unsupported(_))));
+        assert!(matches!(p(&["A"]), Err(ExrError::Unsupported(_))));
+        // Reference channel-presence rules: a partial RGB triple fills
+        // the missing components with 0, Y + RY reads BY = 0, chroma
+        // without Y reads Y = 0.5, and luminance wins over R/G/B.
+        assert_eq!(p(&["G", "R"]).unwrap(), PixelFormat::RgbF32Le);
+        assert_eq!(p(&["A", "R"]).unwrap(), PixelFormat::RgbaF32Le);
+        assert_eq!(p(&["RY", "Y"]).unwrap(), PixelFormat::RgbF32Le);
+        assert_eq!(p(&["BY", "RY"]).unwrap(), PixelFormat::RgbF32Le);
+        assert_eq!(p(&["B", "G", "R", "Y"]).unwrap(), PixelFormat::GrayF32Le);
+        assert_eq!(
+            p(&["A", "B", "BY", "G", "R", "RY", "Y"]).unwrap(),
+            PixelFormat::RgbaF32Le
+        );
         // Sub-sampled colour channels are refused; chroma may be.
         let chs = vec![ch("B", 2), ch("G", 1), ch("R", 1)];
         assert!(matches!(
@@ -384,9 +443,9 @@ mod tests {
         assert_eq!(
             plan_view(&chs, &[], "").unwrap(),
             ViewPlan::LumaChroma {
-                y: 2,
-                ry: 1,
-                by: 0,
+                y: Some(2),
+                ry: Some(1),
+                by: Some(0),
                 a: None
             }
         );

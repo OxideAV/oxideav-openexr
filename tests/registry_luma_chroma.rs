@@ -141,12 +141,13 @@ fn registry_luma_chroma_encode_agrees_with_the_rgb_path_through_the_reference() 
     }
     // … and the reference's chroma of our file matches the chroma it
     // derives from the RGB file at interior sample positions.
-    let mine = oxideav_openexr::rgb_to_luma_chroma(
+    let mine = oxideav_openexr::rgb_to_luma_chroma_with(
         w,
         h,
         [plane(&ra, "R"), plane(&ra, "G"), plane(&ra, "B")],
         wa,
         (1, 1),
+        false,
     )
     .unwrap();
     let pw = (w / 2) as usize;
@@ -155,13 +156,13 @@ fn registry_luma_chroma_encode_agrees_with_the_rgb_path_through_the_reference() 
             let j = jy * pw + jx;
             let i = (2 * jy) * w as usize + 2 * jx;
             assert!(
-                (plane(&ya, "RY")[j] - mine.ry[i]).abs() <= 0.03,
+                (plane(&ya, "RY")[j] - mine.ry[i]).abs() <= 0.05,
                 "RY sample ({jx},{jy}): {} vs {}",
                 plane(&ya, "RY")[j],
                 mine.ry[i]
             );
             assert!(
-                (plane(&ya, "BY")[j] - mine.by[i]).abs() <= 0.03,
+                (plane(&ya, "BY")[j] - mine.by[i]).abs() <= 0.05,
                 "BY sample ({jx},{jy}): {} vs {}",
                 plane(&ya, "BY")[j],
                 mine.by[i]

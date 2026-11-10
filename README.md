@@ -72,20 +72,33 @@ field.
 ### The colour view and the depth API
 
 An OpenEXR part is an arbitrarily named channel set. `decode` returns
-the part's **colour view**, chosen in this order from the selected layer
-(`DecodeOptions::layer`, default the unprefixed base layer):
+the part's **colour view**, chosen from the selected layer
+(`DecodeOptions::layer`, default the unprefixed base layer) by the
+channel-presence rules of the reference RGBA interface:
 
 | Channels present | `ExrImage::format` |
 |---|---|
+| `RY` and/or `BY` (+ `Y`, + `A`) | `RgbF32Le` / `RgbaF32Le` — RGB reconstructed from luminance/chroma (below); a missing `RY` / `BY` reads `0`, a missing `Y` reads `0.5` |
+| `Y` + `A` | `RgbaF32Le` with `Y` copied into R, G, B |
+| `Y` | `GrayF32Le` (luminance wins over `R` / `G` / `B` in the same layer) |
 | `R G B A` | `RgbaF32Le` |
 | `R G B` | `RgbF32Le` (alpha is not synthesised) |
-| `Y RY BY` (+ `A`) | `RgbF32Le` / `RgbaF32Le` — RGB reconstructed from luminance/chroma with the part's `chromaticities` weights (BT.709 default), chroma interpolated up from its sampling |
-| `Y` + `A` | `RgbaF32Le` with `Y` replicated into R, G, B |
-| `Y` | `GrayF32Le` |
+| one or two of `R G B` (+ `A`) | `RgbF32Le` / `RgbaF32Le`, the missing components `0` |
+
+Luminance/chroma decode reproduces the reference RGBA reader sample for
+sample: luminance weights solved from the `chromaticities` attribute
+(BT.709 / D65 default) in binary64 and rounded to binary32; chroma
+co-sited with luma `(2i, 2j)` and brought up by the separable 27-tap
+reconstruction filter (horizontal first, binary16 between passes, edge
+replication); `R = (RY + 1)·Y`, `B = (BY + 1)·Y`, `G = (Y − R·w_r −
+B·w_b) / w_g`; then the diagonal-neighbour saturation limiter (which
+also clamps negative components). Every one of the nine traced
+fixtures (`tests/fixtures/ryby/`) decodes **bit-exactly** — 11 776 / 11 776
+RGBA samples, saturation stress fixture and multi-view layers included.
 
 HALF channels widen to `f32` exactly, FLOAT copies bit-for-bit, UINT
 converts (exact below 2^24). Any other channel set (depth-only `Z`,
-AOV layers, a file whose base layer is empty) is `Error::Unsupported`
+AOV layers, alpha alone, a file whose base layer is empty) is `Error::Unsupported`
 naming the channels, as are deep parts; channels outside the view are
 ignored. All of it stays reachable through the depth API, which keeps
 its names: `parse_exr -> ExrPart` (every channel as a named `f32`
@@ -124,7 +137,7 @@ packed plane, colour signal attached — with the options `part`,
 `part_name` and `layer`. The encoder accepts the same three formats
 natively and `Rgb24` / `Rgba` by the raw-path rule (`b / 255`,
 `input_gamma` to linearise); its options schema is `pixel_type`,
-`compression`, `colour`, `chroma_sampling`, `layer`, `tile_size`,
+`compression`, `colour`, `chroma_sampling`, `luma_chroma_rounding`, `layer`, `tile_size`,
 `levels`, `line_order`, `input_gamma`. One packet is one single-part
 file. The frame bridge is `From<ExrImage> for VideoFrame` and
 `ExrImage::from_video_frame(&VideoFrame, &CodecParameters) ->
@@ -198,8 +211,12 @@ lossy by design.
 PixelType` (`Float` default, `Half`; `Uint` is `Unsupported` here — use
 `encode_exr_scanline`), `compression: Compression` (`Zip` default; any of
 the ten schemes), `colour: ColourLayout` (`Rgb` / `LumaChroma`),
-`chroma_sampling: u32` (`2`; `1` = full-resolution chroma, exact round
-trip; the image extents must be multiples of it), `layer: String`
+`chroma_sampling: u32` (`2`, the layout conforming readers accept —
+decimated with the luminance/chroma writer's 27-tap filter; `1` =
+full-resolution chroma; the data window's origin and extents must be
+multiples of it), `luma_chroma_rounding: bool` (`true`: stored `Y` keeps
+7 and `RY` / `BY` 5 mantissa bits, as the reference writer stores them;
+`false` keeps full binary16), `layer: String`
 (prefix for the written channel names), `tile_size: u32` (`0` =
 scanline; else `N × N` tiles), `levels: LevelMode` (`One` / `Mipmap` /
 `Ripmap`, box-filtered, tiled only), `line_order: LineOrder`
@@ -291,8 +308,8 @@ DWA / PIZ reservation caps — exercised by the fuzz targets below.
 | Multi-part EXR (scanline parts)     | parse + write                                    |
 | Multi-part EXR (flat tiled parts)   | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware |
 | Sub-sampled channels (`xSampling` / `ySampling != 1`) | parse + write — lossless AND lossy (PXR24 / B44 / B44A) scanline paths; luminance/chroma (`Y` + 2×2 `BY`/`RY`) layouts validated bit-exact against a reference EXR validator binary. Note: the reference reader requires sub-sampled data-window extents divisible by the sampling factor; our reader additionally accepts ceil-sized odd extents |
-| Layered / multi-view channel names (`diffuse.R`, `left.R` / `right.R`, `a.b.c.Y` …) | **typed enumeration + framework mapping** — `layers` module groups the channel list by prefix (arbitrary depth), classifies each layer (RGBA / RGB / luma-chroma / gray / depth / other) and tags views from `multiView`; `DecodeOptions::layer` (and the registry `layer` option) selects a layer (or the default view) and `EncodeOptions::layer` writes prefixed names. Validated against reference-produced multi-view files |
-| Luminance/chroma colour (`Y` + `RY` + `BY` ↔ RGB) | **decode + encode** (`luma_chroma` module + the colour view) — `RY = (R − Y) / Y`, `BY = (B − Y) / Y` with luminance weights derived from the `chromaticities` attribute (BT.709 when absent); chroma reconstructed bilinearly from any `(xSampling, ySampling)`, reduced with a centred tent filter. Validated against a reference EXR tool (opaque process): chroma ratios and luminance match to HALF precision on constant-chroma images (filter-independent), smooth gradients agree to a colour-level tolerance; our files are accepted by the reference |
+| Layered / multi-view channel names (`diffuse.R`, `right.R`, `spec.left.Y`, `a.b.c.Y` …) | **typed enumeration + framework mapping** — `layers` module groups the channel list by prefix (arbitrary depth, base = text after the last `.`), classifies each layer by the colour view's rules and tags views from `multiView`: a channel's view is the last prefix component when listed (`channel_view`; un-prefixed = the default view, `right.spec.G` = none). `DecodeOptions::layer` (and the registry `layer` option) matches the full prefix literally, except that the default view's name selects the un-prefixed set; `EncodeOptions::layer` writes prefixed names. The traced multi-view fixture decodes bit-exactly under every layer name and the per-channel view classification matches the reference's |
+| Luminance/chroma colour (`Y` + `RY` + `BY` ↔ RGB) | **decode + encode, bit-exact to the reference RGBA interface** (`luma_chroma` module + the colour view) — decode: chromaticities-derived weights, 27-tap reconstruction, conversion, diagonal-neighbour saturation limiting (9/9 traced fixtures bit-exact). Encode (`ColourLayout::LumaChroma`): binary16 `Y`, per-pixel binary16 ratios, separable 27-tap decimation at even positions, 7-bit `Y` / 5-bit ratio mantissas — the reference-written fixture's stored `Y` / `RY` / `BY` planes reproduced 384 / 384. Sampling factors other than 1×1 / 2×2 fall back to bilinear / tent filters. Raw planes stay reachable as stored through `parse_exr` |
 | Deep scanline (`deepscanline`)      | parse + write — NONE / RLE / ZIPS; single- and multi-part |
 | Deep tiled (`deeptile`)             | parse + write — ONE_LEVEL + MIPMAP_LEVELS + RIPMAP_LEVELS, edge-tile aware; single- and multi-part |
 | Multi-part **mixed** flat + deep    | parse + write — one file may freely mix `scanlineimage`, `tiledimage` (ONE_LEVEL / MIPMAP / RIPMAP), `deepscanline`, and `deeptile` (ONE_LEVEL / MIPMAP / RIPMAP) in any order. Multi-level flat **and deep** tiled parts now carry their full pyramid/grid inline (`MultipartMixedPart::DeepTiledMipmap` / `DeepTiledRipmap`, surfaced as `MultipartMixedImage::DeepTiledMipmap` / `DeepTiledRipmap`). Flat `scanlineimage` and `tiledimage` parts (ONE_LEVEL, MIPMAP, RIPMAP) also carry `PXR24` / `B44` / `B44A` (alongside NONE / ZIP / ZIPS / RLE), reusing the shared block builders + decoders; **deep** parts (scanline, ONE_LEVEL / MIPMAP / RIPMAP tiled) stay NONE / ZIPS / RLE |
@@ -321,11 +338,10 @@ DWA / PIZ reservation caps — exercised by the fuzz targets below.
   `ExrPart::layers`).
 * Tiled contract output keeps the data and display windows at the
   origin; `encode_all` writes scanline INCREASING_Y parts at the origin.
-* The luminance/chroma reconstruction uses bilinear chroma
-  interpolation (decode) and a centred tent reduction (encode); a
-  reference EXR reader applies a different filter, so colour-level
-  agreement is to a tolerance (tight in the interior, loosest at the
-  image edges) while the container level stays bit-exact.
+* Luminance/chroma channels are modelled on HALF data; FLOAT `Y` /
+  `RY` / `BY` go through the same binary16 model (the reference RGBA
+  interface's output type). A layer name that selects no channel is a
+  caller error (`InvalidData`) rather than an empty frame.
 
 ## Benchmarks
 

@@ -9,10 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Luminance/chroma (`Y` / `RY` / `BY`) decode reproducing the reference RGBA interface bit-exactly: luminance weights solved from `chromaticities` in binary64 and rounded to binary32, the separable 27-tap chroma reconstruction filter (`reconstruct_chroma_2x2`, `RECONSTRUCTION_TAPS`; horizontal first, binary16 between passes, edge replication), the ratio conversion, and the diagonal-neighbour saturation limiter. Nine traced fixtures (`tests/fixtures/ryby/`) decode bit-exactly, 11 776 / 11 776 samples.
+- Luminance/chroma encode matching the reference writer: binary16 `Y`, per-pixel binary16 ratios, separable 27-tap decimation (`decimate_chroma_2x2`, `DECIMATION_TAPS`), 7-bit `Y` / 5-bit ratio mantissa rounding (`round_half_mantissa`, `Y_MANTISSA_BITS`, `CHROMA_MANTISSA_BITS`); the traced writer fixture's stored planes reproduced 384 / 384. `EncodeOptions::luma_chroma_rounding` / `with_luma_chroma_rounding` (registry option `luma_chroma_rounding`) and `rgb_to_luma_chroma_with` turn the mantissa rounding off.
+- `channel_view` / `default_view`: per-channel `multiView` classification (the view is the last prefix component when listed).
+- `LayerKind::PartialRgb`: one or two of `R` / `G` / `B`, decoded with the missing components as `0`.
 - `new(..)` (every field, in declaration order) on every newly `#[non_exhaustive]` record listed below, so callers keep a way to build them.
 
 ### Changed
 
+- The colour view follows the reference channel-presence rules: luminance channels win over `R` / `G` / `B`; `Y` + `RY` (or `BY`) alone decodes with the missing ratio `0`; `RY` / `BY` without `Y` decode with `Y = 0.5`; a partial RGB triple decodes with zeros. `LayerKind` classification follows the same rules.
+- `rgb_to_luma_chroma` / `luma_chroma_to_rgb` and the `LumaChroma` encode / decode paths use the traced filters, rounding and saturation limiting instead of the earlier bilinear / tent approximation (still used for sampling factors other than 1×1 / 2×2), and the BT.709 weights are now the exact chromaticities-derived binary32 values.
+- `find_layer` / `DecodeOptions::layer`: with a `multiView` header the default view's name always selects the un-prefixed set (a literal `<default>.*` layer is ignored); layer views come from the last prefix component only (`right.spec` is in no view).
+- `encode` refuses sub-sampled chroma over a data window whose origin is not a multiple of the sampling factor.
 - `#[non_exhaustive]` on the growable enums `LayerKind`, `MultipartMixedPart`, `MultipartMixedImage`, `Compression`, `AttributeValue`. `PixelType` (uint / half / float), `LineOrder` and `EnvMap` stay exhaustive: the file format fixes their value sets.
 - `#[non_exhaustive]` on the records `TiledLevel`, `MultilevelTiledImage`, `MultilevelTiledPart`, `DeepExrImage`, `DeepScanlinePart`, `DeepScanlineInput`, `MultipartDeepScanlinePart`, `DeepTiledInput`, `DeepTiledImage`, `MultipartDeepTiledPart`, `DeepTiledPart`, `DeepMipmapTiledLevelInput`, `DeepMipmapTiledInput`, `DeepTiledMipmapLevel`, `DeepMipmapTiledImage`, `DeepRipmapTiledLevelInput`, `DeepRipmapTiledInput`, `DeepTiledRipmapCell`, `DeepRipmapTiledImage`, `MultipartDeepMipmapTiledPart`, `DeepMipmapTiledPart`, `MultipartDeepRipmapTiledPart`, `DeepRipmapTiledPart`, `VersionField`, `ParsedHeader`, `ExrLayer`, `ChromaPlane`, `RgbPlanes`, `LumaChromaPlanes`, `MipmapLevel`, `RipmapPyramid`, `MultipartScanlinePart`, `MultipartMipmapTiledPart`, `MultipartRipmapTiledPart`, `MultipartTiledPart`, `ExrPlane`, `ExrPart`, `Channel`, `Preview`, `Attribute`. The plain value types `Box2i`, `Box2f`, `Chromaticities`, `Timecode`, `Keycode` and `TileDesc` stay as they are.
 

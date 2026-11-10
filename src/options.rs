@@ -226,8 +226,16 @@ pub struct EncodeOptions {
     pub colour: ColourLayout,
     /// `RY` / `BY` sampling factor (both axes) for
     /// [`ColourLayout::LumaChroma`]; `1` keeps the chroma at full
-    /// resolution. Ignored for [`ColourLayout::Rgb`].
+    /// resolution. Ignored for [`ColourLayout::Rgb`]. `2` (the default)
+    /// is the layout conforming readers accept: chroma decimated with
+    /// the luminance/chroma filter ([`crate::luma_chroma`]); the data
+    /// window's origin and extents must then be even.
     pub chroma_sampling: u32,
+    /// Under [`ColourLayout::LumaChroma`], round the stored samples'
+    /// binary16 mantissas — `Y` to 7 bits, `RY` / `BY` to 5 bits — the way the luminance/chroma
+    /// writer stores them; `true` by default. `false` keeps full
+    /// binary16 precision.
+    pub luma_chroma_rounding: bool,
     /// Layer prefix for every written channel (`diffuse` → `diffuse.R`
     /// …); empty writes unprefixed names.
     pub layer: String,
@@ -252,6 +260,7 @@ impl Default for EncodeOptions {
             compression: Compression::Zip,
             colour: ColourLayout::Rgb,
             chroma_sampling: 2,
+            luma_chroma_rounding: true,
             layer: String::new(),
             tile_size: 0,
             levels: LevelMode::One,
@@ -290,6 +299,12 @@ impl EncodeOptions {
     /// Set the chroma sampling factor (≥ 1).
     pub fn with_chroma_sampling(mut self, chroma_sampling: u32) -> Self {
         self.chroma_sampling = chroma_sampling;
+        self
+    }
+
+    /// Turn the luminance/chroma mantissa rounding on or off.
+    pub fn with_luma_chroma_rounding(mut self, luma_chroma_rounding: bool) -> Self {
+        self.luma_chroma_rounding = luma_chroma_rounding;
         self
     }
 
@@ -414,6 +429,12 @@ mod tests {
         assert_eq!(e.compression, Compression::Zip);
         assert_eq!(e.colour, ColourLayout::Rgb);
         assert_eq!(e.chroma_sampling, 2);
+        assert!(e.luma_chroma_rounding);
+        assert!(
+            !e.clone()
+                .with_luma_chroma_rounding(false)
+                .luma_chroma_rounding
+        );
         assert_eq!(e.tile_size, 0);
         assert_eq!(e.levels, LevelMode::One);
         assert_eq!(e.line_order, LineOrder::IncreasingY);

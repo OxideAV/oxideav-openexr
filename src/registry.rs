@@ -23,7 +23,7 @@
 //! * `From<ExrError> for oxideav_core::Error` and the
 //!   `CodecOptionsStruct` schemas for [`DecodeOptions`] (`part`, `layer`,
 //!   `part_name`) and [`EncodeOptions`] (`pixel_type`, `compression`,
-//!   `colour`, `chroma_sampling`, `layer`, `tile_size`, `levels`,
+//!   `colour`, `chroma_sampling`, `luma_chroma_rounding`, `layer`, `tile_size`, `levels`,
 //!   `line_order`, `input_gamma`).
 //!
 //! # Pixel formats
@@ -421,6 +421,13 @@ impl CodecOptionsStruct for EncodeOptions {
                    the frame width and height must be multiples of it",
         },
         OptionField {
+            name: "luma_chroma_rounding",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(true),
+            help: "colour=luma_chroma: round stored Y to 7 and RY/BY to 5 mantissa bits; false \
+                   keeps full binary16 precision",
+        },
+        OptionField {
             name: "layer",
             kind: OptionKind::String,
             default: OptionValue::String(String::new()),
@@ -468,6 +475,7 @@ impl CodecOptionsStruct for EncodeOptions {
                 }
             }
             "tile_size" => self.tile_size = value.as_u32()?,
+            "luma_chroma_rounding" => self.luma_chroma_rounding = value.as_bool()?,
             "levels" => {
                 self.levels = match value.as_str()? {
                     "one" => LevelMode::One,
@@ -905,18 +913,34 @@ mod tests {
             matches!(err, oxideav_core::Error::Unsupported(_)),
             "{err:?}"
         );
-        // Partial colour triple (R + G, no B).
+        // A partial colour triple (R + G, no B) reads the missing
+        // component as 0, a lone chroma channel its partner as 0 — the
+        // reference channel-presence rules.
         let chs = vec![mk("G", 1), mk("R", 1)];
         let attrs = scanline_attributes(w, h, &chs, Compression::None);
-        let bytes = encode_exr_scanline(w, h, &chs, &[&z, &z], Compression::None, attrs).unwrap();
-        assert!(matches!(
-            decode_frame(bytes, None).unwrap_err(),
-            oxideav_core::Error::Unsupported(_)
-        ));
-        // Lone chroma channel without its partner.
+        let two = [2.0f32, 2.0];
+        let bytes = encode_exr_scanline(w, h, &chs, &[&z, &two], Compression::None, attrs).unwrap();
+        let vf = decode_frame(bytes, None).unwrap();
+        assert_eq!(
+            [
+                f32_at(&vf, 1, 3, 0),
+                f32_at(&vf, 1, 3, 1),
+                f32_at(&vf, 1, 3, 2)
+            ],
+            [2.0, 2.0, 0.0]
+        );
         let chs = vec![mk("RY", 1), mk("Y", 1)];
         let attrs = scanline_attributes(w, h, &chs, Compression::None);
-        let bytes = encode_exr_scanline(w, h, &chs, &[&z, &z], Compression::None, attrs).unwrap();
+        let ry = [1.0f32, 1.0];
+        let bytes = encode_exr_scanline(w, h, &chs, &[&ry, &z], Compression::None, attrs).unwrap();
+        let vf = decode_frame(bytes, None).unwrap();
+        // Y = 2, RY = 1, BY = 0 → R = 4, B = 2.
+        assert_eq!(f32_at(&vf, 1, 3, 0), 4.0);
+        assert_eq!(f32_at(&vf, 1, 3, 2), 2.0);
+        // Alpha alone has no colour view.
+        let chs = vec![mk("A", 1)];
+        let attrs = scanline_attributes(w, h, &chs, Compression::None);
+        let bytes = encode_exr_scanline(w, h, &chs, &[&z], Compression::None, attrs).unwrap();
         assert!(matches!(
             decode_frame(bytes, None).unwrap_err(),
             oxideav_core::Error::Unsupported(_)
@@ -934,10 +958,15 @@ mod tests {
 
     #[test]
     fn decoder_reconstructs_rgb_from_luma_chroma() {
-        use crate::luma_chroma::{BT709_CHROMATICITIES, luminance_weights, rgb_to_luma_chroma};
+        use crate::luma_chroma::{
+            BT709_CHROMATICITIES, luminance_weights, rgb_to_luma_chroma_with,
+        };
+        let rgb_to_luma_chroma =
+            |w, h, rgb, wts, s| rgb_to_luma_chroma_with(w, h, rgb, wts, s, false);
         let (w, h) = (6u32, 4u32);
         let n = (w * h) as usize;
-        // Constant chroma so the 2×2 reduction is exact everywhere.
+        // Constant chroma: the 2×2 decimation / reconstruction filters
+        // reproduce it up to binary16 rounding.
         let k = |i: usize| 0.1 + (i as f32) * 0.2;
         let r: Vec<f32> = (0..n).map(|i| 0.7 * k(i)).collect();
         let g: Vec<f32> = (0..n).map(|i| 0.4 * k(i)).collect();
@@ -968,7 +997,7 @@ mod tests {
             for (c, expect) in [r[px], g[px], b[px]].iter().enumerate() {
                 let got = f32_at(&vf, px, 3, c);
                 assert!(
-                    (got - expect).abs() <= 1e-5 * (1.0 + expect.abs()),
+                    (got - expect).abs() <= 4e-3 * (1.0 + expect.abs()),
                     "px{px} c{c} {got} vs {expect}"
                 );
             }
@@ -990,14 +1019,14 @@ mod tests {
         let vf = decode_frame(bytes, None).unwrap();
         assert_eq!(vf.planes[0].stride, w as usize * 16);
         for px in 0..n {
-            assert!((f32_at(&vf, px, 4, 0) - r[px]).abs() <= 1e-5 * (1.0 + r[px]));
+            assert!((f32_at(&vf, px, 4, 0) - r[px]).abs() <= 4e-3 * (1.0 + r[px]));
             assert_eq!(f32_at(&vf, px, 4, 3), a[px]);
         }
     }
 
     #[test]
     fn decoder_honours_the_chromaticities_attribute_for_luma_chroma() {
-        use crate::luma_chroma::{luminance_weights, rgb_to_luma_chroma};
+        use crate::luma_chroma::{luminance_weights, rgb_to_luma_chroma_with};
         use crate::types::Chromaticities;
         let wide = Chromaticities {
             red_x: 0.7347,
@@ -1015,7 +1044,7 @@ mod tests {
         let g: Vec<f32> = (0..n).map(|i| 0.9 - 0.04 * i as f32).collect();
         let b: Vec<f32> = (0..n).map(|i| 0.1 + 0.08 * i as f32).collect();
         let wts = luminance_weights(&wide);
-        let yc = rgb_to_luma_chroma(w, h, [&r, &g, &b], wts, (1, 1)).unwrap();
+        let yc = rgb_to_luma_chroma_with(w, h, [&r, &g, &b], wts, (1, 1), false).unwrap();
         let mk = |name: &str| Channel {
             name: name.to_string(),
             pixel_type: PixelType::Float,
@@ -1041,10 +1070,10 @@ mod tests {
         let vf = decode_frame(bytes, None).unwrap();
         for (px, &expect) in g.iter().enumerate() {
             // G depends on the weights: BT.709 weights would be off by
-            // far more than the tolerance here.
+            // far more than the (binary16-storage) tolerance here.
             let got = f32_at(&vf, px, 3, 1);
             assert!(
-                (got - expect).abs() <= 1e-5 * (1.0 + expect),
+                (got - expect).abs() <= 4e-3 * (1.0 + expect),
                 "px{px} G {got} vs {expect}"
             );
         }
@@ -1388,8 +1417,8 @@ mod tests {
     fn encoder_luma_chroma_layout_writes_y_ry_by_and_round_trips() {
         let (w, h) = (8u32, 4u32);
         let n = (w * h) as usize;
-        // Constant chroma: the 2×2 reduction is exact so the round
-        // trip is tight.
+        // Constant chroma: the filters reproduce it, so the round trip
+        // is bounded by the stored precision (7-bit Y, 5-bit ratios).
         let base = [0.7f32, 0.45, 0.15];
         let value = |px: usize, c: usize| base[c] * (0.2 + px as f32 * 0.1);
         let src = packed_frame(w, h, 3, value);
@@ -1416,7 +1445,7 @@ mod tests {
                 let expect = value(px, c);
                 let got = f32_at(&vf, px, 3, c);
                 assert!(
-                    (got - expect).abs() <= 1e-5 * (1.0 + expect),
+                    (got - expect).abs() <= 2e-2 * (1.0 + expect),
                     "px{px} c{c} {got} vs {expect}"
                 );
             }
@@ -1449,7 +1478,7 @@ mod tests {
                 half_to_f32(f32_to_half(value4(px, 3)))
             );
             let expect = value(px, 0);
-            assert!((f32_at(&vf, px, 4, 0) - expect).abs() <= 2e-3 * (1.0 + expect));
+            assert!((f32_at(&vf, px, 4, 0) - expect).abs() <= 2e-2 * (1.0 + expect));
         }
         // Gray frames write Y under either layout.
         let src = packed_frame(w, h, 1, |px, _| px as f32);
@@ -1485,7 +1514,7 @@ mod tests {
             matches!(err, oxideav_core::Error::InvalidData(_)),
             "{err:?}"
         );
-        // … and chroma_sampling=1 round-trips any image exactly-ish.
+        // … and chroma_sampling=1 round-trips any image within the stored precision.
         let src = packed_frame(w, h, 3, value);
         let bytes = encode_frame(
             src,
@@ -1505,7 +1534,7 @@ mod tests {
         for px in 0..n {
             for c in 0..3 {
                 let expect = value(px, c);
-                assert!((f32_at(&vf, px, 3, c) - expect).abs() <= 1e-5 * (1.0 + expect));
+                assert!((f32_at(&vf, px, 3, c) - expect).abs() <= 2e-2 * (1.0 + expect));
             }
         }
         // 4×4 chroma on a 8×4 frame.
@@ -1522,6 +1551,22 @@ mod tests {
         let img = parse_exr(&bytes).unwrap();
         assert_eq!(img.channels[0].x_sampling, 4);
         assert_eq!(img.planes[0].samples.len(), 2);
+        // Mantissa rounding on (default) vs off.
+        let low_bits = |opts: &[(&str, &str)]| {
+            let src = packed_frame(8, 4, 3, |px, c| 0.1 + px as f32 * 0.0123 + c as f32 * 0.2);
+            let bytes = encode_frame(src, 8, 4, PixelFormat::RgbF32Le, opts).unwrap();
+            let img = parse_exr(&bytes).unwrap();
+            let y = img.channels.iter().position(|c| c.name == "Y").unwrap();
+            img.planes[y]
+                .samples
+                .iter()
+                .any(|&v| f32_to_half(v) & 0x7 != 0)
+        };
+        assert!(!low_bits(&[("colour", "luma_chroma")]));
+        assert!(low_bits(&[
+            ("colour", "luma_chroma"),
+            ("luma_chroma_rounding", "false")
+        ]));
         // Bad option values.
         let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
         params.options.insert("chroma_sampling", "0");

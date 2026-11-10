@@ -23,8 +23,10 @@
 //! 2. **Reconstruction** (tolerance) — on a smooth gradient our decode
 //!    of the reference-written `Y RY BY` must match the reference's RGB
 //!    output of the RGB file to a colour-level tolerance. The two
-//!    sides use different chroma filters (ours is bilinear / tent), so
-//!    this is a tolerance check, tightest in the interior.
+//!    sides decimate different images (the reference's RGB output went
+//!    through a primaries conversion), so this is a tolerance check,
+//!    tightest in the interior; the bit-exact reconstruction is pinned
+//!    by `tests/luma_chroma_fixtures.rs`.
 //! 3. **Acceptance** — the reference accepts our luminance/chroma
 //!    files (the tool exits 0 and `exrheader` reports the channels).
 //!
@@ -36,7 +38,7 @@ use std::process::Command;
 use oxideav_openexr::{
     Attribute, AttributeValue, BT709_CHROMATICITIES, Box2i, Channel, ChromaPlane, Compression,
     ExrPart, LineOrder, PixelType, encode_exr_scanline, luma_chroma_to_rgb, luminance_weights,
-    luminance_weights_of, parse_exr, rgb_to_luma_chroma,
+    luminance_weights_of, parse_exr, rgb_to_luma_chroma, rgb_to_luma_chroma_with,
 };
 
 fn tool_available(name: &str) -> bool {
@@ -192,13 +194,15 @@ fn reference_chroma_ratios_match_ours_for_constant_chroma() {
     let wa = luminance_weights_of(&ya.attributes);
     assert!(wa[2] < 0.0, "ACES blue weight is negative: {wa:?}");
 
-    // Our ratios from the reference's RGB output (full resolution).
-    let mine = rgb_to_luma_chroma(
+    // Our ratios from the reference's RGB output (full resolution, no
+    // stored-value mantissa rounding: the reference rounds its own).
+    let mine = rgb_to_luma_chroma_with(
         w,
         h,
         [plane(&ra, "R"), plane(&ra, "G"), plane(&ra, "B")],
         wa,
         (1, 1),
+        false,
     )
     .unwrap();
     let (ry_ref, by_ref, y_ref) = (plane(&ya, "RY"), plane(&ya, "BY"), plane(&ya, "Y"));
@@ -207,15 +211,15 @@ fn reference_chroma_ratios_match_ours_for_constant_chroma() {
         for jx in 0..pw {
             let j = jy * pw + jx;
             let i = (2 * jy) * w as usize + 2 * jx;
-            // HALF output: ~3 significant decimal digits.
+            // Reduced-mantissa HALF output: within a 1/64 relative step.
             assert!(
-                (ry_ref[j] - mine.ry[i]).abs() <= 2e-3 * (1.0 + mine.ry[i].abs()),
+                (ry_ref[j] - mine.ry[i]).abs() <= 1e-2 * (1.0 + mine.ry[i].abs()),
                 "RY sample {j}: reference {} vs ours {}",
                 ry_ref[j],
                 mine.ry[i]
             );
             assert!(
-                (by_ref[j] - mine.by[i]).abs() <= 2e-3 * (1.0 + mine.by[i].abs()),
+                (by_ref[j] - mine.by[i]).abs() <= 1e-2 * (1.0 + mine.by[i].abs()),
                 "BY sample {j}: reference {} vs ours {}",
                 by_ref[j],
                 mine.by[i]
@@ -224,12 +228,13 @@ fn reference_chroma_ratios_match_ours_for_constant_chroma() {
     }
     for (i, (&got, &expect)) in y_ref.iter().zip(&mine.y).enumerate() {
         assert!(
-            (got - expect).abs() <= 2e-3 * (1.0 + expect.abs()),
+            (got - expect).abs() <= 5e-3 * (1.0 + expect.abs()),
             "Y px{i}: reference {got} vs ours {expect}"
         );
     }
-    // Full decode of the reference-written file equals the reference's
-    // RGB output (constant chroma ⇒ no filter dependence).
+    // Full decode of the reference-written file matches the reference's
+    // RGB output up to the luminance/chroma storage loss (constant
+    // chroma ⇒ no filter dependence).
     let dec = luma_chroma_to_rgb(
         w,
         h,
@@ -245,8 +250,9 @@ fn reference_chroma_ratios_match_ours_for_constant_chroma() {
             ("G", dec.g[i], plane(&ra, "G")[i]),
             ("B", dec.b[i], plane(&ra, "B")[i]),
         ] {
+            // The Y RY BY file is lossy (reduced-mantissa storage).
             assert!(
-                (got - exp).abs() <= 4e-3 * (1.0 + exp.abs()),
+                (got - exp).abs() <= 1.5e-2 * (1.0 + exp.abs()),
                 "{name} px{i}: ours {got} vs reference {exp}"
             );
         }

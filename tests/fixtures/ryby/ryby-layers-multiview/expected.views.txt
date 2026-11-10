@@ -1,0 +1,20 @@
+default view: 'left'
+  channel A                -> view 'left'
+  channel BY               -> view 'left'
+  channel RY               -> view 'left'
+  channel Y                -> view 'left'
+  channel diffuse.R        -> view ''
+  channel left.Y           -> view 'left'
+  channel right.A          -> view 'right'
+  channel right.BY         -> view 'right'
+  channel right.RY         -> view 'right'
+  channel right.Y          -> view 'right'
+  channel spec.left.BY     -> view 'left'
+  channel spec.left.RY     -> view 'left'
+  channel spec.left.Y      -> view 'left'
+  channel spec.right.BY    -> view 'right'
+  channel spec.right.RY    -> view 'right'
+  channel spec.right.Y     -> view 'right'
+  in view left: A BY RY Y left.Y spec.left.BY spec.left.RY spec.left.Y
+  in view right: right.A right.BY right.RY right.Y spec.right.BY spec.right.RY spec.right.Y
+  in no view: diffuse.R

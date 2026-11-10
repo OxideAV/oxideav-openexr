@@ -143,12 +143,15 @@ pub use image::{
     Plane, RgbImage, RgbaImage,
 };
 pub use layers::{
-    ExrLayer, LayerKind, enumerate_layers, find_layer, multi_view, split_channel_name,
+    ExrLayer, LayerKind, channel_view, default_view, enumerate_layers, find_layer, multi_view,
+    split_channel_name,
 };
 pub use luma_chroma::{
-    BT709_CHROMATICITIES, ChromaPlane, LumaChromaPlanes, RgbPlanes, chromaticities_of,
+    BT709_CHROMATICITIES, CHROMA_MANTISSA_BITS, ChromaPlane, DECIMATION_TAPS, LumaChromaPlanes,
+    RECONSTRUCTION_TAPS, RgbPlanes, Y_MANTISSA_BITS, chromaticities_of, decimate_chroma_2x2,
     downsample_tent, luma_chroma_to_rgb, luminance_weights, luminance_weights_of,
-    rgb_to_luma_chroma, upsample_bilinear,
+    reconstruct_chroma_2x2, rgb_to_luma_chroma, rgb_to_luma_chroma_with, round_half_mantissa,
+    upsample_bilinear,
 };
 #[allow(deprecated)]
 pub use mipmap_encoder::{
