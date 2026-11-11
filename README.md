@@ -377,8 +377,9 @@ long-name flag whenever a name exceeds 31 bytes, the deep flag exactly
 when a part is deep, and never the single-part-tiled flag on a
 multi-part file. `encode_exr_multipart_mixed` mixes `scanlineimage`,
 `tiledimage`, `deepscanline` and `deeptile` parts freely; black-box
-readers read the headers and the pixels of every such file in the
-property test (`tests/multipart_layout_roundtrip.rs`).
+readers read the headers (two tools) and the pixels (a third, which
+re-writes every chunk) of every such file in the property test
+(`tests/multipart_layout_roundtrip.rs`).
 
 **Repacking.** `split_parts(bytes)` returns every part as a single-part
 file (flat or deep, scanline or tiled; `SplitOptions::strip_part_attributes`
@@ -422,9 +423,11 @@ Scanline blocks and tiles are independent, so reading and writing fan
 them out over a caller-chosen worker budget: `DecodeOptions::threads` /
 `EncodeOptions::threads` on the contract API, the framework's
 `ExecutionContext` on the registry decoder / encoder
-(`set_execution_context`), or `with_threads(n, || ..)` around any
-depth-API call (`parse_exr`, `encode_exr_scanline`, `encode_exr_tiled*`,
-…). The budget is `1` unless raised; **decoded samples, written bytes
+(`set_execution_context`), or `with_threads(n, || ..)` around a
+depth-API call (`parse_exr`, `parse_exr_tiled_multilevel`,
+`encode_exr_scanline`, `encode_exr_tiled*`; the `parse_exr_multipart*`
+/ deep readers and the `encode_exr_multipart*` / deep writers run
+serially). The budget is `1` unless raised; **decoded samples, written bytes
 and the error on malformed input are the same at every budget**
 (`tests/thread_budget.rs`: every scheme x scanline / tiled / mip-map /
 rip-map x HALF / FLOAT, sub-sampled chroma, multi-part files, damaged
@@ -435,7 +438,9 @@ and truncated files, budgets 1 / 2 / 3 / 8).
 - decode, scanline: bands of rows (aligned to the block height and the
   channels' vertical sampling) are decoded by workers and stitched;
 - decode, tiles: each tile is decoded by a worker and stitched in table
-  order; the packed colour view is interleaved in bands;
+  order (`parse_exr` and the every-level reader
+  `parse_exr_tiled_multilevel` alike); the packed colour view is
+  interleaved in bands;
 - a part of a multi-part file is lifted out as a single-part file and
   takes the same path, so `decode_with(part = k)` decodes only part `k`
   (it used to decode every part and keep one).

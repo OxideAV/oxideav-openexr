@@ -1911,91 +1911,168 @@ pub fn parse_exr_tiled_multilevel(bytes: &[u8]) -> Result<MultilevelTiledImage> 
         pos += 8;
     }
 
-    // For each tile chunk: read (tx, ty, lvlx, lvly, size, payload),
-    // locate the matching level slot by (lvlx, lvly), then scatter into
-    // that level's planes using the level's dims as the row stride.
+    // For each tile chunk: read (tx, ty, lvlx, lvly, size, payload) and
+    // locate the matching level slot by (lvlx, lvly) — in table order,
+    // up to the first unreadable chunk.
+    struct LevelTile<'a> {
+        index: usize,
+        level: usize,
+        x0: u32,
+        y0: u32,
+        tw: usize,
+        th: usize,
+        payload: &'a [u8],
+    }
+    let mut tiles: Vec<LevelTile<'_>> = Vec::with_capacity(offsets.len());
+    let mut header_error: Option<ExrError> = None;
     for (tile_idx, &tile_off) in offsets.iter().enumerate() {
-        // `tile_off` is an untrusted u64 offset-table entry cast to usize;
-        // guard the 20-byte tile-header bounds check against usize overflow.
-        let tile_hdr_end = tile_off
-            .checked_add(20)
-            .filter(|&e| e <= bytes.len())
-            .ok_or_else(|| {
-                ExrError::invalid(format!("tile {tile_idx} offset {tile_off} past EOF"))
-            })?;
-        let tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
-        let ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
-        let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
-        let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
-        let payload_size =
-            i32::from_le_bytes(bytes[tile_off + 16..tile_hdr_end].try_into().unwrap());
-        if payload_size < 0 || tx < 0 || ty < 0 || lvl_x < 0 || lvl_y < 0 {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} bad header: tx={tx} ty={ty} lvlx={lvl_x} lvly={lvl_y} size={payload_size}"
-            )));
-        }
-        let pl_start = tile_hdr_end;
-        let pl_end = pl_start.checked_add(payload_size as usize).ok_or_else(|| {
-            ExrError::invalid(format!(
-                "tile {tile_idx} payload size {payload_size} overflows address space"
-            ))
-        })?;
-        if pl_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} payload runs past EOF"
-            )));
-        }
-        let payload = &bytes[pl_start..pl_end];
-
-        // Find the level slot by (lvlx, lvly). For ONE_LEVEL there's
-        // only one entry and lvl_x/lvl_y must both be 0; for MIPMAP
-        // lvl_x == lvl_y; for RIPMAP they're independent.
-        let level = levels
-            .iter_mut()
-            .find(|l| l.level_x as i32 == lvl_x && l.level_y as i32 == lvl_y)
-            .ok_or_else(|| {
+        let read = || -> Result<LevelTile<'_>> {
+            // `tile_off` is an untrusted u64 offset-table entry cast to usize;
+            // guard the 20-byte tile-header bounds check against usize overflow.
+            let tile_hdr_end = tile_off
+                .checked_add(20)
+                .filter(|&e| e <= bytes.len())
+                .ok_or_else(|| {
+                    ExrError::invalid(format!("tile {tile_idx} offset {tile_off} past EOF"))
+                })?;
+            let tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
+            let ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
+            let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
+            let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
+            let payload_size =
+                i32::from_le_bytes(bytes[tile_off + 16..tile_hdr_end].try_into().unwrap());
+            if payload_size < 0 || tx < 0 || ty < 0 || lvl_x < 0 || lvl_y < 0 {
+                return Err(ExrError::invalid(format!(
+                    "tile {tile_idx} bad header: tx={tx} ty={ty} lvlx={lvl_x} lvly={lvl_y} size={payload_size}"
+                )));
+            }
+            let pl_start = tile_hdr_end;
+            let pl_end = pl_start.checked_add(payload_size as usize).ok_or_else(|| {
                 ExrError::invalid(format!(
-                    "tile {tile_idx} carries unknown level ({lvl_x}, {lvl_y})"
+                    "tile {tile_idx} payload size {payload_size} overflows address space"
                 ))
             })?;
+            if pl_end > bytes.len() {
+                return Err(ExrError::invalid(format!(
+                    "tile {tile_idx} payload runs past EOF"
+                )));
+            }
+            let payload = &bytes[pl_start..pl_end];
 
-        // `tx`/`ty` come straight off the wire; reject negatives before
-        // the `as u32` multiply (a hostile index must not overflow it),
-        // then bound against this level's dimensions.
-        let x0 = u32::try_from(tx)
-            .ok()
-            .and_then(|v| v.checked_mul(tdesc.x_size));
-        let y0 = u32::try_from(ty)
-            .ok()
-            .and_then(|v| v.checked_mul(tdesc.y_size));
-        let (Some(x0), Some(y0)) = (x0, y0) else {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} carries hostile tile index ({tx},{ty})"
-            )));
+            // Find the level slot by (lvlx, lvly). For ONE_LEVEL there's
+            // only one entry and lvl_x/lvl_y must both be 0; for MIPMAP
+            // lvl_x == lvl_y; for RIPMAP they're independent.
+            let level_idx = levels
+                .iter()
+                .position(|l| l.level_x as i32 == lvl_x && l.level_y as i32 == lvl_y)
+                .ok_or_else(|| {
+                    ExrError::invalid(format!(
+                        "tile {tile_idx} carries unknown level ({lvl_x}, {lvl_y})"
+                    ))
+                })?;
+            let level = &levels[level_idx];
+
+            // `tx`/`ty` come straight off the wire; reject negatives before
+            // the `as u32` multiply (a hostile index must not overflow it),
+            // then bound against this level's dimensions.
+            let x0 = u32::try_from(tx)
+                .ok()
+                .and_then(|v| v.checked_mul(tdesc.x_size));
+            let y0 = u32::try_from(ty)
+                .ok()
+                .and_then(|v| v.checked_mul(tdesc.y_size));
+            let (Some(x0), Some(y0)) = (x0, y0) else {
+                return Err(ExrError::invalid(format!(
+                    "tile {tile_idx} carries hostile tile index ({tx},{ty})"
+                )));
+            };
+            if x0 >= level.width || y0 >= level.height {
+                return Err(ExrError::invalid(format!(
+                    "tile {tile_idx} at ({tx},{ty}) outside level ({lvl_x},{lvl_y}) dims {}×{}",
+                    level.width, level.height
+                )));
+            }
+            let x1 = (x0 + tdesc.x_size).min(level.width);
+            let y1 = (y0 + tdesc.y_size).min(level.height);
+            let tw = (x1 - x0) as usize;
+            let th = (y1 - y0) as usize;
+
+            Ok(LevelTile {
+                index: tile_idx,
+                level: level_idx,
+                x0,
+                y0,
+                tw,
+                th,
+                payload,
+            })
         };
-        if x0 >= level.width || y0 >= level.height {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} at ({tx},{ty}) outside level ({lvl_x},{lvl_y}) dims {}×{}",
-                level.width, level.height
-            )));
+        match read() {
+            Ok(tile) => tiles.push(tile),
+            Err(e) => {
+                header_error = Some(e);
+                break;
+            }
         }
-        let x1 = (x0 + tdesc.x_size).min(level.width);
-        let y1 = (y0 + tdesc.y_size).min(level.height);
-        let tw = (x1 - x0) as usize;
-        let th = (y1 - y0) as usize;
+    }
 
-        scatter_tile_into_planes(
-            payload,
-            &sorted_channels,
-            &mut level.planes,
-            level.width,
-            x0,
-            y0,
-            tw,
-            th,
-            req.compression,
-            tile_idx,
-        )?;
+    // Tiles are independent. Under a worker budget each is decoded into
+    // planes of its own and stitched into its level in table order;
+    // serially it is scattered straight into the level planes (using
+    // the level's dims as the row stride).
+    if crate::parallel::budget() > 1 && tiles.len() > 1 {
+        let decoded = crate::parallel::try_map_indexed(tiles.len(), |i| -> Result<_> {
+            let tile = &tiles[i];
+            let mut local: Vec<ExrPlane> = sorted_channels
+                .iter()
+                .map(|_| ExrPlane {
+                    name: String::new(),
+                    samples: vec![0.0; tile.tw * tile.th],
+                })
+                .collect();
+            scatter_tile_into_planes(
+                tile.payload,
+                &sorted_channels,
+                &mut local,
+                tile.tw as u32,
+                0,
+                0,
+                tile.tw,
+                tile.th,
+                req.compression,
+                tile.index,
+            )?;
+            Ok(local)
+        })?;
+        for (tile, local) in tiles.iter().zip(&decoded) {
+            let level = &mut levels[tile.level];
+            let stride = level.width as usize;
+            for (plane, part) in level.planes.iter_mut().zip(local) {
+                for (r, row) in part.samples.chunks_exact(tile.tw.max(1)).enumerate() {
+                    let at = (tile.y0 as usize + r) * stride + tile.x0 as usize;
+                    plane.samples[at..at + tile.tw].copy_from_slice(row);
+                }
+            }
+        }
+    } else {
+        for tile in &tiles {
+            let level = &mut levels[tile.level];
+            scatter_tile_into_planes(
+                tile.payload,
+                &sorted_channels,
+                &mut level.planes,
+                level.width,
+                tile.x0,
+                tile.y0,
+                tile.tw,
+                tile.th,
+                req.compression,
+                tile.index,
+            )?;
+        }
+    }
+    if let Some(e) = header_error {
+        return Err(e);
     }
 
     Ok(MultilevelTiledImage {

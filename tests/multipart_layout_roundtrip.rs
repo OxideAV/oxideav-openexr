@@ -384,21 +384,23 @@ fn scratch(label: &str) -> std::path::PathBuf {
     dir
 }
 
-/// Header-level black-box reader.
+/// Header-level black-box readers (each skipped when not installed).
 fn header_reader_accepts(bytes: &[u8], label: &str) {
-    if !tool_available("exrinfo") {
-        return;
+    for tool in ["exrinfo", "exrheader"] {
+        if !tool_available(tool) {
+            continue;
+        }
+        let dir = scratch("info");
+        let path = dir.join("in.exr");
+        std::fs::write(&path, bytes).unwrap();
+        let out = Command::new(tool).arg(&path).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{label}: a black-box reader ({tool}) rejected the file:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
-    let dir = scratch("info");
-    let path = dir.join("in.exr");
-    std::fs::write(&path, bytes).unwrap();
-    let out = Command::new("exrinfo").arg(&path).output().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        out.status.success(),
-        "{label}: a black-box reader rejected the file:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// Pixel-level black-box reader: reads every chunk of every part and

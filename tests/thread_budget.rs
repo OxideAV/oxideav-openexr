@@ -197,6 +197,45 @@ fn errors_are_budget_independent() {
 }
 
 #[test]
+fn the_multi_level_reader_is_budget_independent_on_damaged_files() {
+    let img = image(70, 45, ExrPixelFormat::RgbF32Le, 11);
+    for (levels, compression) in [
+        (LevelMode::Mipmap, Compression::Zip),
+        (LevelMode::Ripmap, Compression::Piz),
+        (LevelMode::Mipmap, Compression::None),
+    ] {
+        let bytes = encode(
+            &img,
+            &EncodeOptions::default()
+                .with_compression(compression)
+                .with_tile_size(16)
+                .with_levels(levels),
+        )
+        .unwrap();
+        // Every level's planes, or the error text.
+        let outcome = |data: &[u8], threads: usize| {
+            with_threads(threads, || parse_exr_tiled_multilevel(data))
+                .map(|img| img.levels.into_iter().map(|l| l.planes).collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        };
+        assert!(outcome(&bytes, 1).is_ok());
+        let step = (bytes.len() / 131).max(1);
+        for at in (8..bytes.len()).step_by(step) {
+            let mut bad = bytes.clone();
+            bad[at] ^= 0x5A;
+            let serial = outcome(&bad, 1);
+            for threads in BUDGETS {
+                assert!(
+                    outcome(&bad, threads) == serial,
+                    "{levels:?} {compression:?}: byte {at} at budget {threads}"
+                );
+            }
+            assert!(outcome(&bytes[..at], 8) == outcome(&bytes[..at], 1));
+        }
+    }
+}
+
+#[test]
 fn the_depth_api_runs_under_a_scoped_budget() {
     let img = image(31, 90, ExrPixelFormat::RgbF32Le, 9);
     let bytes = encode(
