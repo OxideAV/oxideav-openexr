@@ -782,40 +782,98 @@ fn chunks_are_found_through_the_tables_not_by_position() {
 // Probes of the note that have no staged file
 // ---------------------------------------------------------------------------
 
-/// Remove the attribute `name` from the headers `parts` selects of a
-/// multi-part file, moving the offset tables and chunks up.
-fn strip_attribute(bytes: &[u8], name: &str, parts: impl Fn(usize) -> bool) -> Vec<u8> {
+/// One attribute as stored: name, type name, value bytes.
+#[derive(Clone)]
+struct RawAttribute {
+    name: Vec<u8>,
+    kind: Vec<u8>,
+    value: Vec<u8>,
+}
+
+fn raw(name: &str, kind: &str, value: &[u8]) -> RawAttribute {
+    RawAttribute {
+        name: name.as_bytes().to_vec(),
+        kind: kind.as_bytes().to_vec(),
+        value: value.to_vec(),
+    }
+}
+
+/// Re-serialise a staged file with its headers edited (`edit(part,
+/// attributes)`), moving the offset tables and chunks along. Works on
+/// files whose chunks start right after the tables in table order (all
+/// the oracle-written ones), single-part or multi-part.
+fn edit_headers(bytes: &[u8], edit: impl Fn(usize, &mut Vec<RawAttribute>)) -> Vec<u8> {
+    let multipart = bytes[5] & 0x10 != 0;
     let mut out = bytes[..8].to_vec();
     let mut at = 8;
     let mut part = 0;
-    while bytes[at] != 0 {
+    loop {
+        let mut attrs = Vec::new();
         while bytes[at] != 0 {
             let name_end = at + bytes[at..].iter().position(|&b| b == 0).unwrap();
-            let type_end =
+            let kind_end =
                 name_end + 1 + bytes[name_end + 1..].iter().position(|&b| b == 0).unwrap();
-            let size = u32::from_le_bytes(bytes[type_end + 1..type_end + 5].try_into().unwrap());
-            let end = type_end + 5 + size as usize;
-            if !(parts(part) && &bytes[at..name_end] == name.as_bytes()) {
-                out.extend_from_slice(&bytes[at..end]);
-            }
+            let size = u32::from_le_bytes(bytes[kind_end + 1..kind_end + 5].try_into().unwrap());
+            let end = kind_end + 5 + size as usize;
+            attrs.push(RawAttribute {
+                name: bytes[at..name_end].to_vec(),
+                kind: bytes[name_end + 1..kind_end].to_vec(),
+                value: bytes[kind_end + 5..end].to_vec(),
+            });
             at = end;
         }
-        out.push(0);
         at += 1;
+        edit(part, &mut attrs);
+        for a in &attrs {
+            out.extend_from_slice(&a.name);
+            out.push(0);
+            out.extend_from_slice(&a.kind);
+            out.push(0);
+            out.extend_from_slice(&(a.value.len() as u32).to_le_bytes());
+            out.extend_from_slice(&a.value);
+        }
+        out.push(0);
         part += 1;
+        if !multipart {
+            break;
+        }
+        if bytes[at] == 0 {
+            at += 1;
+            out.push(0);
+            break;
+        }
     }
-    out.push(0);
-    let tables_start = at + 1;
-    // The staged files store their chunks right after the tables, in
-    // table order: the first entry is where the tables end.
+    let tables_start = at;
     let tables_end =
         u64::from_le_bytes(bytes[tables_start..tables_start + 8].try_into().unwrap()) as usize;
-    let removed = (tables_start - out.len()) as u64;
+    let moved = out.len() as i64 - tables_start as i64;
     for entry in bytes[tables_start..tables_end].as_chunks::<8>().0 {
-        out.extend_from_slice(&(u64::from_le_bytes(*entry) - removed).to_le_bytes());
+        let offset = u64::from_le_bytes(*entry) as i64 + moved;
+        out.extend_from_slice(&(offset as u64).to_le_bytes());
     }
     out.extend_from_slice(&bytes[tables_end..]);
     out
+}
+
+/// Remove the attribute `name` from the headers `parts` selects.
+fn strip_attribute(bytes: &[u8], name: &str, parts: impl Fn(usize) -> bool) -> Vec<u8> {
+    edit_headers(bytes, |part, attrs| {
+        if parts(part) {
+            attrs.retain(|a| a.name != name.as_bytes());
+        }
+    })
+}
+
+/// Replace (or add) an attribute in the headers `parts` selects.
+fn set_attribute(bytes: &[u8], attr: RawAttribute, parts: impl Fn(usize) -> bool) -> Vec<u8> {
+    edit_headers(bytes, |part, attrs| {
+        if parts(part) {
+            match attrs.iter_mut().find(|a| a.name == attr.name) {
+                Some(existing) => *existing = attr.clone(),
+                None => attrs.push(attr.clone()),
+            }
+        }
+    })
 }
 
 fn strict_violation(bytes: &[u8]) -> LayoutViolation {
@@ -983,4 +1041,149 @@ fn shared_attribute_presence_rules() {
     // Per-part attributes may differ or be absent anywhere.
     accepted(&strip_attribute(&scan, "capDate", |p| p == 0));
     accepted(&strip_attribute(&scan, "screenWindowWidth", |p| p == 1));
+}
+
+#[test]
+fn header_requirement_verdicts() {
+    use LayoutViolation as V;
+    let scan = fixture("scan2/input.exr");
+    let reference = parse_exr_multipart(&scan).unwrap();
+    // The editor itself: an identity edit reproduces the file.
+    assert_eq!(edit_headers(&scan, |_, _| {}), scan);
+    let single = fixture("scan2/single.part0.exr");
+    assert_eq!(edit_headers(&single, |_, _| {}), single);
+    let same_pixels = |bytes: &[u8]| {
+        let parts = parse_exr_multipart(bytes).unwrap();
+        assert_eq!(parts[0].planes, reference[0].planes);
+        assert_eq!(parts[1].planes, reference[1].planes);
+    };
+
+    // `name`: empty is accepted; a type other than `string` is not.
+    let empty = set_attribute(&scan, raw("name", "string", b""), |p| p == 1);
+    check_layout(&empty, true).unwrap();
+    same_pixels(&empty);
+    let typed = set_attribute(&scan, raw("name", "int", &7i32.to_le_bytes()), |p| p == 1);
+    assert_eq!(violation_of(&typed), V::NameNotString { part: 1 });
+    // ... and it is required in a one-part multi-part file too.
+    let one = strip_attribute(&fixture("tolerated/one-part-multipart.exr"), "name", |_| {
+        true
+    });
+    assert_eq!(violation_of(&one), V::MissingName { part: 0 });
+
+    // `type` is compared case-sensitively.
+    let cased = set_attribute(&scan, raw("type", "string", b"ScanlineImage"), |p| p == 0);
+    assert_eq!(
+        violation_of(&cased),
+        V::UnknownPartType {
+            part: 0,
+            found: "ScanlineImage".to_string()
+        }
+    );
+    // `tiledimage` on a part without `tiles`; `tiles` on a scanline part.
+    let tiled = set_attribute(&scan, raw("type", "string", b"tiledimage"), |p| p == 1);
+    assert_eq!(violation_of(&tiled), V::MissingTiles { part: 1 });
+    assert!(parse_exr_multipart_mixed(&tiled).is_err());
+    let mut desc = Vec::new();
+    desc.extend_from_slice(&4u32.to_le_bytes());
+    desc.extend_from_slice(&4u32.to_le_bytes());
+    desc.push(0);
+    let stray = set_attribute(&scan, raw("tiles", "tiledesc", &desc), |p| p == 1);
+    assert_eq!(violation_of(&stray), V::UnexpectedTiles { part: 1 });
+    assert!(parse_exr_multipart(&stray).is_err());
+
+    // A single-part flat file ignores `type`: the version flags decide.
+    for kind in ["tiledimage", "bogus"] {
+        let odd = set_attribute(&single, raw("type", "string", kind.as_bytes()), |_| true);
+        let layout = check_layout(&odd, true).unwrap();
+        assert_eq!(layout.parts[0].kind, PartKind::Scanline);
+        assert_eq!(parse_exr(&odd).unwrap().planes, reference[0].planes);
+        assert_eq!(decode_all(&odd).unwrap().len(), 1);
+    }
+    let tiled_single = fixture("tiled2/single.part0.exr");
+    let odd = set_attribute(
+        &tiled_single,
+        raw("type", "string", b"scanlineimage"),
+        |_| true,
+    );
+    assert_eq!(
+        check_layout(&odd, true).unwrap().parts[0].kind,
+        PartKind::Tiled
+    );
+    assert_eq!(parse_exr(&odd).unwrap().planes, reference[0].planes);
+
+    // `chunkCount` stored as a float: read through, reported strictly.
+    let float = set_attribute(
+        &scan,
+        raw("chunkCount", "float", &6f32.to_le_bytes()),
+        |p| p == 0,
+    );
+    same_pixels(&float);
+    assert!(matches!(
+        strict_violation(&float),
+        V::ChunkCountMismatch {
+            part: 0,
+            expected: 6,
+            ..
+        }
+    ));
+
+    // Deep parts: the `version` attribute may be absent; 2 is refused.
+    let deep = fixture("deep2/input.exr");
+    let deep_reference = parse_exr_deep_multipart(&deep).unwrap();
+    let no_version = strip_attribute(&deep, "version", |_| true);
+    check_layout(&no_version, true).unwrap();
+    let parts = parse_exr_deep_multipart(&no_version).unwrap();
+    assert_eq!(parts[1].channel_samples, deep_reference[1].channel_samples);
+    let v2 = set_attribute(&deep, raw("version", "int", &2i32.to_le_bytes()), |p| {
+        p == 1
+    });
+    assert_eq!(violation_of(&v2), V::DeepDataVersion { part: 1, found: 2 });
+    assert!(parse_exr_deep_multipart(&v2).is_err());
+    let deep_single = fixture("deep2/single.part0.exr");
+    let no_type = strip_attribute(&deep_single, "type", |_| true);
+    assert_eq!(violation_of(&no_type), V::MissingType { part: 0 });
+    let no_version = strip_attribute(&deep_single, "version", |_| true);
+    let img = parse_exr_deep_scanline(&no_version).unwrap();
+    assert_eq!(img.channel_samples, deep_reference[0].channel_samples);
+
+    // Names: 255 bytes are read (flag set or clear), 256 are not.
+    for (length, flag) in [(255usize, false), (255, true), (256, true)] {
+        let name = "n".repeat(length);
+        let mut long = set_attribute(&scan, raw(&name, "int", &1i32.to_le_bytes()), |p| p == 0);
+        if flag {
+            long[5] |= 0x04;
+        }
+        if length == 256 {
+            assert!(check_layout(&long, false).is_err());
+            assert!(parse_exr_multipart(&long).is_err());
+            continue;
+        }
+        same_pixels(&long);
+        let strict = check_layout(&long, true);
+        if flag {
+            assert!(strict.is_ok());
+        } else {
+            assert!(matches!(
+                strict,
+                Err(ExrError::Layout(V::LongNameFlagClear { part: 0, .. }))
+            ));
+        }
+    }
+
+    // A second empty header: the tables are looked for one byte early
+    // and the pixel read fails.
+    let layout = FileLayout::read(&scan).unwrap();
+    let mut extra = scan[..layout.tables_start].to_vec();
+    extra.push(0);
+    for entry in scan[layout.tables_start..layout.tables_end]
+        .as_chunks::<8>()
+        .0
+    {
+        extra.extend_from_slice(&(u64::from_le_bytes(*entry) + 1).to_le_bytes());
+    }
+    extra.extend_from_slice(&scan[layout.tables_end..]);
+    assert_eq!(FileLayout::read(&extra).unwrap().parts.len(), 2);
+    assert!(check_layout(&extra, false).is_err());
+    assert!(parse_exr_multipart(&extra).is_err());
+    assert!(decode_all(&extra).is_err());
 }
