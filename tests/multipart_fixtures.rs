@@ -777,3 +777,210 @@ fn chunks_are_found_through_the_tables_not_by_position() {
         .unwrap();
     assert_eq!(rebuilt.parts, want.parts);
 }
+
+// ---------------------------------------------------------------------------
+// Probes of the note that have no staged file
+// ---------------------------------------------------------------------------
+
+/// Remove the attribute `name` from the headers `parts` selects of a
+/// multi-part file, moving the offset tables and chunks up.
+fn strip_attribute(bytes: &[u8], name: &str, parts: impl Fn(usize) -> bool) -> Vec<u8> {
+    let mut out = bytes[..8].to_vec();
+    let mut at = 8;
+    let mut part = 0;
+    while bytes[at] != 0 {
+        while bytes[at] != 0 {
+            let name_end = at + bytes[at..].iter().position(|&b| b == 0).unwrap();
+            let type_end =
+                name_end + 1 + bytes[name_end + 1..].iter().position(|&b| b == 0).unwrap();
+            let size = u32::from_le_bytes(bytes[type_end + 1..type_end + 5].try_into().unwrap());
+            let end = type_end + 5 + size as usize;
+            if !(parts(part) && &bytes[at..name_end] == name.as_bytes()) {
+                out.extend_from_slice(&bytes[at..end]);
+            }
+            at = end;
+        }
+        out.push(0);
+        at += 1;
+        part += 1;
+    }
+    out.push(0);
+    let tables_start = at + 1;
+    // The staged files store their chunks right after the tables, in
+    // table order: the first entry is where the tables end.
+    let tables_end =
+        u64::from_le_bytes(bytes[tables_start..tables_start + 8].try_into().unwrap()) as usize;
+    let removed = (tables_start - out.len()) as u64;
+    for entry in bytes[tables_start..tables_end].as_chunks::<8>().0 {
+        out.extend_from_slice(&(u64::from_le_bytes(*entry) - removed).to_le_bytes());
+    }
+    out.extend_from_slice(&bytes[tables_end..]);
+    out
+}
+
+fn strict_violation(bytes: &[u8]) -> LayoutViolation {
+    match check_layout(bytes, true) {
+        Err(ExrError::Layout(v)) => v,
+        other => panic!("expected a layout violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn version_field_verdicts() {
+    use LayoutViolation as V;
+    let scan = fixture("scan2/input.exr");
+    let reference = parse_exr_multipart(&scan).unwrap();
+
+    // Format versions 1 and 3 are rejected, multi-part and single-part.
+    for file in ["scan2/input.exr", "scan2/single.part0.exr"] {
+        for version in [1u8, 3] {
+            let mut bytes = fixture(file);
+            bytes[4] = version;
+            assert_eq!(
+                violation_of(&bytes),
+                V::FormatVersion { found: version },
+                "{file}"
+            );
+            assert!(decode_all(&bytes).is_err());
+        }
+    }
+
+    // The deep flag cleared on a multi-part file with deep parts: read
+    // all the same — each part's `type` decides.
+    let deep = fixture("deep2/input.exr");
+    let deep_reference = parse_exr_deep_multipart(&deep).unwrap();
+    let mut cleared = deep.clone();
+    cleared[5] &= !0x08;
+    let parts = parse_exr_deep_multipart(&cleared).unwrap();
+    for (a, b) in parts.iter().zip(&deep_reference) {
+        assert_eq!(a.channel_samples, b.channel_samples);
+        assert_eq!(a.samples_per_pixel, b.samples_per_pixel);
+    }
+    assert_eq!(parse_exr_multipart_mixed(&cleared).unwrap().len(), 2);
+    assert_eq!(
+        strict_violation(&cleared),
+        V::DeepPartWithoutDeepFlag { part: 0 }
+    );
+
+    // The deep flag set on a multi-part file without a deep part.
+    let mut set = scan.clone();
+    set[5] |= 0x08;
+    let parts = parse_exr_multipart(&set).unwrap();
+    assert_eq!(parts[0].planes, reference[0].planes);
+    assert_eq!(parts[1].planes, reference[1].planes);
+    assert_eq!(decode_all(&set).unwrap().len(), 2);
+    assert_eq!(strict_violation(&set), V::DeepFlagWithoutDeepPart);
+
+    // Single-part files: the tiled flag needs `tiles`; the deep flag
+    // needs `type`; tiled and deep flags exclude each other.
+    let mut flat = fixture("scan2/single.part0.exr");
+    flat[5] |= 0x02;
+    assert_eq!(violation_of(&flat), V::TiledFlagWithoutTiles);
+    let mut flat = fixture("scan2/single.part0.exr");
+    flat[5] |= 0x08;
+    assert_eq!(violation_of(&flat), V::MissingType { part: 0 });
+    let mut deep_tiled = fixture("mixed-constructed/src.5.exr");
+    deep_tiled[5] |= 0x02;
+    assert_eq!(
+        violation_of(&deep_tiled),
+        V::ConflictingVersionFlags { flags: 0x0a00 }
+    );
+    // The tiled flag cleared on a single-part tiled file: the header
+    // opens (as a scanline file), the pixel read fails.
+    let mut tiled = fixture("tiled2/single.part0.exr");
+    tiled[5] &= !0x02;
+    assert_eq!(
+        FileLayout::read(&tiled).unwrap().parts[0].kind,
+        PartKind::Scanline
+    );
+    assert!(parse_exr(&tiled).is_err());
+
+    // The long-name flag set with no long name: accepted, and regular.
+    let mut long = scan.clone();
+    long[5] |= 0x04;
+    assert!(check_layout(&long, true).is_ok());
+    assert_eq!(
+        parse_exr_multipart(&long).unwrap()[1].planes,
+        reference[1].planes
+    );
+}
+
+fn violation_of(bytes: &[u8]) -> LayoutViolation {
+    match check_layout(bytes, false) {
+        Err(ExrError::Layout(v)) => v,
+        other => panic!("expected a layout violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn shared_attribute_presence_rules() {
+    use LayoutViolation as V;
+    let scan = fixture("scan2/input.exr");
+    let reference = parse_exr_multipart(&scan).unwrap();
+    let mismatch = |bytes: &[u8], attribute: &str| {
+        assert_eq!(
+            violation_of(bytes),
+            V::SharedAttributeMismatch {
+                part: 1,
+                attribute: attribute.to_string()
+            }
+        );
+        assert!(parse_exr_multipart(bytes).is_err());
+    };
+    let accepted = |bytes: &[u8]| {
+        check_layout(bytes, true).unwrap();
+        let parts = parse_exr_multipart(bytes).unwrap();
+        assert_eq!(parts[0].planes, reference[0].planes);
+        assert_eq!(parts[1].planes, reference[1].planes);
+        assert_eq!(decode_all(bytes).unwrap().len(), 2);
+        parts
+    };
+
+    // displayWindow: present in one part only is a mismatch either way;
+    // absent from both is fine (the rule is equality, not presence).
+    mismatch(
+        &strip_attribute(&scan, "displayWindow", |p| p == 1),
+        "displayWindow",
+    );
+    mismatch(
+        &strip_attribute(&scan, "displayWindow", |p| p == 0),
+        "displayWindow",
+    );
+    let parts = accepted(&strip_attribute(&scan, "displayWindow", |_| true));
+    assert_eq!(parts[0].display_window, parts[0].data_window);
+
+    // pixelAspectRatio: absent means 1.0, which is what the other part
+    // carries here.
+    accepted(&strip_attribute(&scan, "pixelAspectRatio", |p| p == 1));
+    accepted(&strip_attribute(&scan, "pixelAspectRatio", |p| p == 0));
+    accepted(&strip_attribute(&scan, "pixelAspectRatio", |_| true));
+    // ... and not what a part with 2.0 carries.
+    let two = fixture("negative/pixelaspectratio-differs.exr");
+    mismatch(
+        &strip_attribute(&two, "pixelAspectRatio", |p| p == 0),
+        "pixelAspectRatio",
+    );
+
+    // Three parts: the first part that deviates from part 0 is named.
+    let three = fixture("scan3-zip/input.exr");
+    let no_dw_in_2 = strip_attribute(&three, "displayWindow", |p| p == 2);
+    assert_eq!(
+        violation_of(&no_dw_in_2),
+        V::SharedAttributeMismatch {
+            part: 2,
+            attribute: "displayWindow".to_string()
+        }
+    );
+    let no_dw_in_1_2 = strip_attribute(&three, "displayWindow", |p| p != 0);
+    assert_eq!(
+        violation_of(&no_dw_in_1_2),
+        V::SharedAttributeMismatch {
+            part: 1,
+            attribute: "displayWindow".to_string()
+        }
+    );
+
+    // Per-part attributes may differ or be absent anywhere.
+    accepted(&strip_attribute(&scan, "capDate", |p| p == 0));
+    accepted(&strip_attribute(&scan, "screenWindowWidth", |p| p == 1));
+}

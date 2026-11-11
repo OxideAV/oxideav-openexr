@@ -477,9 +477,11 @@ pub(crate) fn encode_exr_tiled_with_attributes(
 
     // Build per-tile payloads in INCREASING_Y row-major order: ty
     // outer, tx inner.
-    let mut tile_payloads: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(chunk_count as usize);
-    for ty in 0..ty_count {
-        for tx in 0..tx_count {
+    // Tiles are independent: built over the worker budget, kept in
+    // canonical order.
+    let build_tile = |index: usize| -> Result<(u32, u32, Vec<u8>)> {
+        {
+            let (tx, ty) = (index as u32 % tx_count, index as u32 / tx_count);
             let x0 = tx * tile_x;
             let y0 = ty * tile_y;
             let x1 = (x0 + tile_x).min(width);
@@ -497,27 +499,12 @@ pub(crate) fn encode_exr_tiled_with_attributes(
             for line in 0..th {
                 let dst_y = y0 as usize + line;
                 for (ch_idx, ch) in channels.iter().enumerate() {
-                    let plane = planes[ch_idx];
-                    for xx in 0..tw {
-                        let dst_x = x0 as usize + xx;
-                        let v = plane[dst_y * width as usize + dst_x];
-                        match ch.pixel_type {
-                            PixelType::Half => {
-                                raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes())
-                            }
-                            PixelType::Float => raw.extend_from_slice(&v.to_le_bytes()),
-                            PixelType::Uint => {
-                                let u = if v.is_nan() || v < 0.0 {
-                                    0u32
-                                } else if v >= (u32::MAX as f32) {
-                                    u32::MAX
-                                } else {
-                                    (v + 0.5) as u32
-                                };
-                                raw.extend_from_slice(&u.to_le_bytes());
-                            }
-                        }
-                    }
+                    let at = dst_y * width as usize + x0 as usize;
+                    crate::encoder::push_native_row(
+                        &mut raw,
+                        &planes[ch_idx][at..at + tw],
+                        ch.pixel_type,
+                    );
                 }
             }
             // PXR24 / B44 reorganise the tile into byte-plane / per-channel
@@ -558,9 +545,11 @@ pub(crate) fn encode_exr_tiled_with_attributes(
                 )?,
                 _ => compress_tile_payload(raw, compression)?,
             };
-            tile_payloads.push((tx, ty, payload));
+            Ok((tx, ty, payload))
         }
-    }
+    };
+    let tile_payloads: Vec<(u32, u32, Vec<u8>)> =
+        crate::parallel::try_map_indexed(chunk_count as usize, build_tile)?;
 
     // Physical chunk storage follows `lineOrder`; the offset table is
     // ALWAYS keyed in the canonical ty-outer / tx-inner order (entry i

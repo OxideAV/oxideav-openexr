@@ -16,7 +16,6 @@ use crate::mipmap_encoder::{
     build_box_filter_pyramid, build_box_filter_ripmap, encode_exr_tiled_mipmap_with_attributes,
     encode_exr_tiled_ripmap_with_attributes,
 };
-use crate::multipart_mixed_encoder::{MultipartMixedImage, parse_exr_multipart_mixed};
 use crate::options::{DecodeOptions, EncodeOptions, LevelMode};
 use crate::tile_encoder::encode_exr_tiled_with_attributes;
 use crate::types::{Attribute, AttributeValue, Box2i, Channel, EXR_MAGIC};
@@ -200,6 +199,11 @@ fn check_limits(
 
 /// Decode part `idx` of `bytes` as flat pixels (level `(0, 0)` of a
 /// multi-level part). Deep parts are [`ExrError::Unsupported`].
+///
+/// A part of a multi-part file is lifted out as a single-part file
+/// (headers and chunks copied, no payload touched) and read by the
+/// single-part reader, so only the requested part is decoded and its
+/// chunks fan out over the worker budget.
 fn decode_flat(bytes: &[u8], version: VersionField, idx: usize) -> Result<FlatPixels> {
     if !version.multipart {
         if version.non_image {
@@ -210,46 +214,14 @@ fn decode_flat(bytes: &[u8], version: VersionField, idx: usize) -> Result<FlatPi
         }
         return Ok(parse_exr(bytes)?.into());
     }
-    let mut parts = parse_exr_multipart_mixed(bytes)?;
-    if idx >= parts.len() {
+    let mut picked =
+        crate::layout::split_selected(bytes, &Default::default(), |p| p.index as usize == idx)?;
+    let Some((_, single)) = picked.pop() else {
         return Err(ExrError::invalid(format!(
-            "OpenEXR decoder: part {idx} requested but the file has {} part(s)",
-            parts.len()
+            "OpenEXR decoder: part {idx} requested but the file does not have it"
         )));
-    }
-    mixed_to_flat(parts.swap_remove(idx), idx)
-}
-
-/// Normalise one decoded multi-part part to flat pixels.
-fn mixed_to_flat(part: MultipartMixedImage, idx: usize) -> Result<FlatPixels> {
-    match part {
-        MultipartMixedImage::Scanline(img) | MultipartMixedImage::Tiled(img) => Ok(img.into()),
-        MultipartMixedImage::TiledMipmap(p) | MultipartMixedImage::TiledRipmap(p) => {
-            let level = p
-                .levels
-                .into_iter()
-                .find(|l| l.level_x == 0 && l.level_y == 0)
-                .ok_or_else(|| {
-                    ExrError::invalid(format!(
-                        "OpenEXR decoder: multi-level part {idx} has no level (0, 0)"
-                    ))
-                })?;
-            Ok(FlatPixels {
-                data_window: p.data_window,
-                display_window: p.display_window,
-                channels: p.channels,
-                planes: level.planes,
-                attributes: p.attributes,
-            })
-        }
-        MultipartMixedImage::DeepScanline(_)
-        | MultipartMixedImage::DeepTiled(_)
-        | MultipartMixedImage::DeepTiledMipmap(_)
-        | MultipartMixedImage::DeepTiledRipmap(_) => Err(ExrError::unsupported(format!(
-            "OpenEXR decoder: part {idx} is a deep part (variable samples per pixel) with no \
-             colour view; use the parse_exr_deep_* API"
-        ))),
-    }
+    };
+    Ok(parse_exr(&single)?.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +270,10 @@ pub fn decode(bytes: &[u8]) -> Result<ExrImage> {
 /// allocated ([`ExrError::LimitExceeded`]); a deep part or a channel set
 /// without a colour view is [`ExrError::Unsupported`].
 pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<ExrImage> {
+    crate::parallel::with_threads(opts.threads, || decode_part(bytes, opts))
+}
+
+fn decode_part(bytes: &[u8], opts: &DecodeOptions) -> Result<ExrImage> {
     let (version, headers) = headers(bytes)?;
     let idx = select_part(&headers, opts)?;
     let hdr = &headers[idx];
@@ -346,6 +322,10 @@ pub fn decode_all(bytes: &[u8]) -> Result<Vec<Frame>> {
 /// [`decode_all`] with explicit options (`part` / `part_name` are
 /// ignored; `layer` applies to every part).
 pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>> {
+    crate::parallel::with_threads(opts.threads, || decode_parts(bytes, opts))
+}
+
+fn decode_parts(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>> {
     let (version, headers) = headers(bytes)?;
     check_limits(&headers, opts, None)?;
     layout_gate(bytes, opts)?;
@@ -362,14 +342,27 @@ pub fn decode_all_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Vec<Frame>>
         let img = flat_to_image(&flat, &opts.layer)?;
         return Ok(vec![frame(img, 0, &hdr.attributes)]);
     }
-    let parts = parse_exr_multipart_mixed(bytes)?;
-    let mut out = Vec::with_capacity(parts.len());
+    // Every flat part as a single-part file, read by the single-part
+    // reader (chunk-parallel under the worker budget).
+    let singles = crate::layout::split_selected(bytes, &Default::default(), |p| !p.kind.is_deep())?;
+    let mut singles = singles.into_iter().peekable();
+    let mut out = Vec::with_capacity(headers.len());
     let mut skipped: Vec<String> = Vec::new();
-    for (idx, part) in parts.into_iter().enumerate() {
-        let viewed = mixed_to_flat(part, idx).and_then(|flat| {
-            let img = flat_to_image(&flat, &opts.layer)?;
-            Ok((img, flat.attributes))
-        });
+    for (idx, hdr) in headers.iter().enumerate() {
+        let viewed = match singles.next_if(|(i, _)| *i as usize == idx) {
+            None => Err(ExrError::unsupported(format!(
+                "OpenEXR decoder: part {idx} is a deep part (variable samples per pixel) with \
+                 no colour view; use the parse_exr_deep_* API"
+            ))),
+            Some((_, single)) => extract_required(&hdr.attributes)
+                .and_then(|req| plan_view(&req.channels, &hdr.attributes, &opts.layer))
+                .and_then(|_| parse_exr(&single))
+                .and_then(|part| {
+                    let flat: FlatPixels = part.into();
+                    let img = flat_to_image(&flat, &opts.layer)?;
+                    Ok((img, flat.attributes))
+                }),
+        };
         match viewed {
             Ok((img, attrs)) => out.push(frame(img, idx, &attrs)),
             Err(ExrError::Unsupported(msg)) if !opts.strict => skipped.push(msg),
@@ -473,6 +466,10 @@ fn effective_windows(image: &ExrImage, opts: &EncodeOptions) -> Result<(Box2i, B
 /// [`EncodeOptions`]). ICC / Exif / XMP metadata cannot be carried and is
 /// ignored.
 pub fn encode(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    crate::parallel::with_threads(opts.threads, || encode_part(image, opts))
+}
+
+fn encode_part(image: &ExrImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     opts.validate()?;
     let (data_window, display_window) = effective_windows(image, opts)?;
     let (channels, planes) = image_to_channels(image, opts)?;

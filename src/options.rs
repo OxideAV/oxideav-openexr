@@ -49,6 +49,10 @@ pub struct DecodeOptions {
     pub part_name: String,
     /// Layer whose channels form the view (type docs).
     pub layer: String,
+    /// Worker budget for chunk-parallel decode (scanline blocks and
+    /// tiles are independent). `1` (default) is serial; the decoded
+    /// image and any error are the same at every budget.
+    pub threads: usize,
 }
 
 impl DecodeOptions {
@@ -110,6 +114,12 @@ impl DecodeOptions {
         self
     }
 
+    /// Set [`Self::threads`] (values below 1 mean 1).
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
+    }
+
     /// Lift every limit (`max_*` all `None`). Trusted local input
     /// only — a hostile header is then bounded by the allocator alone.
     pub fn unlimited(mut self) -> Self {
@@ -167,6 +177,7 @@ impl Default for DecodeOptions {
             part: 0,
             part_name: String::new(),
             layer: String::new(),
+            threads: 1,
         }
     }
 }
@@ -250,6 +261,10 @@ pub struct EncodeOptions {
     pub display_window: Option<Box2i>,
     /// Linearisation exponent for 8-bit input (raw paths only).
     pub input_gamma: Option<f32>,
+    /// Worker budget for chunk-parallel encode (scanline blocks and
+    /// tiles are independent). `1` (default) is serial; the written
+    /// bytes are the same at every budget.
+    pub threads: usize,
 }
 
 impl Default for EncodeOptions {
@@ -267,6 +282,7 @@ impl Default for EncodeOptions {
             data_window: None,
             display_window: None,
             input_gamma: None,
+            threads: 1,
         }
     }
 }
@@ -275,6 +291,12 @@ impl EncodeOptions {
     /// The defaults (FLOAT, ZIP, RGB channels, scanline, INCREASING_Y).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set [`Self::threads`] (values below 1 mean 1).
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
     }
 
     /// Set the channel pixel type.

@@ -302,12 +302,20 @@ pub(crate) fn flat_to_image(img: &FlatPixels, layer: &str) -> Result<ExrImage> {
     let total = stride.checked_mul(h as usize).ok_or_else(|| {
         ExrError::unsupported(format!("OpenEXR decoder: {w}x{h} plane overflows"))
     })?;
-    let mut data = Vec::with_capacity(total);
-    for px in 0..pixels {
-        for src in &sources {
-            data.extend_from_slice(&src[px].to_le_bytes());
+    // Pack the component planes into one interleaved little-endian
+    // plane, bands of rows over the worker budget.
+    let mut data = vec![0u8; total];
+    let bytes_per_pixel = format.bytes_per_pixel();
+    let band_pixels = (pixels / (crate::parallel::budget() * 4).max(1)).max(4096);
+    crate::parallel::for_each_chunk_mut(&mut data, band_pixels * bytes_per_pixel, |band, out| {
+        let first = band * band_pixels;
+        for (c, src) in sources.iter().enumerate() {
+            let src = &src[first..first + out.len() / bytes_per_pixel];
+            for (px, &v) in out.chunks_exact_mut(bytes_per_pixel).zip(src) {
+                px[c * 4..c * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
         }
-    }
+    });
     let mut out = ExrImage::new(w, h, format, vec![Plane::new(stride, data)])?;
     out.color = ColorInfo::from_attributes(&img.attributes);
     out.metadata = Metadata::default();

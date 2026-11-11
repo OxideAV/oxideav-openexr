@@ -225,7 +225,8 @@ scanline; else `N × N` tiles), `levels: LevelMode` (`One` / `Mipmap` /
 `Ripmap`, box-filtered, tiled only), `line_order: LineOrder`
 (`IncreasingY` / `DecreasingY` / tiled `RandomY`), `data_window` /
 `display_window: Option<Box2i>` (overrides; `None` writes the image's),
-`input_gamma: Option<f32>` (8-bit paths). Tiled output needs
+`input_gamma: Option<f32>` (8-bit paths), `threads: usize` (`1`;
+worker budget — the bytes written do not depend on it). Tiled output needs
 full-resolution channels (`chroma_sampling = 1` under `LumaChroma`) and
 keeps the image's data / display windows like scanline output does.
 `encode_all` writes each frame exactly as `encode` would — tiles,
@@ -239,7 +240,8 @@ union of the frames').
 channel × 4 bytes; a multi-part file is decoded whole, so the sum of its
 parts is checked too), `strict` (`false`), `part: u32` (`0`),
 `part_name: String` (overrides `part`), `layer: String` (`""` = base
-layer). `unlimited()` lifts every limit.
+layer), `threads: usize` (`1`; worker budget, see *Benchmarks*).
+`unlimited()` lifts every limit.
 
 ## Metadata and colour
 
@@ -414,13 +416,98 @@ files combine into the staged multi-part files.
 
 ## Benchmarks
 
-A Criterion harness (`benches/codec_benchmarks.rs`) measures decode /
-encode throughput across every compression scheme for HALF and FLOAT,
-scanline and tiled — see [`BENCHMARKS.md`](BENCHMARKS.md) for the
-current numbers (scanline HALF NONE decode 2.5 GiB/s, FLOAT NONE
-19.8 GiB/s, ZIP 0.78–0.82 GiB/s, PXR24 1.0–2.6 GiB/s, PIZ 0.31–0.37
-GiB/s and DWAA/DWAB 0.38–0.83 GiB/s after the round-457 optimisation
-pass, on Apple Silicon).
+### Worker budget
+
+Scanline blocks and tiles are independent, so reading and writing fan
+them out over a caller-chosen worker budget: `DecodeOptions::threads` /
+`EncodeOptions::threads` on the contract API, the framework's
+`ExecutionContext` on the registry decoder / encoder
+(`set_execution_context`), or `with_threads(n, || ..)` around any
+depth-API call (`parse_exr`, `encode_exr_scanline`, `encode_exr_tiled*`,
+…). The budget is `1` unless raised; **decoded samples, written bytes
+and the error on malformed input are the same at every budget**
+(`tests/thread_budget.rs`: every scheme x scanline / tiled / mip-map /
+rip-map x HALF / FLOAT, sub-sampled chroma, multi-part files, damaged
+and truncated files, budgets 1 / 2 / 3 / 8).
+
+- encode: every block / tile payload is built by a worker, then the
+  file is assembled in order;
+- decode, scanline: bands of rows (aligned to the block height and the
+  channels' vertical sampling) are decoded by workers and stitched;
+- decode, tiles: each tile is decoded by a worker and stitched in table
+  order; the packed colour view is interleaved in bands;
+- a part of a multi-part file is lifted out as a single-part file and
+  takes the same path, so `decode_with(part = k)` decodes only part `k`
+  (it used to decode every part and keep one).
+
+Contract API (`decode_with` / `encode`), megapixels per second, on a
+2048 x 1024 RGBA image (gradients plus fine noise), Apple Silicon,
+`cargo run --release --example throughput`. *Before* is the serial code
+before this pass, built from its commit and run alternately with the
+current code. The machine was shared with other builds, so each figure
+is the best of four runs (each run the median of five passes); serial
+differences below about 15 % are noise — an interleaved six-round A/B of
+PIZ, B44 and DWAB showed the same serial speed before and after, except
+where noted below.
+
+| Scheme | Layout | Type | decode before | decode ×1 | decode ×8 | encode before | encode ×1 | encode ×8 |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| NONE | scanline | HALF | 179 | 267 | 784 | 107 | 132 | 304 |
+| NONE | scanline | FLOAT | 318 | 574 | 1086 | 214 | 232 | 341 |
+| NONE | tiled 256 | HALF | 182 | 226 | 424 | 76 | 86 | 265 |
+| NONE | tiled 256 | FLOAT | 255 | 386 | 564 | 115 | 150 | 314 |
+| RLE | scanline | HALF | 78 | 91 | 463 | 59 | 69 | 232 |
+| RLE | scanline | FLOAT | 78 | 88 | 464 | 62 | 64 | 231 |
+| RLE | tiled 256 | HALF | 76 | 88 | 314 | 51 | 56 | 215 |
+| RLE | tiled 256 | FLOAT | 73 | 79 | 306 | 51 | 53 | 210 |
+| ZIPS | scanline | HALF | 27 | 28 | 180 | 9 | 9 | 57 |
+| ZIPS | scanline | FLOAT | 16 | 18 | 117 | 5 | 6 | 38 |
+| ZIPS | tiled 256 | HALF | 30 | 34 | 172 | 6 | 6 | 41 |
+| ZIPS | tiled 256 | FLOAT | 15 | 17 | 102 | 4 | 4 | 27 |
+| ZIP | scanline | HALF | 30 | 33 | 198 | 7 | 7 | 44 |
+| ZIP | scanline | FLOAT | 16 | 17 | 108 | 5 | 4 | 25 |
+| ZIP | tiled 256 | HALF | 32 | 32 | 166 | 6 | 6 | 40 |
+| ZIP | tiled 256 | FLOAT | 16 | 16 | 99 | 4 | 4 | 25 |
+| PIZ | scanline | HALF | 41 | 41 | 265 | 41 | 37 | 168 |
+| PIZ | scanline | FLOAT | 17 | 16 | 111 | 9 | 8 | 49 |
+| PIZ | tiled 256 | HALF | 42 | 39 | 194 | 38 | 34 | 152 |
+| PIZ | tiled 256 | FLOAT | 17 | 16 | 99 | 9 | 8 | 47 |
+| PXR24 | scanline | HALF | 28 | 29 | 187 | 3 | 3 | 21 |
+| PXR24 | scanline | FLOAT | 19 | 19 | 128 | 3 | 3 | 18 |
+| PXR24 | tiled 256 | HALF | 31 | 32 | 159 | 4 | 4 | 25 |
+| PXR24 | tiled 256 | FLOAT | 19 | 20 | 118 | 3 | 3 | 21 |
+| B44 | scanline | HALF | 119 | 105 | 474 | 33 | 30 | 142 |
+| B44 | scanline | FLOAT | 423 | 608 | 1183 | 173 | 151 | 314 |
+| B44 | tiled 256 | HALF | 116 | 112 | 300 | 28 | 25 | 127 |
+| B44 | tiled 256 | FLOAT | 225 | 258 | 449 | 86 | 83 | 246 |
+| B44A | scanline | HALF | 123 | 104 | 523 | 34 | 31 | 144 |
+| B44A | scanline | FLOAT | 415 | 523 | 1211 | 174 | 148 | 305 |
+| B44A | tiled 256 | HALF | 116 | 109 | 310 | 27 | 25 | 131 |
+| B44A | tiled 256 | FLOAT | 207 | 252 | 485 | 89 | 85 | 246 |
+| DWAA | scanline | HALF | 44 | 43 | 229 | 21 | 19 | 95 |
+| DWAA | scanline | FLOAT | 38 | 37 | 214 | 20 | 18 | 94 |
+| DWAA | tiled 256 | HALF | 44 | 43 | 188 | 19 | 18 | 96 |
+| DWAA | tiled 256 | FLOAT | 38 | 36 | 167 | 19 | 16 | 93 |
+| DWAB | scanline | HALF | 44 | 41 | 140 | 20 | 18 | 55 |
+| DWAB | scanline | FLOAT | 40 | 36 | 129 | 19 | 17 | 53 |
+| DWAB | tiled 256 | HALF | 44 | 40 | 176 | 19 | 16 | 93 |
+| DWAB | tiled 256 | FLOAT | 37 | 30 | 158 | 19 | 15 | 90 |
+
+What moved besides the fan-out (serial columns): the packed colour view
+is filled in place instead of grown sample by sample (NONE decode
+179 → 267, FLOAT 318 → 574; B44 / B44A FLOAT, which store FLOAT
+uncompressed, 423 → 608), and tile payloads are built from row slices
+with the pixel-type dispatch outside the sample loop (NONE FLOAT tiled
+encode 115 → 150). The compute-bound schemes are serially unchanged:
+the zlib family is bounded by the deflate / inflate of the workspace's
+compression crate, PIZ by its entropy coder, DWA by its transform, and
+PXR24 encode (3 Mpx/s) by deflating byte planes that compress poorly.
+
+### Criterion harness
+
+A Criterion harness (`benches/codec_benchmarks.rs`) measures the depth
+readers and writers per compression scheme on a small image — see
+[`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## Fuzzing
 
@@ -472,7 +559,8 @@ geometry-derived chunk counts, offset tables, part numbers, and the
 split / combine repack — raw, with fuzz bytes over the tables of a
 writer-built four-kind mixed file, and with short patches inside its
 header region; a file the strict check accepts must split, recombine
-and reach a fixed point.
+and reach a fixed point, and every input must decode to the same frames
+or the same error at worker budgets 1 and 3.
 
 The decode contract is that every byte slice returns `Ok` or `Err`,
 never panicking, integer-overflowing (debug build), indexing out of

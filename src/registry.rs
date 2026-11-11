@@ -580,6 +580,10 @@ impl Decoder for ExrDecoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
     }
+    fn set_execution_context(&mut self, ctx: &oxideav_core::ExecutionContext) {
+        // Chunks are independent: the budget bounds the fan-out.
+        self.opts.threads = ctx.threads.max(1);
+    }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
         let img = crate::decode_with(&packet.data, &self.opts)?;
         self.pending = Some(image_into_video_frame(img, packet.pts));
@@ -634,6 +638,11 @@ struct ExrEncoder {
 impl Encoder for ExrEncoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
+    }
+    fn set_execution_context(&mut self, ctx: &oxideav_core::ExecutionContext) {
+        // Chunks are independent: the budget bounds the fan-out; the
+        // written bytes do not depend on it.
+        self.opts.threads = ctx.threads.max(1);
     }
     fn output_params(&self) -> &CodecParameters {
         &self.out_params

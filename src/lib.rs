@@ -91,6 +91,7 @@ pub mod multipart_mixed_encoder;
 pub mod multipart_ripmap_encoder;
 pub mod multipart_tiled_encoder;
 pub mod options;
+pub mod parallel;
 pub mod part;
 pub(crate) mod piz;
 #[cfg(feature = "registry")]
@@ -177,6 +178,7 @@ pub use multipart_mixed_encoder::{
 pub use multipart_ripmap_encoder::{MultipartRipmapTiledPart, encode_exr_multipart_tiled_ripmap};
 pub use multipart_tiled_encoder::{MultipartTiledPart, encode_exr_multipart_tiled};
 pub use options::{ColourLayout, DecodeOptions, EncodeOptions, LevelMode};
+pub use parallel::with_threads;
 pub use part::{ExrPart, ExrPlane};
 #[allow(deprecated)]
 pub use tile_encoder::{

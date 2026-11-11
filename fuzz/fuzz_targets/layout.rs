@@ -15,6 +15,9 @@
 //! * `combine_parts(split_parts(f))` succeeds, passes the strict check
 //!   and is a fixed point of split-then-combine.
 //!
+//! And for every input, `decode_all` gives the same frames or the same
+//! error at worker budgets 1 and 3.
+//!
 //! Modes (first byte):
 //!
 //!   0. Raw — the fuzz bytes are the file.
@@ -116,6 +119,17 @@ fn exercise(file: &[u8]) {
     let split = split_parts(file);
     let _ = parse_exr_multipart_mixed(file);
     let _ = decode_all_with(file, &DecodeOptions::default().with_strict(true));
+    // The worker budget never changes the outcome: same frames, same
+    // error.
+    // (Compared through `Debug`: a NaN attribute value is not equal to
+    // itself.)
+    let outcome = |threads: usize| {
+        format!(
+            "{:?}",
+            decode_all_with(file, &DecodeOptions::default().with_threads(threads))
+        )
+    };
+    assert!(outcome(1) == outcome(3));
     if lenient.is_err() {
         // The strict check never accepts what the lenient one refuses.
         assert!(strict.is_err());

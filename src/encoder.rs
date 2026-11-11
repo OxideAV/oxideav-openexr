@@ -577,6 +577,40 @@ fn encode_rgba_float_impl(
     encode_exr_scanline(width, height, &chs, &planes_f32, compression, attributes)
 }
 
+/// Append one row of samples in a channel's stored type: binary16
+/// (round to nearest even), binary32 as is, or UINT (rounded to
+/// nearest, clamped; NaN and negatives are 0). The type dispatch sits
+/// outside the sample loop.
+pub(crate) fn push_native_row(raw: &mut Vec<u8>, row: &[f32], pixel_type: PixelType) {
+    match pixel_type {
+        PixelType::Half => {
+            raw.reserve(row.len() * 2);
+            for &v in row {
+                raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes());
+            }
+        }
+        PixelType::Float => {
+            raw.reserve(row.len() * 4);
+            for &v in row {
+                raw.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        PixelType::Uint => {
+            raw.reserve(row.len() * 4);
+            for &v in row {
+                let u = if v.is_nan() || v < 0.0 {
+                    0u32
+                } else if v >= (u32::MAX as f32) {
+                    u32::MAX
+                } else {
+                    (v + 0.5) as u32
+                };
+                raw.extend_from_slice(&u.to_le_bytes());
+            }
+        }
+    }
+}
+
 /// General-purpose scanline encoder. `planes` must contain one
 /// `width * height` `f32` slice per channel in the same alphabetical
 /// order as `channels`. UINT channels store the f32 value rounded to
@@ -683,11 +717,20 @@ pub fn encode_exr_scanline(
     // depend on which channels' y_sampling divide the image row: only
     // those channels contribute samples, and each contributes its
     // sub-sampled-width count.
-    let mut block_payloads: Vec<Vec<u8>> = Vec::with_capacity(num_blocks);
-    for block_idx in 0..num_blocks {
+    // Upper bound of one scanline's native bytes (every channel at
+    // full width), to size each block buffer once.
+    let row_bytes: usize = channels
+        .iter()
+        .map(|c| {
+            subsampled_dim(width, c.x_sampling as u32) as usize * c.pixel_type.bytes_per_sample()
+        })
+        .sum();
+    // Blocks are independent: built over the worker budget, kept in
+    // block order.
+    let build_block = |block_idx: usize| -> Result<Vec<u8>> {
         let row0 = block_idx as u32 * block_h;
         let lines_in_block = (height - row0).min(block_h) as usize;
-        let mut raw: Vec<u8> = Vec::new();
+        let mut raw: Vec<u8> = Vec::with_capacity(lines_in_block * row_bytes);
         for line in 0..lines_in_block {
             let y = row0 as usize + line;
             for (ch_idx, ch) in channels.iter().enumerate() {
@@ -702,34 +745,7 @@ pub fn encode_exr_scanline(
                 // loop and walk the source row as one slice (round-385
                 // bench: the per-sample match dominated HALF encode).
                 let row = &planes[ch_idx][plane_y * pw..plane_y * pw + pw];
-                match ch.pixel_type {
-                    PixelType::Half => {
-                        for &v in row {
-                            raw.extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes());
-                        }
-                    }
-                    PixelType::Float => {
-                        for &v in row {
-                            raw.extend_from_slice(&v.to_le_bytes());
-                        }
-                    }
-                    PixelType::Uint => {
-                        // Round to nearest, clamp to u32 range, then
-                        // emit as little-endian u32. NaN and negatives
-                        // both map to 0 (collapse the two clauses to
-                        // satisfy clippy::if_same_then_else).
-                        for &v in row {
-                            let u = if v.is_nan() || v < 0.0 {
-                                0u32
-                            } else if v >= (u32::MAX as f32) {
-                                u32::MAX
-                            } else {
-                                (v + 0.5) as u32
-                            };
-                            raw.extend_from_slice(&u.to_le_bytes());
-                        }
-                    }
-                }
+                push_native_row(&mut raw, row, ch.pixel_type);
             }
         }
         let payload = match compression {
@@ -804,8 +820,9 @@ pub fn encode_exr_scanline(
                 dwa_payload_or_raw(raw, channels, width, row0, lines_in_block, dwa_level)?
             }
         };
-        block_payloads.push(payload);
-    }
+        Ok(payload)
+    };
+    let block_payloads: Vec<Vec<u8>> = crate::parallel::try_map_indexed(num_blocks, build_block)?;
 
     // Build the final byte stream:
     //   header | offset table | block headers + payloads

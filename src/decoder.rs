@@ -174,13 +174,17 @@ pub(crate) fn extract_required(attrs: &[Attribute]) -> Result<RequiredAttrs> {
             ));
         }
     };
+    // A file without `displayWindow` is read by conforming readers
+    // (in a multi-part file the rule is that all parts agree, not that
+    // the attribute is present): the data window stands in.
     let display_window = match find_attribute(attrs, "displayWindow") {
         Some(AttributeValue::Box2i(b)) => *b,
-        _ => {
+        Some(_) => {
             return Err(ExrError::invalid(
-                "missing required attribute 'displayWindow'".to_string(),
+                "attribute 'displayWindow' is not a box2i".to_string(),
             ));
         }
+        None => data_window,
     };
     let line_order = match find_attribute(attrs, "lineOrder") {
         Some(AttributeValue::LineOrder(l)) => *l,
@@ -634,6 +638,288 @@ pub(crate) fn scatter_b44_block_into_planes(
     Ok(())
 }
 
+/// One scanline chunk located in the file: the image row it starts at,
+/// the rows it holds and its stored payload.
+struct ScanlineBlock<'a> {
+    row: u32,
+    lines: usize,
+    payload: &'a [u8],
+}
+
+/// Read and validate the framing of the scanline chunk at `block_off`.
+fn read_scanline_block<'a>(
+    bytes: &'a [u8],
+    block_idx: usize,
+    block_off: usize,
+    req: &RequiredAttrs,
+    height: u32,
+    block_h: u32,
+) -> Result<ScanlineBlock<'a>> {
+    // `block_off` is an untrusted u64 from the offset table cast to
+    // usize; a hostile value near usize::MAX would overflow the
+    // `block_off + 8` bounds check itself (debug panic / release wrap
+    // into an out-of-bounds slice). Add with overflow detection.
+    let block_hdr_end = block_off
+        .checked_add(8)
+        .filter(|&e| e <= bytes.len())
+        .ok_or_else(|| {
+            ExrError::invalid(format!("block {block_idx} offset {block_off} past EOF"))
+        })?;
+    let y_coord = i32::from_le_bytes(bytes[block_off..block_off + 4].try_into().unwrap());
+    let payload_size = i32::from_le_bytes(bytes[block_off + 4..block_hdr_end].try_into().unwrap());
+    if payload_size < 0 {
+        return Err(ExrError::invalid(format!(
+            "block {block_idx} negative size {payload_size}"
+        )));
+    }
+    let payload_start = block_hdr_end;
+    let payload_end = payload_start
+        .checked_add(payload_size as usize)
+        .ok_or_else(|| {
+            ExrError::invalid(format!(
+                "block {block_idx} payload size {payload_size} overflows address space"
+            ))
+        })?;
+    if payload_end > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "block {block_idx} payload runs past EOF (start {payload_start}, size {payload_size})"
+        )));
+    }
+    let payload = &bytes[payload_start..payload_end];
+
+    let row_in_image = y_coord as i64 - req.data_window.y_min as i64;
+    if row_in_image < 0 || row_in_image >= height as i64 {
+        return Err(ExrError::invalid(format!(
+            "block {block_idx} Y={y_coord} outside dataWindow y_min={}, height={}",
+            req.data_window.y_min, height
+        )));
+    }
+    let lines_in_block = ((height - row_in_image as u32).min(block_h)) as usize;
+
+    Ok(ScanlineBlock {
+        row: row_in_image as u32,
+        lines: lines_in_block,
+        payload,
+    })
+}
+
+/// Decode one scanline chunk into `planes`, which cover `height` rows
+/// starting at the row `block_y0` is relative to.
+#[allow(clippy::too_many_arguments)]
+fn decode_scanline_block(
+    payload: &[u8],
+    sorted_channels: &[Channel],
+    planes: &mut [ExrPlane],
+    width: u32,
+    height: u32,
+    block_y0: u32,
+    lines_in_block: usize,
+    compression: Compression,
+    block_idx: usize,
+) -> Result<()> {
+    // Per-block uncompressed size = sum over channels of
+    // (effective per-channel rows in this block) * (sub-sampled
+    // width) * (bytes per sample).
+    let uncompressed_size: usize = sorted_channels
+        .iter()
+        .map(|ch| {
+            let ys = ch.y_sampling as u32;
+            let lines = (0..lines_in_block as u32)
+                .filter(|&l| (block_y0 + l).is_multiple_of(ys))
+                .count();
+            let xs = ch.x_sampling as u32;
+            let pw = subsampled_dim(width, xs) as usize;
+            lines * ch.pixel_type.bytes_per_sample() * pw
+        })
+        .sum();
+
+    // B44 / B44A do not produce the standard interleaved scanline
+    // stream; they decode into per-channel planes and scatter
+    // directly. The shared raw fallback (compressed == uncompressed)
+    // is handled inside the B44 branch.
+    if matches!(compression, Compression::B44 | Compression::B44a) {
+        scatter_b44_block_into_planes(
+            payload,
+            sorted_channels,
+            planes,
+            width,
+            block_y0,
+            lines_in_block,
+            uncompressed_size,
+        )?;
+        return Ok(());
+    }
+
+    let uncompressed: Vec<u8> = match compression {
+        Compression::None => {
+            if payload.len() != uncompressed_size {
+                return Err(ExrError::invalid(format!(
+                    "block {block_idx} uncompressed size mismatch: have {} want {}",
+                    payload.len(),
+                    uncompressed_size
+                )));
+            }
+            payload.to_vec()
+        }
+        Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
+        Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
+        Compression::Pxr24 => decode_pxr24_payload(
+            payload,
+            &Pxr24RowSpec {
+                sorted_channels,
+                width,
+                block_y0,
+                lines_in_block,
+            },
+            uncompressed_size,
+        )?,
+        Compression::Piz => crate::piz::decode_piz_payload(
+            payload,
+            &crate::piz::ChunkShape {
+                sorted_channels,
+                width,
+                block_y0,
+                lines_in_block,
+            },
+            uncompressed_size,
+        )?,
+        Compression::Dwaa | Compression::Dwab => crate::dwa::decode_dwa_payload(
+            payload,
+            &crate::piz::ChunkShape {
+                sorted_channels,
+                width,
+                block_y0,
+                lines_in_block,
+            },
+            uncompressed_size,
+        )?,
+        other => {
+            return Err(ExrError::unsupported(format!(
+                "scanline compression {other:?} not yet implemented"
+            )));
+        }
+    };
+
+    scatter_block_into_planes(
+        &uncompressed,
+        sorted_channels,
+        planes,
+        width,
+        height,
+        block_y0,
+        lines_in_block,
+    )?;
+    Ok(())
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// Least common multiple, saturating.
+fn lcm(a: u32, b: u32) -> u32 {
+    (a / gcd(a, b).max(1)).saturating_mul(b)
+}
+
+/// Decode `units` — chunks that each write the rows `span(unit)` =
+/// `(first row, rows)` of the image — into planes covering `height`
+/// rows, fanning bands of rows over the worker budget.
+///
+/// `new_planes(rows)` allocates zeroed planes for a band of `rows`
+/// rows; `decode(unit, index, planes, band_y0, band_rows)` decodes one
+/// unit into the planes of the band starting at `band_y0`. Band
+/// boundaries are multiples of `align`; a unit that would straddle one
+/// sends the whole image down the single-band (serial) path. Units of
+/// a band run in table order and the error of the lowest failing index
+/// is returned, so the result is the same at every budget.
+fn decode_in_bands<U, S, N, D>(
+    units: &[U],
+    height: u32,
+    align: u32,
+    span: S,
+    new_planes: N,
+    decode: D,
+) -> Result<Vec<ExrPlane>>
+where
+    U: Sync,
+    S: Fn(&U) -> (u32, u32) + Sync,
+    N: Fn(u32) -> Vec<ExrPlane> + Sync,
+    D: Fn(&U, usize, &mut [ExrPlane], u32, u32) -> Result<()> + Sync,
+{
+    let align = align.max(1);
+    let workers = crate::parallel::budget().min(units.len()) as u32;
+    let band_rows = if workers > 1 {
+        height
+            .div_ceil(workers)
+            .checked_next_multiple_of(align)
+            .unwrap_or(height)
+            .max(1)
+    } else {
+        height
+    };
+    let bands = height.div_ceil(band_rows.max(1)) as usize;
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); bands.max(1)];
+    let mut banded = bands > 1;
+    if banded {
+        for (i, u) in units.iter().enumerate() {
+            let (row, rows) = span(u);
+            let band = (row / band_rows) as usize;
+            let end = (band as u32 + 1).saturating_mul(band_rows).min(height);
+            if band >= bands || row.saturating_add(rows) > end {
+                banded = false;
+                break;
+            }
+            members[band].push(i);
+        }
+    }
+    if !banded {
+        let mut planes = new_planes(height);
+        for (i, u) in units.iter().enumerate() {
+            decode(u, i, &mut planes, 0, height)?;
+        }
+        return Ok(planes);
+    }
+    let decoded = crate::parallel::map_indexed(bands, |band| {
+        let y0 = band as u32 * band_rows;
+        let rows = band_rows.min(height - y0);
+        let mut planes = new_planes(rows);
+        for &i in &members[band] {
+            if let Err(e) = decode(&units[i], i, &mut planes, y0, rows) {
+                return (planes, Some((i, e)));
+            }
+        }
+        (planes, None)
+    });
+    let mut first_error: Option<(usize, ExrError)> = None;
+    let mut bands_planes = Vec::with_capacity(decoded.len());
+    for (planes, error) in decoded {
+        if let Some((i, e)) = error
+            && first_error.as_ref().is_none_or(|(j, _)| i < *j)
+        {
+            first_error = Some((i, e));
+        }
+        bands_planes.push(planes);
+    }
+    if let Some((_, e)) = first_error {
+        return Err(e);
+    }
+    // Stitch the bands, top to bottom, per channel.
+    let channels = bands_planes.first().map_or(0, Vec::len);
+    let mut out = Vec::with_capacity(channels);
+    for c in 0..channels {
+        let total: usize = bands_planes.iter().map(|p| p[c].samples.len()).sum();
+        let mut samples = Vec::with_capacity(total);
+        for band in &bands_planes {
+            samples.extend_from_slice(&band[c].samples);
+        }
+        out.push(ExrPlane {
+            name: std::mem::take(&mut bands_planes[0][c].name),
+            samples,
+        });
+    }
+    Ok(out)
+}
+
 /// Parse a single-part EXR file (scanline OR tiled) from a byte slice.
 ///
 /// For multi-part files use [`parse_exr_multipart`] instead; this
@@ -707,155 +993,61 @@ pub fn parse_exr(bytes: &[u8]) -> Result<ExrPart> {
         pos += 8;
     }
 
-    // Allocate per-channel f32 planes at each channel's sub-sampled size.
-    let mut planes: Vec<ExrPlane> = sorted_channels
-        .iter()
-        .map(|c| {
-            let pw = subsampled_dim(width, c.x_sampling as u32) as usize;
-            let ph = subsampled_dim(height, c.y_sampling as u32) as usize;
-            ExrPlane {
-                name: c.name.clone(),
-                samples: vec![0.0; pw * ph],
-            }
-        })
-        .collect();
-
+    // Chunk headers in table order, up to the first unreadable one.
+    let mut blocks: Vec<ScanlineBlock<'_>> = Vec::with_capacity(num_blocks);
+    let mut header_error: Option<ExrError> = None;
     for (block_idx, &block_off) in offsets.iter().enumerate() {
-        // `block_off` is an untrusted u64 from the offset table cast to
-        // usize; a hostile value near usize::MAX would overflow the
-        // `block_off + 8` bounds check itself (debug panic / release wrap
-        // into an out-of-bounds slice). Add with overflow detection.
-        let block_hdr_end = block_off
-            .checked_add(8)
-            .filter(|&e| e <= bytes.len())
-            .ok_or_else(|| {
-                ExrError::invalid(format!("block {block_idx} offset {block_off} past EOF"))
-            })?;
-        let y_coord = i32::from_le_bytes(bytes[block_off..block_off + 4].try_into().unwrap());
-        let payload_size =
-            i32::from_le_bytes(bytes[block_off + 4..block_hdr_end].try_into().unwrap());
-        if payload_size < 0 {
-            return Err(ExrError::invalid(format!(
-                "block {block_idx} negative size {payload_size}"
-            )));
+        match read_scanline_block(bytes, block_idx, block_off, &req, height, block_h) {
+            Ok(block) => blocks.push(block),
+            Err(e) => {
+                header_error = Some(e);
+                break;
+            }
         }
-        let payload_start = block_hdr_end;
-        let payload_end = payload_start
-            .checked_add(payload_size as usize)
-            .ok_or_else(|| {
-                ExrError::invalid(format!(
-                    "block {block_idx} payload size {payload_size} overflows address space"
-                ))
-            })?;
-        if payload_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "block {block_idx} payload runs past EOF (start {payload_start}, size {payload_size})"
-            )));
-        }
-        let payload = &bytes[payload_start..payload_end];
+    }
 
-        let row_in_image = (y_coord - req.data_window.y_min) as i64;
-        if row_in_image < 0 || row_in_image as u32 >= height {
-            return Err(ExrError::invalid(format!(
-                "block {block_idx} Y={y_coord} outside dataWindow y_min={}, height={}",
-                req.data_window.y_min, height
-            )));
-        }
-        let lines_in_block = ((height - row_in_image as u32).min(block_h)) as usize;
-
-        // Per-block uncompressed size = sum over channels of
-        // (effective per-channel rows in this block) * (sub-sampled
-        // width) * (bytes per sample).
-        let block_y0 = row_in_image as u32;
-        let uncompressed_size: usize = sorted_channels
+    // Blocks are independent; bands of rows are decoded over the worker
+    // budget. Band boundaries respect the block height and every
+    // channel's vertical sampling, so a band-local row index selects
+    // the same channels as the image row.
+    let align = sorted_channels
+        .iter()
+        .fold(block_h, |a, c| lcm(a, c.y_sampling.max(1) as u32));
+    let new_planes = |rows: u32| -> Vec<ExrPlane> {
+        sorted_channels
             .iter()
-            .map(|ch| {
-                let ys = ch.y_sampling as u32;
-                let lines = (0..lines_in_block as u32)
-                    .filter(|&l| (block_y0 + l).is_multiple_of(ys))
-                    .count();
-                let xs = ch.x_sampling as u32;
-                let pw = subsampled_dim(width, xs) as usize;
-                lines * ch.pixel_type.bytes_per_sample() * pw
-            })
-            .sum();
-
-        // B44 / B44A do not produce the standard interleaved scanline
-        // stream; they decode into per-channel planes and scatter
-        // directly. The shared raw fallback (compressed == uncompressed)
-        // is handled inside the B44 branch.
-        if matches!(req.compression, Compression::B44 | Compression::B44a) {
-            scatter_b44_block_into_planes(
-                payload,
-                &sorted_channels,
-                &mut planes,
-                width,
-                block_y0,
-                lines_in_block,
-                uncompressed_size,
-            )?;
-            continue;
-        }
-
-        let uncompressed: Vec<u8> = match req.compression {
-            Compression::None => {
-                if payload.len() != uncompressed_size {
-                    return Err(ExrError::invalid(format!(
-                        "block {block_idx} uncompressed size mismatch: have {} want {}",
-                        payload.len(),
-                        uncompressed_size
-                    )));
+            .map(|c| {
+                let pw = subsampled_dim(width, c.x_sampling as u32) as usize;
+                let ph = subsampled_dim(rows, c.y_sampling as u32) as usize;
+                ExrPlane {
+                    name: c.name.clone(),
+                    samples: vec![0.0; pw * ph],
                 }
-                payload.to_vec()
-            }
-            Compression::Zip | Compression::Zips => decode_zip_payload(payload, uncompressed_size)?,
-            Compression::Rle => decode_rle_payload(payload, uncompressed_size)?,
-            Compression::Pxr24 => decode_pxr24_payload(
-                payload,
-                &Pxr24RowSpec {
-                    sorted_channels: &sorted_channels,
-                    width,
-                    block_y0,
-                    lines_in_block,
-                },
-                uncompressed_size,
-            )?,
-            Compression::Piz => crate::piz::decode_piz_payload(
-                payload,
-                &crate::piz::ChunkShape {
-                    sorted_channels: &sorted_channels,
-                    width,
-                    block_y0,
-                    lines_in_block,
-                },
-                uncompressed_size,
-            )?,
-            Compression::Dwaa | Compression::Dwab => crate::dwa::decode_dwa_payload(
-                payload,
-                &crate::piz::ChunkShape {
-                    sorted_channels: &sorted_channels,
-                    width,
-                    block_y0,
-                    lines_in_block,
-                },
-                uncompressed_size,
-            )?,
-            other => {
-                return Err(ExrError::unsupported(format!(
-                    "scanline compression {other:?} not yet implemented"
-                )));
-            }
-        };
-
-        scatter_block_into_planes(
-            &uncompressed,
-            &sorted_channels,
-            &mut planes,
-            width,
-            height,
-            block_y0,
-            lines_in_block,
-        )?;
+            })
+            .collect()
+    };
+    let planes = decode_in_bands(
+        &blocks,
+        height,
+        align,
+        |b| (b.row, b.lines as u32),
+        new_planes,
+        |block, block_idx, planes, band_y0, band_height| {
+            decode_scanline_block(
+                block.payload,
+                &sorted_channels,
+                planes,
+                width,
+                band_height,
+                block.row - band_y0,
+                block.lines,
+                req.compression,
+                block_idx,
+            )
+        },
+    )?;
+    if let Some(e) = header_error {
+        return Err(e);
     }
 
     Ok(ExrPart {
@@ -1146,6 +1338,90 @@ fn scatter_b44_tile_into_planes(
     Ok(())
 }
 
+/// One level-(0, 0) tile located in the file.
+struct LevelZeroTile<'a> {
+    index: usize,
+    x0: u32,
+    y0: u32,
+    tw: usize,
+    th: usize,
+    payload: &'a [u8],
+}
+
+/// Read and validate the framing of the tile chunk at `tile_off`;
+/// `None` for a tile of another level.
+fn read_level_zero_tile<'a>(
+    bytes: &'a [u8],
+    tile_idx: usize,
+    tile_off: usize,
+    tdesc: &crate::tiled::TileDesc,
+    width: u32,
+    height: u32,
+) -> Result<Option<LevelZeroTile<'a>>> {
+    // `tile_off` is an untrusted u64 offset-table entry cast to usize;
+    // guard the 20-byte tile-header bounds check against usize overflow.
+    let tile_hdr_end = tile_off
+        .checked_add(20)
+        .filter(|&e| e <= bytes.len())
+        .ok_or_else(|| ExrError::invalid(format!("tile {tile_idx} offset {tile_off} past EOF")))?;
+    let h_tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
+    let h_ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
+    let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
+    let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
+    let payload_size = i32::from_le_bytes(bytes[tile_off + 16..tile_hdr_end].try_into().unwrap());
+    if payload_size < 0 {
+        return Err(ExrError::invalid(format!(
+            "tile {tile_idx} negative payload size {payload_size}"
+        )));
+    }
+    let pl_start = tile_hdr_end;
+    let pl_end = pl_start.checked_add(payload_size as usize).ok_or_else(|| {
+        ExrError::invalid(format!(
+            "tile {tile_idx} payload size {payload_size} overflows address space"
+        ))
+    })?;
+    if pl_end > bytes.len() {
+        return Err(ExrError::invalid(format!(
+            "tile {tile_idx} payload runs past EOF"
+        )));
+    }
+
+    // Only decode the full-resolution level.
+    if lvl_x != 0 || lvl_y != 0 {
+        return Ok(None);
+    }
+
+    let tx = h_tx as u32;
+    let ty = h_ty as u32;
+    let payload = &bytes[pl_start..pl_end];
+
+    // `h_tx`/`h_ty` come straight off the wire; hostile values must
+    // not underflow the edge-tile clip below.
+    let txc = width.div_ceil(tdesc.x_size);
+    let tyc = height.div_ceil(tdesc.y_size);
+    if h_tx < 0 || h_ty < 0 || tx >= txc || ty >= tyc {
+        return Err(ExrError::invalid(format!(
+            "tile {tile_idx} at ({h_tx},{h_ty}) outside tile grid {txc}×{tyc}"
+        )));
+    }
+
+    let x0 = tx.saturating_mul(tdesc.x_size);
+    let y0 = ty.saturating_mul(tdesc.y_size);
+    let x1 = (x0 + tdesc.x_size).min(width);
+    let y1 = (y0 + tdesc.y_size).min(height);
+    let tw = (x1 - x0) as usize;
+    let th = (y1 - y0) as usize;
+
+    Ok(Some(LevelZeroTile {
+        index: tile_idx,
+        x0,
+        y0,
+        tw,
+        th,
+        payload,
+    }))
+}
+
 /// Decode a tiled single-part EXR file.
 ///
 /// Supports ONE_LEVEL, MIPMAP_LEVELS, and RIPMAP_LEVELS. For multi-level
@@ -1217,86 +1493,93 @@ fn parse_tiled(
         pos += 8;
     }
 
-    let mut planes: Vec<ExrPlane> = sorted_channels
-        .iter()
-        .map(|c| ExrPlane {
-            name: c.name.clone(),
-            samples: vec![0.0; (width * height) as usize],
-        })
-        .collect();
-
-    // Iterate all tiles. For multi-level files we only scatter tiles with
-    // lvlx=0 and lvly=0 (the full-resolution level) into the planes.
+    // Tile headers in table order, up to the first unreadable one;
+    // tiles of levels other than (0, 0) are skipped.
+    let mut tiles: Vec<LevelZeroTile<'_>> = Vec::with_capacity(all_offsets.len());
+    let mut header_error: Option<ExrError> = None;
     for (tile_idx, &tile_off) in all_offsets.iter().enumerate() {
-        // `tile_off` is an untrusted u64 offset-table entry cast to usize;
-        // guard the 20-byte tile-header bounds check against usize overflow.
-        let tile_hdr_end = tile_off
-            .checked_add(20)
-            .filter(|&e| e <= bytes.len())
-            .ok_or_else(|| {
-                ExrError::invalid(format!("tile {tile_idx} offset {tile_off} past EOF"))
-            })?;
-        let h_tx = i32::from_le_bytes(bytes[tile_off..tile_off + 4].try_into().unwrap());
-        let h_ty = i32::from_le_bytes(bytes[tile_off + 4..tile_off + 8].try_into().unwrap());
-        let lvl_x = i32::from_le_bytes(bytes[tile_off + 8..tile_off + 12].try_into().unwrap());
-        let lvl_y = i32::from_le_bytes(bytes[tile_off + 12..tile_off + 16].try_into().unwrap());
-        let payload_size =
-            i32::from_le_bytes(bytes[tile_off + 16..tile_hdr_end].try_into().unwrap());
-        if payload_size < 0 {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} negative payload size {payload_size}"
-            )));
+        match read_level_zero_tile(bytes, tile_idx, tile_off, &tdesc, width, height) {
+            Ok(Some(tile)) => tiles.push(tile),
+            Ok(None) => {}
+            Err(e) => {
+                header_error = Some(e);
+                break;
+            }
         }
-        let pl_start = tile_hdr_end;
-        let pl_end = pl_start.checked_add(payload_size as usize).ok_or_else(|| {
-            ExrError::invalid(format!(
-                "tile {tile_idx} payload size {payload_size} overflows address space"
-            ))
+    }
+
+    // Tiles are independent; bands of tile rows are decoded over the
+    // worker budget.
+    let new_planes = |rows: u32| -> Vec<ExrPlane> {
+        sorted_channels
+            .iter()
+            .map(|c| ExrPlane {
+                name: c.name.clone(),
+                samples: vec![0.0; width as usize * rows as usize],
+            })
+            .collect()
+    };
+    let planes = if crate::parallel::budget() > 1 && tiles.len() > 1 {
+        // Each tile into its own planes, then stitched in table order
+        // (so a tile stored twice resolves as in the serial path).
+        let decoded = crate::parallel::try_map_indexed(tiles.len(), |i| -> Result<_> {
+            let tile = &tiles[i];
+            let mut local: Vec<ExrPlane> = sorted_channels
+                .iter()
+                .map(|_| ExrPlane {
+                    name: String::new(),
+                    samples: vec![0.0; tile.tw * tile.th],
+                })
+                .collect();
+            scatter_tile_into_planes(
+                tile.payload,
+                sorted_channels,
+                &mut local,
+                tile.tw as u32,
+                0,
+                0,
+                tile.tw,
+                tile.th,
+                req.compression,
+                tile.index,
+            )?;
+            Ok(local)
         })?;
-        if pl_end > bytes.len() {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} payload runs past EOF"
-            )));
+        let mut planes = new_planes(height);
+        for (tile, local) in tiles.iter().zip(&decoded) {
+            for (plane, part) in planes.iter_mut().zip(local) {
+                for (r, row) in part.samples.chunks_exact(tile.tw.max(1)).enumerate() {
+                    let at = (tile.y0 as usize + r) * width as usize + tile.x0 as usize;
+                    plane.samples[at..at + tile.tw].copy_from_slice(row);
+                }
+            }
         }
-
-        // Only decode the full-resolution level.
-        if lvl_x != 0 || lvl_y != 0 {
-            continue;
-        }
-
-        let tx = h_tx as u32;
-        let ty = h_ty as u32;
-        let payload = &bytes[pl_start..pl_end];
-
-        // `h_tx`/`h_ty` come straight off the wire; hostile values must
-        // not underflow the edge-tile clip below.
-        let txc = width.div_ceil(tdesc.x_size);
-        let tyc = height.div_ceil(tdesc.y_size);
-        if h_tx < 0 || h_ty < 0 || tx >= txc || ty >= tyc {
-            return Err(ExrError::invalid(format!(
-                "tile {tile_idx} at ({h_tx},{h_ty}) outside tile grid {txc}×{tyc}"
-            )));
-        }
-
-        let x0 = tx.saturating_mul(tdesc.x_size);
-        let y0 = ty.saturating_mul(tdesc.y_size);
-        let x1 = (x0 + tdesc.x_size).min(width);
-        let y1 = (y0 + tdesc.y_size).min(height);
-        let tw = (x1 - x0) as usize;
-        let th = (y1 - y0) as usize;
-
-        scatter_tile_into_planes(
-            payload,
-            sorted_channels,
-            &mut planes,
-            width,
-            x0,
-            y0,
-            tw,
-            th,
-            req.compression,
-            tile_idx,
-        )?;
+        planes
+    } else {
+        decode_in_bands(
+            &tiles,
+            height,
+            tdesc.y_size,
+            |t| (t.y0, t.th as u32),
+            new_planes,
+            |tile, _, planes, band_y0, _| {
+                scatter_tile_into_planes(
+                    tile.payload,
+                    sorted_channels,
+                    planes,
+                    width,
+                    tile.x0,
+                    tile.y0 - band_y0,
+                    tile.tw,
+                    tile.th,
+                    req.compression,
+                    tile.index,
+                )
+            },
+        )?
+    };
+    if let Some(e) = header_error {
+        return Err(e);
     }
 
     Ok(ExrPart {

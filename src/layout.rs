@@ -1280,7 +1280,10 @@ pub(crate) fn regular_multipart(bytes: &[u8]) -> Result<Cow<'_, [u8]>> {
             expected = r.end;
         }
     }
-    if counts_exact && back_to_back {
+    // The deep flag as a writer sets it: the part readers go by it.
+    let any_deep = layout.parts.iter().any(|p| p.kind.is_deep());
+    let flags_regular = layout.version.non_image == any_deep;
+    if counts_exact && back_to_back && flags_regular {
         return Ok(Cow::Borrowed(bytes));
     }
     let mut parts = Vec::with_capacity(layout.parts.len());
@@ -1308,12 +1311,8 @@ pub(crate) fn regular_multipart(bytes: &[u8]) -> Result<Cow<'_, [u8]>> {
             chunks: ranges.iter().map(|r| &bytes[r.start + 4..r.end]).collect(),
         });
     }
-    let mut out = assemble(true, &parts);
-    // Keep the deep flag as the file had it: the parts decide.
-    let raw = u32::from_le_bytes(out[4..8].try_into().unwrap())
-        | (layout.version.raw & (FLAG_DEEP | FLAG_LONG_NAMES));
-    out[4..8].copy_from_slice(&raw.to_le_bytes());
-    Ok(Cow::Owned(out))
+    // `assemble` sets the deep and long-name flags from the parts.
+    Ok(Cow::Owned(assemble(true, &parts)))
 }
 
 /// Finish a file a writer of this crate assembled: set the long-name
@@ -1460,11 +1459,25 @@ pub fn split_parts(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
 /// flag for a `tiledimage` part, the deep flag for a deep part and the
 /// long-name flag when that header has a name above 31 bytes.
 pub fn split_parts_with(bytes: &[u8], opts: &SplitOptions) -> Result<Vec<Vec<u8>>> {
+    let parts = split_selected(bytes, opts, |_| true)?;
+    Ok(parts.into_iter().map(|(_, file)| file).collect())
+}
+
+/// [`split_parts_with`] for the parts `pick` selects: each as `(index,
+/// single-part file)`. The whole layout is validated either way.
+pub(crate) fn split_selected(
+    bytes: &[u8],
+    opts: &SplitOptions,
+    pick: impl Fn(&PartLayout) -> bool,
+) -> Result<Vec<(u32, Vec<u8>)>> {
     let layout = FileLayout::read(bytes)?;
     let map = layout.chunks(bytes)?;
     let prefix = layout.prefix();
     let mut out = Vec::with_capacity(layout.parts.len());
     for (p, ranges) in layout.parts.iter().zip(&map.parts) {
+        if !pick(p) {
+            continue;
+        }
         let keep = |name: &str| {
             if !opts.strip_part_attributes {
                 return true;
@@ -1496,7 +1509,7 @@ pub fn split_parts_with(bytes: &[u8], opts: &SplitOptions) -> Result<Vec<Vec<u8>
                 .map(|r| &bytes[r.start + prefix..r.end])
                 .collect(),
         };
-        out.push(assemble(false, &[part]));
+        out.push((p.index, assemble(false, &[part])));
     }
     Ok(out)
 }

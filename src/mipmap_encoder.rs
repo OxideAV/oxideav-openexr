@@ -374,67 +374,31 @@ pub(crate) fn encode_exr_tiled_mipmap_with_attributes(
     // Build per-tile payloads. Iteration order: levels 0..N-1, within each
     // level ty outer (0..ty_count), tx inner (0..tx_count).
     #[allow(clippy::type_complexity)]
-    let mut tile_chunks: Vec<(u32, u32, u32, u32, Vec<u8>)> =
-        Vec::with_capacity(chunk_count as usize);
+    let mut jobs: Vec<(usize, u32, u32)> = Vec::with_capacity(chunk_count as usize);
     for (l, lvl) in pyramid.iter().enumerate() {
-        let lvl_idx = l as u32;
-        let tx_count = lvl.width.div_ceil(tile_x);
-        let ty_count = lvl.height.div_ceil(tile_y);
-        for ty in 0..ty_count {
-            for tx in 0..tx_count {
-                let x0 = tx * tile_x;
-                let y0 = ty * tile_y;
-                let x1 = (x0 + tile_x).min(lvl.width);
-                let y1 = (y0 + tile_y).min(lvl.height);
-                let tw = (x1 - x0) as usize;
-                let th = (y1 - y0) as usize;
-                let bpp: usize = channels
-                    .iter()
-                    .map(|c| c.pixel_type.bytes_per_sample())
-                    .sum();
-                let mut raw = Vec::with_capacity(tw * th * bpp);
-                for line in 0..th {
-                    let dst_y = y0 as usize + line;
-                    for (ch_idx, ch) in channels.iter().enumerate() {
-                        let plane = &lvl.planes[ch_idx];
-                        for xx in 0..tw {
-                            let dst_x = x0 as usize + xx;
-                            let v = plane[dst_y * lvl.width as usize + dst_x];
-                            match ch.pixel_type {
-                                PixelType::Half => raw
-                                    .extend_from_slice(&crate::half::f32_to_half(v).to_le_bytes()),
-                                PixelType::Float => raw.extend_from_slice(&v.to_le_bytes()),
-                                PixelType::Uint => {
-                                    let u = if v.is_nan() || v < 0.0 {
-                                        0u32
-                                    } else if v >= (u32::MAX as f32) {
-                                        u32::MAX
-                                    } else {
-                                        (v + 0.5) as u32
-                                    };
-                                    raw.extend_from_slice(&u.to_le_bytes());
-                                }
-                            }
-                        }
-                    }
-                }
-                let payload = compress_multilevel_tile_payload(
-                    raw,
-                    channels,
-                    &lvl.planes,
-                    lvl.width,
-                    x0,
-                    y0,
-                    tw,
-                    th,
-                    compression,
-                )?;
-                // For MIPMAP_LEVELS the chunk header carries lvlx == lvly
-                // == level index (the diagonal of the (lvlx, lvly) grid).
-                tile_chunks.push((tx, ty, lvl_idx, lvl_idx, payload));
+        for ty in 0..lvl.height.div_ceil(tile_y) {
+            for tx in 0..lvl.width.div_ceil(tile_x) {
+                jobs.push((l, tx, ty));
             }
         }
     }
+    // Tiles are independent: built over the worker budget, kept in
+    // canonical order. For MIPMAP_LEVELS the chunk header carries
+    // lvlx == lvly == level index (the diagonal of the level grid).
+    let tile_chunks: Vec<(u32, u32, u32, u32, Vec<u8>)> =
+        crate::parallel::try_map_indexed(jobs.len(), |i| -> Result<_> {
+            let (l, tx, ty) = jobs[i];
+            let lvl = &pyramid[l];
+            let payload = multilevel_tile_payload(
+                channels,
+                &lvl.planes,
+                (lvl.width, lvl.height),
+                (tile_x, tile_y),
+                (tx, ty),
+                compression,
+            )?;
+            Ok((tx, ty, l as u32, l as u32, payload))
+        })?;
 
     let storage_order = multilevel_storage_order(&tile_chunks, line_order);
     crate::layout::finish_written(emit_tiled_chunks(
@@ -442,6 +406,35 @@ pub(crate) fn encode_exr_tiled_mipmap_with_attributes(
         &tile_chunks,
         &storage_order,
     ))
+}
+
+/// The stored payload of tile `(tx, ty)` of one level: its native
+/// row-major stream (channels in list order inside each row), then the
+/// part's compression.
+fn multilevel_tile_payload(
+    channels: &[Channel],
+    planes: &[Vec<f32>],
+    (width, height): (u32, u32),
+    (tile_x, tile_y): (u32, u32),
+    (tx, ty): (u32, u32),
+    compression: Compression,
+) -> Result<Vec<u8>> {
+    let x0 = tx * tile_x;
+    let y0 = ty * tile_y;
+    let tw = ((x0 + tile_x).min(width) - x0) as usize;
+    let th = ((y0 + tile_y).min(height) - y0) as usize;
+    let bpp: usize = channels
+        .iter()
+        .map(|c| c.pixel_type.bytes_per_sample())
+        .sum();
+    let mut raw = Vec::with_capacity(tw * th * bpp);
+    for line in 0..th {
+        let at = (y0 as usize + line) * width as usize + x0 as usize;
+        for (ch, plane) in channels.iter().zip(planes) {
+            crate::encoder::push_native_row(&mut raw, &plane[at..at + tw], ch.pixel_type);
+        }
+    }
+    compress_multilevel_tile_payload(raw, channels, planes, width, x0, y0, tw, th, compression)
 }
 
 /// Storage permutation over a canonical multilevel tile-chunk list.
@@ -1089,67 +1082,30 @@ pub(crate) fn encode_exr_tiled_ripmap_with_attributes(
     // Build per-tile payloads. Iteration order: lvly outer (0..ny), lvlx
     // inner (0..nx), then within a level ty outer, tx inner.
     #[allow(clippy::type_complexity)]
-    let mut tile_chunks: Vec<(u32, u32, u32, u32, Vec<u8>)> =
-        Vec::with_capacity(chunk_count as usize);
+    let mut jobs: Vec<(usize, usize, u32, u32)> = Vec::with_capacity(chunk_count as usize);
     for (lvly, row) in pyramid.grid.iter().enumerate() {
         for (lvlx, cell) in row.iter().enumerate() {
-            let tx_count = cell.width.div_ceil(tile_x);
-            let ty_count = cell.height.div_ceil(tile_y);
-            let bpp: usize = channels
-                .iter()
-                .map(|c| c.pixel_type.bytes_per_sample())
-                .sum();
-            for ty in 0..ty_count {
-                for tx in 0..tx_count {
-                    let x0 = tx * tile_x;
-                    let y0 = ty * tile_y;
-                    let x1 = (x0 + tile_x).min(cell.width);
-                    let y1 = (y0 + tile_y).min(cell.height);
-                    let tw = (x1 - x0) as usize;
-                    let th = (y1 - y0) as usize;
-                    let mut raw = Vec::with_capacity(tw * th * bpp);
-                    for line in 0..th {
-                        let dst_y = y0 as usize + line;
-                        for (ch_idx, ch) in channels.iter().enumerate() {
-                            let plane = &cell.planes[ch_idx];
-                            for xx in 0..tw {
-                                let dst_x = x0 as usize + xx;
-                                let v = plane[dst_y * cell.width as usize + dst_x];
-                                match ch.pixel_type {
-                                    PixelType::Half => raw.extend_from_slice(
-                                        &crate::half::f32_to_half(v).to_le_bytes(),
-                                    ),
-                                    PixelType::Float => raw.extend_from_slice(&v.to_le_bytes()),
-                                    PixelType::Uint => {
-                                        let u = if v.is_nan() || v < 0.0 {
-                                            0u32
-                                        } else if v >= (u32::MAX as f32) {
-                                            u32::MAX
-                                        } else {
-                                            (v + 0.5) as u32
-                                        };
-                                        raw.extend_from_slice(&u.to_le_bytes());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let payload = compress_multilevel_tile_payload(
-                        raw,
-                        channels,
-                        &cell.planes,
-                        cell.width,
-                        x0,
-                        y0,
-                        tw,
-                        th,
-                        compression,
-                    )?;
-                    tile_chunks.push((tx, ty, lvlx as u32, lvly as u32, payload));
+            for ty in 0..cell.height.div_ceil(tile_y) {
+                for tx in 0..cell.width.div_ceil(tile_x) {
+                    jobs.push((lvlx, lvly, tx, ty));
                 }
             }
         }
     }
+    let tile_chunks: Vec<(u32, u32, u32, u32, Vec<u8>)> =
+        crate::parallel::try_map_indexed(jobs.len(), |i| -> Result<_> {
+            let (lvlx, lvly, tx, ty) = jobs[i];
+            let cell = &pyramid.grid[lvly][lvlx];
+            let payload = multilevel_tile_payload(
+                channels,
+                &cell.planes,
+                (cell.width, cell.height),
+                (tile_x, tile_y),
+                (tx, ty),
+                compression,
+            )?;
+            Ok((tx, ty, lvlx as u32, lvly as u32, payload))
+        })?;
 
     let storage_order = multilevel_storage_order(&tile_chunks, line_order);
     crate::layout::finish_written(emit_tiled_chunks(
