@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-openexr/compare/v0.0.8...v0.0.9) - 2026-11-11
+
+### Other
+
+- exact in-place coefficient quantiser; tolerances once per chunk
+- header requirement verdicts of the multi-part note
+- Multi-level tiled reader under the worker budget; second black-box header reader in the layout tests
+- two-queue code-length construction, burst decode, adaptive lookup width
+- Chunk-parallel decode and encode under a worker budget; serial colour-view packing and tile building tightened
+- tiled output off the origin; encode_all writes every single-part layout per part
+- Multi-part layout per the observer note: typed layout rules, table-driven readers, byte-level repack; deep tile sample order
+- info / ExrPart: layers and multiView views exposed
+- row-at-a-time vertical passes, direct interior windows; framework-path fixture test; bench
+- luminance/chroma closed loop through reference tools
+- Luminance/chroma (Y / RY / BY) decode + encode on the traced model; multiView naming rules
+- API hygiene: #[non_exhaustive] on growable enums + image / part / header records, with constructors
+
 ### Added
 
 - `layout` module — the multi-part file layout from the staged observer note, standalone (no framework dependency): `FileLayout::read` / `read_headers` (version flags, header list, per-part kind, chunk counts computed from the part geometry, table positions), `FileLayout::chunks` (every chunk located through the offset tables, part numbers checked, zeroed tables rebuilt from the chunks), `check_layout(bytes, strict)`, `chunk_count(kind, attributes)`, `PartKind`, `PartLayout`, `ChunkMap`.
