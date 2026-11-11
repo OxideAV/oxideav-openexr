@@ -489,14 +489,14 @@ where noted below.
 | B44A | scanline | FLOAT | 415 | 523 | 1211 | 174 | 148 | 305 |
 | B44A | tiled 256 | HALF | 116 | 109 | 310 | 27 | 25 | 131 |
 | B44A | tiled 256 | FLOAT | 207 | 252 | 485 | 89 | 85 | 246 |
-| DWAA | scanline | HALF | 44 | 43 | 229 | 21 | 19 | 95 |
-| DWAA | scanline | FLOAT | 38 | 37 | 214 | 20 | 18 | 94 |
-| DWAA | tiled 256 | HALF | 44 | 43 | 188 | 19 | 18 | 96 |
-| DWAA | tiled 256 | FLOAT | 38 | 36 | 167 | 19 | 16 | 93 |
-| DWAB | scanline | HALF | 44 | 41 | 140 | 20 | 18 | 55 |
-| DWAB | scanline | FLOAT | 40 | 36 | 129 | 19 | 17 | 53 |
-| DWAB | tiled 256 | HALF | 44 | 40 | 176 | 19 | 16 | 93 |
-| DWAB | tiled 256 | FLOAT | 37 | 30 | 158 | 19 | 15 | 90 |
+| DWAA | scanline | HALF | 44 | 47 | 244 | 21 | 23 | 114 |
+| DWAA | scanline | FLOAT | 38 | 40 | 232 | 20 | 21 | 111 |
+| DWAA | tiled 256 | HALF | 44 | 45 | 202 | 19 | 21 | 111 |
+| DWAA | tiled 256 | FLOAT | 38 | 37 | 172 | 19 | 20 | 109 |
+| DWAB | scanline | HALF | 44 | 45 | 141 | 20 | 22 | 65 |
+| DWAB | scanline | FLOAT | 40 | 38 | 129 | 19 | 22 | 64 |
+| DWAB | tiled 256 | HALF | 44 | 44 | 192 | 19 | 21 | 104 |
+| DWAB | tiled 256 | FLOAT | 37 | 37 | 171 | 19 | 20 | 107 |
 
 What moved besides the fan-out (serial columns): the packed colour view
 is filled in place instead of grown sample by sample (NONE decode
@@ -510,11 +510,13 @@ PIZ FLOAT encode 9 → 18), and the decoder resolves several table codes
 per refill and widens its lookup table to 16 bits on large chunks with
 long codes (PIZ HALF decode 41 → 55). Both are pinned against the
 previous behaviour: identical code lengths (so identical files) and
-identical decode results at every table width. The other compute-bound
-schemes are serially unchanged: the zlib family is bounded by the
-deflate / inflate of the workspace's compression crate, DWA by its
-transform, and PXR24 encode (3 Mpx/s) by deflating byte planes that
-compress poorly.
+identical decode results at every table width. The DWA encoder's
+coefficient quantiser evaluates its candidates in place instead of
+converting each back from binary16 (the same choice for every input,
+pinned; DWAA encode 21 → 23). The zlib family is bounded by the deflate
+/ inflate of the workspace's compression crate (a profile of ZIP and
+PXR24 puts about 90 % of the time inside it), which is also why
+PXR24 encode sits at 3 Mpx/s: its byte planes compress poorly.
 
 ### Criterion harness
 

@@ -1108,17 +1108,45 @@ pub(crate) fn decode_dwa_payload(
 /// Quantise one DCT coefficient to a half code word within the given
 /// absolute tolerance, preferring representations with fewer set
 /// mantissa bits (patent-described objective; the exact choice is
-/// encoder-side only and never signalled — observer-spec §3.5).
+/// encoder-side only and never signalled — observer-spec §3.5): clear
+/// the low `k` mantissa bits of the nearest half for the largest `k`
+/// (tried 1, 2, … 10 in turn, stopping at the first failure) that
+/// keeps the value within the tolerance.
+///
+/// The candidates are evaluated without converting each one back from
+/// binary16: at a fixed exponent, clearing mantissa bits `m` moves the
+/// value by exactly `m` units of the last place, and both that product
+/// and the difference are exact in binary32 (a half, and the gap
+/// between two halves of one exponent, are exactly representable).
+/// Pinned against the convert-each-candidate form by
+/// `quantize_matches_the_reference`.
 fn quantize_coeff(c: f32, tol: f32) -> u16 {
     if c.abs() <= tol {
         return 0;
     }
     let base = crate::half::f32_to_half(c);
+    let exponent = (base >> 10) & 0x1F;
+    let mantissa = base & 0x3FF;
+    // Nothing to clear, or not a number: every candidate is `base`
+    // (or fails the first test).
+    if mantissa == 0 || exponent == 0x1F {
+        return base;
+    }
+    let value = crate::half::half_to_f32(base);
+    // One unit of the last place at this exponent (2^-24 for
+    // subnormals), signed like the value.
+    let unit_exponent = if exponent == 0 {
+        -24
+    } else {
+        exponent as i32 - 25
+    };
+    let unit = f32::from_bits(((unit_exponent + 127) as u32) << 23 | (base as u32 & 0x8000) << 16);
     let mut best = base;
     for k in 1..=10u16 {
-        let cand = base & !((1u16 << k) - 1);
-        if (crate::half::half_to_f32(cand) - c).abs() <= tol {
-            best = cand;
+        let mask = (1u16 << k) - 1;
+        let candidate = value - unit * (mantissa & mask) as f32;
+        if (candidate - c).abs() <= tol {
+            best = base & !mask;
         } else {
             break;
         }
@@ -1218,6 +1246,12 @@ pub(crate) fn dwa_compress(raw: &[u8], shape: &ChunkShape, level: f32) -> Result
     // --- Lossy sets: perceptual LUT, CSC, DCT, quantise, AC/DC coding ---
     let sets = build_lossy_sets(shape.sorted_channels, &classes);
     let error_target = level / 100_000.0;
+    // Per-coefficient tolerances in scan order, once per chunk.
+    let tolerance_table = |quant: &[u16; 64], quant_min: f32| -> [f32; 64] {
+        std::array::from_fn(|k| error_target * quant[ZIGZAG_RASTER[k]] as f32 / quant_min)
+    };
+    let luma_tolerance = tolerance_table(&QUANT_Y, QUANT_Y_MIN);
+    let chroma_tolerance = tolerance_table(&QUANT_CBCR, QUANT_CBCR_MIN);
     let mut ac_elems: Vec<u16> = Vec::new();
     let mut dc_elems: Vec<u16> = Vec::new();
     for set in &sets {
@@ -1325,15 +1359,14 @@ pub(crate) fn dwa_compress(raw: &[u8], shape: &ChunkShape, level: f32) -> Result
                 // Quantise under the per-coefficient tolerance: luma
                 // matrix for the first component of a triple (and lone
                 // channels), chroma for the rest (observer-spec §3.5).
-                let (quant, quant_min): (&[u16; 64], f32) = if comp == 0 {
-                    (&QUANT_Y, QUANT_Y_MIN)
+                let tolerances = if comp == 0 {
+                    &luma_tolerance
                 } else {
-                    (&QUANT_CBCR, QUANT_CBCR_MIN)
+                    &chroma_tolerance
                 };
                 let mut scan = [0u16; 64];
                 for (k, &r_idx) in ZIGZAG_RASTER.iter().enumerate() {
-                    let tol = error_target * quant[r_idx] as f32 / quant_min;
-                    scan[k] = quantize_coeff(block[r_idx], tol);
+                    scan[k] = quantize_coeff(block[r_idx], tolerances[k]);
                 }
 
                 set_dc[comp].push(scan[0]);
@@ -1459,6 +1492,76 @@ mod tests {
             p_linear: false,
             x_sampling: 1,
             y_sampling: 1,
+        }
+    }
+
+    /// The convert-each-candidate form `quantize_coeff` replaced.
+    fn quantize_reference(c: f32, tol: f32) -> u16 {
+        if c.abs() <= tol {
+            return 0;
+        }
+        let base = crate::half::f32_to_half(c);
+        let mut best = base;
+        for k in 1..=10u16 {
+            let cand = base & !((1u16 << k) - 1);
+            if (crate::half::half_to_f32(cand) - c).abs() <= tol {
+                best = cand;
+            } else {
+                break;
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn quantize_matches_the_reference() {
+        let tolerances = [
+            0.0f32,
+            1e-9,
+            1e-6,
+            4.5e-4,
+            1e-3,
+            0.01,
+            0.07,
+            0.5,
+            3.0,
+            1000.0,
+            f32::INFINITY,
+        ];
+        // Every half value, exactly and nudged off it, at fixed
+        // tolerances and at tolerances relative to the value.
+        for code in 0..=u16::MAX {
+            let v = crate::half::half_to_f32(code);
+            for c in [v, v * 1.0003, v * 0.9996, v + 1e-7, v - 3e-5] {
+                for &tol in &tolerances {
+                    assert_eq!(
+                        quantize_coeff(c, tol),
+                        quantize_reference(c, tol),
+                        "c = {c:e} (half {code:#06x}), tol = {tol:e}"
+                    );
+                }
+                for scale in [1e-4f32, 3e-3, 0.02, 0.2] {
+                    let tol = v.abs() * scale;
+                    assert_eq!(quantize_coeff(c, tol), quantize_reference(c, tol));
+                }
+            }
+        }
+        // Arbitrary binary32 inputs: beyond the half range, subnormal,
+        // non-finite.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..2_000_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let c = f32::from_bits(state as u32);
+            let tol = f32::from_bits((state >> 32) as u32 & 0x7FFF_FFFF);
+            assert_eq!(
+                quantize_coeff(c, tol),
+                quantize_reference(c, tol),
+                "c = {c:e}, tol = {tol:e}"
+            );
+            let small = c.abs() * 1e-3;
+            assert_eq!(quantize_coeff(c, small), quantize_reference(c, small));
         }
     }
 
