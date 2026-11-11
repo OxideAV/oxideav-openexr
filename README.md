@@ -468,10 +468,10 @@ where noted below.
 | ZIP | scanline | FLOAT | 16 | 17 | 108 | 5 | 4 | 25 |
 | ZIP | tiled 256 | HALF | 32 | 32 | 166 | 6 | 6 | 40 |
 | ZIP | tiled 256 | FLOAT | 16 | 16 | 99 | 4 | 4 | 25 |
-| PIZ | scanline | HALF | 41 | 41 | 265 | 41 | 37 | 168 |
-| PIZ | scanline | FLOAT | 17 | 16 | 111 | 9 | 8 | 49 |
-| PIZ | tiled 256 | HALF | 42 | 39 | 194 | 38 | 34 | 152 |
-| PIZ | tiled 256 | FLOAT | 17 | 16 | 99 | 9 | 8 | 47 |
+| PIZ | scanline | HALF | 41 | 55 | 265 | 41 | 40 | 169 |
+| PIZ | scanline | FLOAT | 17 | 17 | 113 | 9 | 18 | 99 |
+| PIZ | tiled 256 | HALF | 42 | 53 | 200 | 38 | 37 | 166 |
+| PIZ | tiled 256 | FLOAT | 17 | 17 | 99 | 9 | 18 | 96 |
 | PXR24 | scanline | HALF | 28 | 29 | 187 | 3 | 3 | 21 |
 | PXR24 | scanline | FLOAT | 19 | 19 | 128 | 3 | 3 | 18 |
 | PXR24 | tiled 256 | HALF | 31 | 32 | 159 | 4 | 4 | 25 |
@@ -498,10 +498,18 @@ is filled in place instead of grown sample by sample (NONE decode
 179 → 267, FLOAT 318 → 574; B44 / B44A FLOAT, which store FLOAT
 uncompressed, 423 → 608), and tile payloads are built from row slices
 with the pixel-type dispatch outside the sample loop (NONE FLOAT tiled
-encode 115 → 150). The compute-bound schemes are serially unchanged:
-the zlib family is bounded by the deflate / inflate of the workspace's
-compression crate, PIZ by its entropy coder, DWA by its transform, and
-PXR24 encode (3 Mpx/s) by deflating byte planes that compress poorly.
+encode 115 → 150). In PIZ, whose time is mostly entropy coding: the
+Huffman code lengths are built with a two-queue merge instead of a
+priority queue (FLOAT chunks code tens of thousands of distinct words:
+PIZ FLOAT encode 9 → 18), and the decoder resolves several table codes
+per refill and widens its lookup table to 16 bits on large chunks with
+long codes (PIZ HALF decode 41 → 55). Both are pinned against the
+previous behaviour: identical code lengths (so identical files) and
+identical decode results at every table width. The other compute-bound
+schemes are serially unchanged: the zlib family is bounded by the
+deflate / inflate of the workspace's compression crate, DWA by its
+transform, and PXR24 encode (3 Mpx/s) by deflating byte planes that
+compress poorly.
 
 ### Criterion harness
 

@@ -26,6 +26,10 @@ const MAX_CODE_LEN: usize = 58;
 /// Fast decode-table width: every code of length <= 14 resolves in one
 /// lookup (observer-spec §2.5 "decode table shape" note).
 const FAST_BITS: usize = 14;
+/// Widest decode table, used for large chunks with long codes.
+const WIDE_FAST_BITS: usize = 16;
+/// Values a chunk must hold before the wide table is worth filling.
+const WIDE_TABLE_MIN_VALUES: usize = 1 << 16;
 
 // ---------------------------------------------------------------------------
 // Bit I/O (MSB-first, left-aligned final byte)
@@ -41,9 +45,11 @@ struct BitWriter {
 }
 
 impl BitWriter {
-    fn new() -> Self {
+    /// A writer for about `values` coded 16-bit values (typical codes
+    /// average under a byte; the buffer grows if they do not).
+    fn with_capacity(values: usize) -> Self {
         BitWriter {
-            out: Vec::new(),
+            out: Vec::with_capacity(values + 16),
             acc: 0,
             nacc: 0,
             bits_written: 0,
@@ -205,7 +211,7 @@ const SHORT_ZERO_RUN_BASE: u64 = 59; // symbol 59 = run of 2 zeros .. 62 = run o
 const LONG_ZERO_RUN: u64 = 63; // + 8 raw bits, run of 6..=261
 
 fn pack_code_lengths(lengths: &[u8], im: usize, i_m: usize) -> Vec<u8> {
-    let mut w = BitWriter::new();
+    let mut w = BitWriter::with_capacity(0);
     let mut sym = im;
     while sym <= i_m {
         let l = lengths[sym];
@@ -272,6 +278,16 @@ fn unpack_code_lengths(data: &[u8], im: usize, i_m: usize) -> Result<(Vec<u8>, u
 
 /// Decode a Huffman payload into exactly `expected` 16-bit values.
 pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>> {
+    huf_decompress_with(payload, expected, None)
+}
+
+/// [`huf_decompress`] with the decode-table width forced (tests: every
+/// width must decode alike).
+fn huf_decompress_with(
+    payload: &[u8],
+    expected: usize,
+    table_bits: Option<usize>,
+) -> Result<Vec<u16>> {
     if expected == 0 {
         return Ok(Vec::new());
     }
@@ -353,21 +369,52 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
         }
     }
 
-    // Fast table: (symbol_index_u32 << 6) | length for codes <= FAST_BITS.
+    // Width of the direct-lookup table: 14 bits, or up to 16 when the
+    // chunk is large enough to pay for the bigger table and its codes
+    // are that long (FLOAT data often codes near 16 bits per word; a
+    // code the table does not hold costs a search over lengths). The
+    // width changes speed only: a code of at most `fast_bits` bits is
+    // resolved here exactly as the slow path would resolve it.
+    let longest = (1..=MAX_CODE_LEN)
+        .rev()
+        .find(|&l| n_per_len[l] != 0)
+        .unwrap_or(1);
+    let fast_bits: usize = match table_bits {
+        Some(bits) => bits.clamp(FAST_BITS, WIDE_FAST_BITS),
+        None if expected >= WIDE_TABLE_MIN_VALUES => longest.clamp(FAST_BITS, WIDE_FAST_BITS),
+        None => FAST_BITS,
+    };
+    // Codes resolved per refill in the burst below (56 buffered bits).
+    let burst = 56 / fast_bits;
+
+    // Fast table: (symbol_index_u32 << 6) | length for codes <= fast_bits.
     // Escape is stored as the sentinel symbol value ALPHABET-1 marker via
     // a parallel "is escape" bit: encode entry as (sym << 7) | (is_esc << 6)?
     // Simpler: store u32 = (sym << 6) | len where sym is the true index
     // (fits in 26 bits).
-    let mut fast = vec![0u32; 1 << FAST_BITS];
+    let mut fast = vec![0u32; 1 << fast_bits];
+    let mut fill = |i: usize, s: u32, l: usize| {
+        let lo = (codes[i] << (fast_bits - l)) as usize;
+        let hi = lo + (1usize << (fast_bits - l));
+        for slot in &mut fast[lo..hi] {
+            *slot = ((s << 6) | l as u32) + 1; // +1 so 0 = invalid
+        }
+    };
+    // Fill order = match priority, so a table of any width resolves a
+    // (malformed) non-prefix-free code set the way the 14-bit table
+    // plus the length search do: a code of at most 14 bits wins over
+    // any longer one, and among longer codes the shortest wins.
+    for wide in (FAST_BITS + 1..=fast_bits).rev() {
+        for (i, &s) in syms.iter().enumerate() {
+            if lengths[s as usize] as usize == wide {
+                fill(i, s, wide);
+            }
+        }
+    }
     for (i, &s) in syms.iter().enumerate() {
         let l = lengths[s as usize] as usize;
         if l <= FAST_BITS {
-            let code = codes[i];
-            let lo = (code << (FAST_BITS - l)) as usize;
-            let hi = lo + (1usize << (FAST_BITS - l));
-            for slot in &mut fast[lo..hi] {
-                *slot = ((s << 6) | l as u32) + 1; // +1 so 0 = invalid
-            }
+            fill(i, s, l);
         }
     }
 
@@ -429,15 +476,42 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
 
     while out.len() < expected {
         refill!();
-        // Peek FAST_BITS; bits past the declared limit read as zero.
-        let raw = acc >> (64 - FAST_BITS);
+        // Burst: with 56 buffered bits inside the limit and at least
+        // `burst` values still owed, `burst` fast-table codes (at most
+        // `fast_bits` bits each) need no per-symbol bounds checks. A long code or
+        // the run escape ends the burst and takes the general path
+        // below, which does exactly what the burst does for a short
+        // code — so the output and every error are unchanged.
+        if nacc >= 56 && limit - pos >= 56 && expected - out.len() >= burst {
+            let before = out.len();
+            for _ in 0..burst {
+                let entry = fast[(acc >> (64 - fast_bits)) as usize];
+                if entry == 0 {
+                    break;
+                }
+                let e = entry - 1;
+                if e >> 6 == escape {
+                    break;
+                }
+                let l = e & 63;
+                acc <<= l;
+                nacc -= l;
+                pos += l as u64;
+                out.push((e >> 6) as u16);
+            }
+            if out.len() != before {
+                continue;
+            }
+        }
+        // Peek fast_bits; bits past the declared limit read as zero.
+        let raw = acc >> (64 - fast_bits);
         let remaining = limit - pos;
-        let peeked = if remaining >= FAST_BITS as u64 {
+        let peeked = if remaining >= fast_bits as u64 {
             raw
         } else if remaining == 0 {
             0
         } else {
-            let pad = FAST_BITS as u32 - remaining as u32;
+            let pad = fast_bits as u32 - remaining as u32;
             (raw >> pad) << pad
         };
         let entry = fast[peeked as usize];
@@ -464,7 +538,7 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
             // exhaustion error.
             let avail = (nacc as u64).min(remaining).min(56) as usize;
             let mut found: Option<(u32, u32)> = None;
-            for l in (FAST_BITS + 1)..=avail {
+            for l in (fast_bits + 1)..=avail {
                 let n = n_per_len[l] as u64;
                 if n != 0 {
                     let code = acc >> (64 - l);
@@ -481,10 +555,10 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
                 pos += l as u64;
                 sym = s;
             } else {
-                // Slow path: accumulate bits beyond FAST_BITS until a
+                // Slow path: accumulate bits beyond fast_bits until a
                 // per-length range matches.
-                let mut acc_code = get!(FAST_BITS as u32);
-                let mut l = FAST_BITS;
+                let mut acc_code = get!(fast_bits as u32);
+                let mut l = fast_bits;
                 loop {
                     if l >= MAX_CODE_LEN {
                         return Err(ExrError::invalid(
@@ -527,83 +601,74 @@ pub(crate) fn huf_decompress(payload: &[u8], expected: usize) -> Result<Vec<u16>
 // ---------------------------------------------------------------------------
 
 /// Build optimal prefix-code lengths for the given frequencies
-/// (index-sparse; zero frequency = uncoded), capped at 58 bits. Standard
-/// two-queue Huffman over a sorted leaf list; if the depth cap is ever
-/// exceeded the frequencies are halved (rounding up) and the tree is
-/// rebuilt, which strictly flattens it.
-fn build_code_lengths(freqs: &[u64], lengths: &mut [u8]) {
-    #[derive(Clone, Copy)]
-    struct Node {
-        weight: u64,
-        // Leaf: symbol index. Internal: children indices into `nodes`.
-        left: i32,
-        right: i32,
-        sym: i32,
-    }
-
-    let coded: Vec<usize> = (0..freqs.len()).filter(|&i| freqs[i] != 0).collect();
-    if coded.is_empty() {
+/// (index-sparse; zero frequency = uncoded), capped at 58 bits. If the
+/// depth cap is ever exceeded the frequencies are halved (rounding up)
+/// and the tree is rebuilt, which strictly flattens it.
+///
+/// Two-queue construction: the leaves sorted by (weight, symbol) form
+/// one queue, the internal nodes — created in non-decreasing weight
+/// order — the other; each step merges the two lightest heads, a leaf
+/// before an internal node of equal weight. That is the order a
+/// priority queue keyed on (weight, node index) pops them in, without
+/// the queue.
+fn build_code_lengths(freqs: &[u32], lengths: &mut [u8]) {
+    // (weight, symbol), in symbol order.
+    let mut leaves: Vec<(u64, u32)> = freqs
+        .iter()
+        .enumerate()
+        .filter(|&(_, &f)| f != 0)
+        .map(|(s, &f)| (f as u64, s as u32))
+        .collect();
+    let n = leaves.len();
+    if n == 0 {
         return;
     }
-    if coded.len() == 1 {
-        lengths[coded[0]] = 1;
+    if n == 1 {
+        lengths[leaves[0].1 as usize] = 1;
         return;
     }
-    let mut fs: Vec<u64> = coded.iter().map(|&i| freqs[i]).collect();
+    // Node ids: leaves 0..n in sorted order, internal nodes n..2n-1 in
+    // creation order (the last one is the root).
+    let mut parent = vec![0u32; 2 * n - 1];
+    let mut internal = vec![0u64; n - 1];
+    let mut depth = vec![0u32; 2 * n - 1];
     loop {
-        // Heap of (weight, node index); tie-break on node index for
-        // determinism.
-        let mut nodes: Vec<Node> = coded
-            .iter()
-            .zip(fs.iter())
-            .map(|(&s, &w)| Node {
-                weight: w,
-                left: -1,
-                right: -1,
-                sym: s as i32,
-            })
-            .collect();
-        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>> = nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| std::cmp::Reverse((n.weight, i)))
-            .collect();
-        while heap.len() > 1 {
-            let std::cmp::Reverse((wa, a)) = heap.pop().unwrap();
-            let std::cmp::Reverse((wb, b)) = heap.pop().unwrap();
-            let idx = nodes.len();
-            nodes.push(Node {
-                weight: wa + wb,
-                left: a as i32,
-                right: b as i32,
-                sym: -1,
-            });
-            heap.push(std::cmp::Reverse((wa + wb, idx)));
+        // Stable: equal weights stay in symbol order.
+        leaves.sort_by_key(|&(w, _)| w);
+        let (mut leaf, mut node) = (0usize, 0usize);
+        for k in 0..n - 1 {
+            let take = |leaf: &mut usize, node: &mut usize| -> (u64, usize) {
+                if *leaf < n && (*node >= k || leaves[*leaf].0 <= internal[*node]) {
+                    *leaf += 1;
+                    (leaves[*leaf - 1].0, *leaf - 1)
+                } else {
+                    *node += 1;
+                    (internal[*node - 1], n + *node - 1)
+                }
+            };
+            let (wa, a) = take(&mut leaf, &mut node);
+            let (wb, b) = take(&mut leaf, &mut node);
+            internal[k] = wa + wb;
+            parent[a] = (n + k) as u32;
+            parent[b] = (n + k) as u32;
         }
-        // Depth-assign iteratively.
-        let root = heap.pop().unwrap().0.1;
-        let mut stack = vec![(root, 0u8)];
-        let mut max_depth = 0u8;
-        let mut depths: Vec<(usize, u8)> = Vec::with_capacity(coded.len());
-        while let Some((n, d)) = stack.pop() {
-            let node = nodes[n];
-            if node.sym >= 0 {
-                depths.push((node.sym as usize, d.max(1)));
-                max_depth = max_depth.max(d.max(1));
-            } else {
-                stack.push((node.left as usize, d + 1));
-                stack.push((node.right as usize, d + 1));
-            }
+        // A parent is always created after its children: walk down
+        // from the root.
+        depth[2 * n - 2] = 0;
+        for id in (0..2 * n - 2).rev() {
+            depth[id] = depth[parent[id] as usize] + 1;
         }
-        if max_depth as usize <= MAX_CODE_LEN {
-            for (s, d) in depths {
-                lengths[s] = d;
+        if depth[..n].iter().all(|&d| d as usize <= MAX_CODE_LEN) {
+            for (i, &(_, sym)) in leaves.iter().enumerate() {
+                lengths[sym as usize] = depth[i] as u8;
             }
             return;
         }
-        // Flatten: halve frequencies (round up) and rebuild.
-        for f in fs.iter_mut() {
-            *f = (*f >> 1).max(1);
+        // Flatten: halve the frequencies (round up) and rebuild, the
+        // leaves back in symbol order first.
+        leaves.sort_unstable_by_key(|&(_, sym)| sym);
+        for leaf in leaves.iter_mut() {
+            leaf.0 = (leaf.0 >> 1).max(1);
         }
     }
 }
@@ -616,9 +681,12 @@ pub(crate) fn huf_compress(values: &[u16]) -> Result<Vec<u8>> {
             "Huffman payload: nothing to encode".to_string(),
         ));
     }
-    let mut freqs = vec![0u64; ALPHABET];
+    // A chunk holds far fewer than 2^32 words; saturate regardless (a
+    // saturated count only makes the code marginally less tight).
+    let mut freqs = vec![0u32; ALPHABET];
     for &v in values {
-        freqs[v as usize] += 1;
+        let f = &mut freqs[v as usize];
+        *f = f.saturating_add(1);
     }
     let im = freqs.iter().position(|&f| f != 0).unwrap();
     let max_val = freqs.iter().rposition(|&f| f != 0).unwrap();
@@ -635,34 +703,40 @@ pub(crate) fn huf_compress(values: &[u16]) -> Result<Vec<u8>> {
         .map(|s| s as u32)
         .collect();
     let (_first, codes) = canonical_codes(&lengths, &syms);
-    // Dense lookup: symbol -> (code, len).
-    let mut code_of = vec![(0u64, 0u8); ALPHABET];
+    // Dense lookup: symbol -> code << 6 | length (codes are at most
+    // 58 bits). Only the coded range is touched.
+    let mut code_of = vec![0u64; i_m + 1];
     for (i, &s) in syms.iter().enumerate() {
-        code_of[s as usize] = (codes[i], lengths[s as usize]);
+        code_of[s as usize] = (codes[i] << 6) | lengths[s as usize] as u64;
     }
 
     let table = pack_code_lengths(&lengths, im, i_m);
 
     // Entropy-code the values with the run-length escape.
-    let (esc_code, esc_len) = code_of[i_m];
-    let mut w = BitWriter::new();
+    let (esc_code, esc_len) = (code_of[i_m] >> 6, (code_of[i_m] & 63) as u32);
+    let mut w = BitWriter::with_capacity(values.len());
     let mut i = 0usize;
     while i < values.len() {
         let v = values[i];
-        // Count additional repeats, saturating at 255.
-        let mut c = 0usize;
-        while c < 255 && i + 1 + c < values.len() && values[i + 1 + c] == v {
-            c += 1;
-        }
-        let (code, len) = code_of[v as usize];
+        let entry = code_of[v as usize];
+        let (code, len) = (entry >> 6, (entry & 63) as u32);
         debug_assert!(len != 0);
+        // Most values do not repeat: one compare, one code.
+        if i + 1 == values.len() || values[i + 1] != v {
+            w.put(code, len);
+            i += 1;
+            continue;
+        }
+        // Count additional repeats, saturating at 255.
+        let window = &values[i + 1..(i + 256).min(values.len())];
+        let c = window.iter().position(|&x| x != v).unwrap_or(window.len());
         if (len as usize) + (esc_len as usize) + 8 < (len as usize) * c {
-            w.put(code, len as u32);
-            w.put(esc_code, esc_len as u32);
+            w.put(code, len);
+            w.put(esc_code, esc_len);
             w.put(c as u64, 8);
         } else {
             for _ in 0..=c {
-                w.put(code, len as u32);
+                w.put(code, len);
             }
         }
         i += 1 + c;
@@ -688,6 +762,211 @@ pub(crate) fn huf_compress(values: &[u16]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The priority-queue construction `build_code_lengths` replaced:
+    /// pops the two lightest nodes by (weight, node index). Kept as the
+    /// reference the two-queue construction must agree with, length for
+    /// length.
+    fn reference_code_lengths(freqs: &[u64], lengths: &mut [u8]) {
+        #[derive(Clone, Copy)]
+        struct Node {
+            weight: u64,
+            // Leaf: symbol index. Internal: children indices into `nodes`.
+            left: i32,
+            right: i32,
+            sym: i32,
+        }
+
+        let coded: Vec<usize> = (0..freqs.len()).filter(|&i| freqs[i] != 0).collect();
+        if coded.is_empty() {
+            return;
+        }
+        if coded.len() == 1 {
+            lengths[coded[0]] = 1;
+            return;
+        }
+        let mut fs: Vec<u64> = coded.iter().map(|&i| freqs[i]).collect();
+        loop {
+            // Heap of (weight, node index); tie-break on node index for
+            // determinism.
+            let mut nodes: Vec<Node> = coded
+                .iter()
+                .zip(fs.iter())
+                .map(|(&s, &w)| Node {
+                    weight: w,
+                    left: -1,
+                    right: -1,
+                    sym: s as i32,
+                })
+                .collect();
+            let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>> = nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| std::cmp::Reverse((n.weight, i)))
+                .collect();
+            while heap.len() > 1 {
+                let std::cmp::Reverse((wa, a)) = heap.pop().unwrap();
+                let std::cmp::Reverse((wb, b)) = heap.pop().unwrap();
+                let idx = nodes.len();
+                nodes.push(Node {
+                    weight: wa + wb,
+                    left: a as i32,
+                    right: b as i32,
+                    sym: -1,
+                });
+                heap.push(std::cmp::Reverse((wa + wb, idx)));
+            }
+            // Depth-assign iteratively.
+            let root = heap.pop().unwrap().0.1;
+            let mut stack = vec![(root, 0u32)];
+            let mut max_depth = 0u32;
+            let mut depths: Vec<(usize, u32)> = Vec::with_capacity(coded.len());
+            while let Some((n, d)) = stack.pop() {
+                let node = nodes[n];
+                if node.sym >= 0 {
+                    depths.push((node.sym as usize, d.max(1)));
+                    max_depth = max_depth.max(d.max(1));
+                } else {
+                    stack.push((node.left as usize, d + 1));
+                    stack.push((node.right as usize, d + 1));
+                }
+            }
+            if max_depth as usize <= MAX_CODE_LEN {
+                for (s, d) in depths {
+                    lengths[s] = d as u8;
+                }
+                return;
+            }
+            // Flatten: halve frequencies (round up) and rebuild.
+            for f in fs.iter_mut() {
+                *f = (*f >> 1).max(1);
+            }
+        }
+    }
+
+    /// Decode at every table width; outcomes (values or error text)
+    /// must be the same.
+    fn decode_all_widths(payload: &[u8], expected: usize) -> Result<Vec<u16>> {
+        let narrow = huf_decompress_with(payload, expected, Some(FAST_BITS));
+        for bits in [15, WIDE_FAST_BITS] {
+            let wide = huf_decompress_with(payload, expected, Some(bits));
+            match (&narrow, &wide) {
+                (Ok(a), Ok(b)) => assert!(a == b, "values differ at {bits} bits"),
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{bits} bits"),
+                _ => panic!("outcome differs at {bits} bits"),
+            }
+        }
+        let auto = huf_decompress(payload, expected);
+        assert_eq!(auto.is_ok(), narrow.is_ok());
+        narrow
+    }
+
+    #[test]
+    fn every_table_width_decodes_alike() {
+        let mut state = 0x0F0F_1234_5678_9ABCu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..40 {
+            // Alphabets from a handful of symbols (short codes, long
+            // runs) to the full 16-bit range (codes past 16 bits).
+            let spread = [4u64, 300, 5000, 65536][round % 4];
+            let n = 1 + (next() % 200_000) as usize;
+            let values: Vec<u16> = (0..n)
+                .map(|i| {
+                    let v = next() % spread;
+                    // Skew plus occasional runs.
+                    if i % 97 < 5 {
+                        7
+                    } else {
+                        (v * (next() % 3)) as u16
+                    }
+                })
+                .collect();
+            let payload = huf_compress(&values).unwrap();
+            assert!(decode_all_widths(&payload, n).unwrap() == values);
+            // Too many / too few values asked for, truncated data,
+            // damaged bytes: same outcome at every width.
+            let _ = decode_all_widths(&payload, n + 3);
+            let _ = decode_all_widths(&payload, n.saturating_sub(2).max(1));
+            for cut in [1usize, 2, 9, 40] {
+                let _ = decode_all_widths(&payload[..payload.len().saturating_sub(cut).max(20)], n);
+            }
+            let mut bad = payload.clone();
+            for _ in 0..12 {
+                let at = (next() % bad.len() as u64) as usize;
+                bad[at] ^= 1 << (next() % 8);
+                let _ = decode_all_widths(&bad, n);
+            }
+        }
+    }
+
+    fn agree(freqs: &[u32]) {
+        let mut fast = vec![0u8; freqs.len()];
+        build_code_lengths(freqs, &mut fast);
+        let wide: Vec<u64> = freqs.iter().map(|&f| f as u64).collect();
+        let mut reference = vec![0u8; freqs.len()];
+        reference_code_lengths(&wide, &mut reference);
+        assert!(
+            fast == reference,
+            "code lengths differ for {} symbols",
+            freqs.len()
+        );
+    }
+
+    #[test]
+    fn two_queue_lengths_match_the_priority_queue_construction() {
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Random shapes: dense and sparse alphabets, flat and skewed
+        // weights, many ties.
+        for round in 0..300 {
+            let size = 1 + (next() % 3000) as usize;
+            let skew = (next() % 20) as u32;
+            let freqs: Vec<u32> = (0..size)
+                .map(|_| match round % 4 {
+                    0 => (next() % 4) as u32,
+                    1 => 1,
+                    2 => ((next() % 1000) as u32) >> (next() % (skew + 1) as u64).min(9),
+                    _ => (1u32 << (next() % 24)) * (next() % 2) as u32,
+                })
+                .collect();
+            agree(&freqs);
+        }
+        // Full alphabet, as a FLOAT chunk of noise produces.
+        let full: Vec<u32> = (0..ALPHABET).map(|_| 1 + (next() % 9) as u32).collect();
+        agree(&full);
+        // Degenerate cases.
+        agree(&[0, 0, 0]);
+        agree(&[0, 7, 0]);
+        agree(&[5, 5]);
+        // Fibonacci weights: the deepest tree a total allows — past the
+        // 58-bit cap, so the halving path runs.
+        let mut fib = vec![1u32, 1];
+        while fib.len() < 46 {
+            let n = fib.len();
+            fib.push(fib[n - 1] + fib[n - 2]);
+        }
+        agree(&fib);
+        let mut deep = vec![0u8; 80];
+        let mut weights = vec![1u32; 80];
+        for i in 2..80 {
+            weights[i] = weights[i - 1]
+                .saturating_add(weights[i - 2])
+                .min(u32::MAX / 2);
+        }
+        build_code_lengths(&weights, &mut deep);
+        assert!(deep.iter().all(|&l| (1..=MAX_CODE_LEN as u8).contains(&l)));
+        agree(&weights);
+    }
 
     fn roundtrip(values: &[u16]) {
         let payload = huf_compress(values).unwrap();
@@ -767,7 +1046,7 @@ mod tests {
         // must be rejected rather than run the fast table past its end.
         let im = 0usize;
         let i_m = 2usize;
-        let mut body = BitWriter::new();
+        let mut body = BitWriter::with_capacity(0);
         // Three explicit 6-bit lengths, all 1.
         for _ in 0..3 {
             body.put(1, 6);

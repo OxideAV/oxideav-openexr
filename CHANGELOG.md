@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Duplicate part names in the multi-part writers are `ExrError::Layout(DuplicatePartName)` (was `InvalidData`).
 - `decode_with` on a multi-part file decodes only the selected part (it decoded every part and kept one); `decode_all` reads each flat part through the single-part reader.
 - Tile writers build payloads from row slices (type dispatch outside the sample loop) and the colour view is filled in place: serial NONE decode 179 → 267 Mpx/s (FLOAT 318 → 574).
+- Huffman container (PIZ, DWA AC stream): code lengths from a two-queue merge instead of a priority queue — the same lengths, so the same bytes (pinned against the previous construction) — and a decoder that resolves several table codes per refill, with a 16-bit lookup table on large chunks with long codes (same results at every table width, pinned). PIZ FLOAT encode 9 → 18 Mpx/s, PIZ HALF decode 41 → 55 Mpx/s serial.
 - A file without `displayWindow` is read with the data window standing in (conforming readers accept it; in a multi-part file the rule is agreement between parts, not presence).
 - A multi-part file whose deep flag does not match its parts is read (strict mode reports it).
 - The container muxer / demuxer repack through `layout` (same bytes for regular files; `name` / `type` / `chunkCount` are inserted in byte-wise name order when the header is sorted).
